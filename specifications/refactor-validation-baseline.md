@@ -104,3 +104,25 @@ preview-fallback interaction acceptance was not performed.
   save/reopen, preview fallback) is still awaiting direct interaction. The
   local host has only the arm64 Rust target and cannot run x86_64 binaries
   because Rosetta is unavailable; the x86_64 golden remains unconfirmed.
+
+## Final merge-gate rerun (2026-10-01)
+
+- The connected iPad Pro was used for the requested physical flows. The user
+  confirmed the result looked good after checking long strokes, brush
+  switching, undo/redo, save/reopen, and preview fallback.
+- The device trace recorded a maximum rolling p95 pointer-to-visible latency
+  of 20.35 ms against the 40 ms Apple Silicon target, with no rejected packets
+  or rejected confirmed samples. It showed one sequence discontinuity at the
+  transition between Flutter touch and native Pencil input. Those adapters
+  maintain independent sequence counters, so the trace previously compared
+  unrelated values. The diagnostic now tracks continuity separately by input
+  source; a regression test covers the transition and still detects gaps
+  within a source.
+- After the diagnostic change, `flutter analyze` passed and all 342 Flutter
+  tests passed. `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 flutter build
+  ios --debug --no-codesign` and `CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_INCREMENTAL=0 flutter build macos --debug` both passed.
+- Rust workspace tests, formatting, Clippy, and performance thresholds remain
+  passing from the current-branch gate run above; the final changes touch only
+  Dart diagnostics and its test. The x86_64 golden remains unverified on this
+  host because Rosetta and the x86_64 Rust target are unavailable.

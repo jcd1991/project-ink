@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/canvas/performance_trace.dart';
@@ -141,5 +142,27 @@ void main() {
     expect(snapshot.rejectedConfirmedSampleCount, 1);
     expect(snapshot.toJson()['confirmed_sample_count'], 2);
     expect(snapshot.toJson()['input_sequence_gap_count'], 1);
+  });
+
+  test('tracks sequence continuity independently for each input source', () {
+    final trace = Phase1PerformanceTrace();
+
+    Uint8List packet(int sequence) => encodePointerPacket(
+      pointerId: 1,
+      device: InkPointerDevice.stylus,
+      phase: InkPointerPhase.move,
+      x: 10,
+      y: 10,
+      pressure: 1,
+      timestampNs: sequence,
+      sequence: sequence,
+    );
+
+    trace.markPacketReceivedFromSource(packet(620), source: 'flutter_pointer');
+    trace.markPacketReceivedFromSource(packet(0), source: 'native_pencil');
+    trace.markPacketReceivedFromSource(packet(1), source: 'native_pencil');
+    trace.markPacketReceivedFromSource(packet(621), source: 'flutter_pointer');
+
+    expect(trace.snapshot().inputSequenceGapCount, 0);
   });
 }

@@ -158,11 +158,20 @@ class Phase1PerformanceTrace {
   int _rejectedConfirmedSampleCount = 0;
   int _visibleUpdateCount = 0;
   int _dirtyTileCount = 0;
-  int? _lastInputSequence;
+  final Map<String, int> _lastInputSequenceBySource = <String, int>{};
 
-  int markPacketReceived([Uint8List? packet]) {
+  int markPacketReceived([Uint8List? packet]) =>
+      _markPacketReceived(packet, source: 'default');
+
+  /// Records a packet whose sequence space is independent of other inputs.
+  int markPacketReceivedFromSource(
+    Uint8List packet, {
+    required String source,
+  }) => _markPacketReceived(packet, source: source);
+
+  int _markPacketReceived(Uint8List? packet, {required String source}) {
     _packetCount++;
-    if (packet != null) _recordPacket(packet);
+    if (packet != null) _recordPacket(packet, source: source);
     return _clock.elapsedMicroseconds;
   }
 
@@ -235,18 +244,18 @@ class Phase1PerformanceTrace {
     rejectedConfirmedSampleCount: _rejectedConfirmedSampleCount,
   );
 
-  void _recordPacket(Uint8List packet) {
+  void _recordPacket(Uint8List packet, {required String source}) {
     final summary = summarizePointerPacket(packet);
     _sampleCount += summary.sampleCount;
     _confirmedSampleCount += summary.confirmedSampleCount;
     _predictedSampleCount += summary.predictedSampleCount;
     for (final sequence in summary.sequences) {
-      final previous = _lastInputSequence;
+      final previous = _lastInputSequenceBySource[source];
       if (previous != null) {
         final expected = (previous + 1) & 0xffffffff;
         if (sequence != expected) _inputSequenceGapCount++;
       }
-      _lastInputSequence = sequence;
+      _lastInputSequenceBySource[source] = sequence;
     }
   }
 

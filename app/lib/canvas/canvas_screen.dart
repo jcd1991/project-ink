@@ -2879,7 +2879,10 @@ class _CanvasScreenState extends State<CanvasScreen>
       _lastPacketMicros = null;
     } else {
       try {
-        _lastPacketMicros = _performanceTrace.markPacketReceived(packet);
+        _lastPacketMicros = _performanceTrace.markPacketReceivedFromSource(
+          packet,
+          source: 'native_pencil',
+        );
       } catch (error, stack) {
         _canvasDiagnostics.recordError('native_pointer_packet', error, stack);
         debugPrint(
@@ -4360,7 +4363,10 @@ class _CanvasScreenState extends State<CanvasScreen>
     _lastPacketMicros =
         widget.onPerformanceSnapshot == null
             ? null
-            : _performanceTrace.markPacketReceived(encodedPacket);
+            : _performanceTrace.markPacketReceivedFromSource(
+              encodedPacket,
+              source: 'flutter_pointer',
+            );
     try {
       await widget.engine.pushPointerPacket(encodedPacket);
       _livePreviewSurface?.pump();
