@@ -26,14 +26,17 @@ class AutosaveCoordinator {
 
   Timer? _timer;
   Future<void>? _activeSave;
+  Completer<void>? _continuousEditEnded;
   Object? _lastError;
   bool _dirty = false;
   bool _hasSavedCheckpoint;
   bool _disposed = false;
+  int _continuousEditCount = 0;
 
   bool get isDirty => _dirty;
   bool get isSaving => _activeSave != null;
   Object? get lastError => _lastError;
+  bool get autosaveDeferred => _continuousEditCount > 0;
 
   AutosaveState get state => AutosaveState(
     dirty: _dirty,
@@ -57,12 +60,45 @@ class AutosaveCoordinator {
     _notify();
   }
 
+  /// Defer checkpoints while a continuous drawing/editing gesture is active.
+  /// Saving flushes the Rust render worker and holds the document bridge lock;
+  /// doing that in the middle of a stroke can block incoming pointer packets.
+  void beginContinuousEdit() {
+    if (_disposed) return;
+    _continuousEditCount++;
+    if (_continuousEditCount == 1) {
+      _timer?.cancel();
+      _timer = null;
+    }
+    _notify();
+  }
+
+  /// Resume checkpoint scheduling after the last active continuous edit ends.
+  void endContinuousEdit() {
+    if (_continuousEditCount == 0) return;
+    _continuousEditCount--;
+    if (_continuousEditCount == 0) {
+      final waiter = _continuousEditEnded;
+      _continuousEditEnded = null;
+      if (waiter != null && !waiter.isCompleted) waiter.complete();
+      if (_dirty && _activeSave == null && !_disposed) _schedule();
+    }
+    _notify();
+  }
+
   /// Save immediately, waiting for any save already in flight first.
   Future<void> flush() async {
     if (_disposed) return;
-    _timer?.cancel();
-    _timer = null;
-    while (_dirty || _activeSave != null) {
+    while (true) {
+      if (_continuousEditCount > 0) {
+        final waiter = _continuousEditEnded ??= Completer<void>();
+        await waiter.future;
+        if (_disposed) return;
+        continue;
+      }
+      _timer?.cancel();
+      _timer = null;
+      if (!_dirty && _activeSave == null) return;
       final active = _activeSave;
       if (active != null) {
         await active;
@@ -83,6 +119,7 @@ class AutosaveCoordinator {
   }
 
   void _schedule() {
+    if (_continuousEditCount > 0) return;
     _timer?.cancel();
     _timer = Timer(debounce, () {
       _timer = null;
@@ -99,6 +136,7 @@ class AutosaveCoordinator {
   }
 
   Future<void> _saveNow() {
+    if (_continuousEditCount > 0) return Future<void>.value();
     final active = _activeSave;
     if (active != null) return active;
     if (!_dirty || _disposed) return Future<void>.value();
