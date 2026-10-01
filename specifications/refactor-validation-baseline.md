@@ -8,7 +8,6 @@ Captured before the Rust and Dart/Flutter refactor on 2026-10-01.
 - Rust: 1.98.1
 - Flutter: 3.47.5
 - Dart: 3.13.4
-- Initial local repository commit: `1e71e93`
 - Refactor branch: `refactor/rust-flutter-boundaries`
 
 ## Checks
