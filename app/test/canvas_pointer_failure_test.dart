@@ -459,8 +459,9 @@ void main() {
         await gesture.moveTo(
           center + Offset(math.cos(angle) * radius, math.sin(angle) * radius),
         );
-        if (index % 12 == 0)
+        if (index % 12 == 0) {
           await tester.pump(const Duration(milliseconds: 16));
+        }
       }
       await tester.pump();
 
