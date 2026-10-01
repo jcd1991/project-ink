@@ -24,10 +24,13 @@ the engine adapter so each platform can select a directory-backed project
 without duplicating document state.
 
 `AutosaveCoordinator` is the local checkpoint seam for an open path. It
-coalesces pointer/command mutations, allows periodic saves during long
-strokes, never overlaps Rust saves, and keeps the revision dirty after an
-error so the next explicit flush can retry. The production entry point always
-provides an app-owned recovery path under `Project Ink/Recovery/` and reopens
+coalesces pointer/command mutations and defers checkpoints while a continuous
+edit such as a stroke is active, avoiding a Rust bridge save during incoming
+pointer packets. It resumes checkpoint scheduling when the last edit ends;
+an explicit flush waits for active edits and never overlaps Rust saves. A save
+error keeps the revision dirty so a later explicit flush can retry. The
+production entry point always provides an app-owned recovery path under
+`Project Ink/Recovery/` and reopens
 that checkpoint on the next launch; an explicit Save still writes the named
 portable project selected by the user. Embedders can pass a different
 `autosavePath` to `ProjectInkApp` when they own the document session.

@@ -7,6 +7,7 @@
 /artifacts/
 /outputs/*.apk
 /app/outputs/*.apk
+/app/test/failures/
 
 # Flutter/Dart
 app/.dart_tool/
