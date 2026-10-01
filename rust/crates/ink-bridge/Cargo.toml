@@ -21,10 +21,9 @@ ink-storage = { path = "../ink-storage" }
 ink-live-render = { path = "../ink-live-render" }
 
 [lints.rust]
-# flutter_rust_bridge's generated transport contains narrowly-scoped FFI
-# unsafe blocks. Handwritten `api.rs` remains unsafe-free and is reviewed
-# independently from the generated bindings.
-unsafe_code = "allow"
+# The handwritten Apple Metal texture handoff is the only unsafe operation
+# in `api.rs`; generated FRB transport is isolated in its own allowed module.
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [lints.clippy]

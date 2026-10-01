@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2055265610;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 738829651;
 
 // Section: executor
 
@@ -1085,6 +1085,61 @@ fn wire__crate__api__cancel_stroke_impl(
                     }
                     let mut api_handle_guard = api_handle_guard.unwrap();
                     let output_ok = crate::api::cancel_stroke(&mut *api_handle_guard)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__capture_composite_tiles_snapshot_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "capture_composite_tiles_snapshot",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_handle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DocumentHandle>,
+            >>::sse_decode(&mut deserializer);
+            let api_coordinates = <Vec<i32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, EngineError>((move || {
+                    let mut api_handle_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_handle,
+                                0,
+                                false,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_handle_guard = Some(api_handle.lockable_decode_sync_ref()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let api_handle_guard = api_handle_guard.unwrap();
+                    let output_ok = crate::api::capture_composite_tiles_snapshot(
+                        &*api_handle_guard,
+                        &api_coordinates,
+                    )?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -3489,6 +3544,60 @@ fn wire__crate__api__commit_staged_brush_import_impl(
                         &mut *api_handle_guard,
                         api_operation_id,
                     )?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__compose_composite_tiles_snapshot_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "compose_composite_tiles_snapshot",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_snapshot = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<
+                    CompositeTilesSnapshotHandle,
+                >,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, EngineError>((move || {
+                    let mut api_snapshot_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_snapshot,
+                                0,
+                                false,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_snapshot_guard = Some(api_snapshot.lockable_decode_sync_ref()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let api_snapshot_guard = api_snapshot_guard.unwrap();
+                    let output_ok =
+                        crate::api::compose_composite_tiles_snapshot(&*api_snapshot_guard)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -6822,61 +6931,6 @@ fn wire__crate__api__read_composite_tile_impl(
                     let api_handle_guard = api_handle_guard.unwrap();
                     let output_ok =
                         crate::api::read_composite_tile(&*api_handle_guard, api_x, api_y)?;
-                    std::result::Result::Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
-fn wire__crate__api__read_composite_tiles_snapshot_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "read_composite_tiles_snapshot",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_handle = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DocumentHandle>,
-            >>::sse_decode(&mut deserializer);
-            let api_coordinates = <Vec<i32>>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, EngineError>((move || {
-                    let mut api_handle_guard = None;
-                    let decode_indices_ =
-                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
-                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                &api_handle,
-                                0,
-                                false,
-                            ),
-                        ]);
-                    for i in decode_indices_ {
-                        match i {
-                            0 => api_handle_guard = Some(api_handle.lockable_decode_sync_ref()),
-                            _ => unreachable!(),
-                        }
-                    }
-                    let api_handle_guard = api_handle_guard.unwrap();
-                    let output_ok = crate::api::read_composite_tiles_snapshot(
-                        &*api_handle_guard,
-                        &api_coordinates,
-                    )?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -10526,6 +10580,9 @@ flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
+    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>
+);
+flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DocumentHandle>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
@@ -10557,6 +10614,16 @@ impl SseDecode for ComicProjectHandle {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <RustOpaqueMoi<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>,
+        >>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
+    }
+}
+
+impl SseDecode for CompositeTilesSnapshotHandle {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <RustOpaqueMoi<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
         >>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
     }
@@ -10644,6 +10711,18 @@ impl SseDecode for StudioProjectHandle {
 
 impl SseDecode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <usize>::sse_decode(deserializer);
+        return decode_rust_opaque_moi(inner);
+    }
+}
+
+impl SseDecode
+    for RustOpaqueMoi<
+        flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+    >
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -11622,233 +11701,242 @@ fn pde_ffi_dispatcher_primary_impl(
         17 => wire__crate__api__cancel_brush_draft_impl(port, ptr, rust_vec_len, data_len),
         18 => wire__crate__api__cancel_live_surface_stroke_impl(port, ptr, rust_vec_len, data_len),
         19 => wire__crate__api__cancel_stroke_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__checkpoint_project_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__clear_selection_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__close_comic_project_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__close_document_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__close_studio_project_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__comic_add_balloon_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__comic_add_effect_line_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__comic_add_material_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__comic_add_page_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__comic_add_panel_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__comic_add_print_page_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__comic_add_styled_balloon_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__comic_add_tone_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__comic_batch_export_page_manifests_impl(
+        20 => wire__crate__api__capture_composite_tiles_snapshot_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => wire__crate__api__comic_batch_export_pages_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__comic_batch_export_webtoon_segments_impl(
+        21 => wire__crate__api__checkpoint_project_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__clear_selection_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__close_comic_project_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__close_document_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__close_studio_project_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__comic_add_balloon_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__comic_add_effect_line_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__comic_add_material_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__comic_add_page_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__comic_add_panel_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__comic_add_print_page_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__comic_add_styled_balloon_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__comic_add_tone_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__comic_batch_export_page_manifests_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__api__comic_print_preview_report_impl(port, ptr, rust_vec_len, data_len),
-        37 => {
+        35 => wire__crate__api__comic_batch_export_pages_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__comic_batch_export_webtoon_segments_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        37 => wire__crate__api__comic_print_preview_report_impl(port, ptr, rust_vec_len, data_len),
+        38 => {
             wire__crate__api__comic_project_export_manifest_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__comic_project_from_json_impl(port, ptr, rust_vec_len, data_len),
-        39 => {
+        39 => wire__crate__api__comic_project_from_json_impl(port, ptr, rust_vec_len, data_len),
+        40 => {
             wire__crate__api__comic_project_portable_digest_impl(port, ptr, rust_vec_len, data_len)
         }
-        40 => wire__crate__api__comic_project_snapshot_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__comic_project_to_json_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__comic_remove_effect_line_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__comic_remove_material_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__comic_remove_tone_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__comic_render_page_preview_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__comic_reorder_page_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__comic_resize_gutter_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__comic_search_dialogue_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__comic_set_balloon_style_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__comic_set_balloon_tail_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__comic_set_dialogue_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__comic_set_effect_line_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__comic_set_page_layout_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__comic_set_panel_bounds_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__comic_set_panel_polygon_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__comic_set_tone_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__comic_split_panel_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__comic_webtoon_segments_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__commit_brush_draft_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__commit_staged_brush_import_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__connect_vector_strokes_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__convert_brush_import_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__convert_staged_brush_import_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__create_comic_project_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__create_default_document_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__create_document_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__create_live_surface_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__create_panel_layer_tree_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__create_studio_project_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__create_studio_project_from_json_impl(
+        41 => wire__crate__api__comic_project_snapshot_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__comic_project_to_json_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__comic_remove_effect_line_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__comic_remove_material_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__comic_remove_tone_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__comic_render_page_preview_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__comic_reorder_page_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__comic_resize_gutter_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__comic_search_dialogue_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__comic_set_balloon_style_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__comic_set_balloon_tail_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__comic_set_dialogue_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__comic_set_effect_line_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__comic_set_page_layout_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__comic_set_panel_bounds_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__comic_set_panel_polygon_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__comic_set_tone_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__comic_split_panel_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__comic_webtoon_segments_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__commit_brush_draft_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__commit_staged_brush_import_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__compose_composite_tiles_snapshot_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => wire__crate__api__create_studio_xkcd_stick_figure_project_impl(
+        63 => wire__crate__api__connect_vector_strokes_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__convert_brush_import_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__convert_staged_brush_import_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__create_comic_project_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__create_default_document_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__create_document_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__create_live_surface_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__create_panel_layer_tree_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__create_studio_project_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__create_studio_project_from_json_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => {
+        73 => wire__crate__api__create_studio_xkcd_stick_figure_project_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        74 => {
             wire__crate__api__create_xkcd_stick_figure_comic_impl(port, ptr, rust_vec_len, data_len)
         }
-        73 => wire__crate__api__delete_layer_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__delete_project_layer_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__detach_live_surface_impl(port, ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__discard_staged_brush_import_impl(port, ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__dispatch_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__dispatch_project_command_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__dispose_live_surface_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__document_info_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__drain_events_impl(port, ptr, rust_vec_len, data_len),
-        82 => {
+        75 => wire__crate__api__delete_layer_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__delete_project_layer_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__detach_live_surface_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__discard_staged_brush_import_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__dispatch_impl(port, ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__dispatch_project_command_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__dispose_live_surface_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__document_info_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__drain_events_impl(port, ptr, rust_vec_len, data_len),
+        84 => {
             wire__crate__api__drain_live_dab_overflow_count_impl(port, ptr, rust_vec_len, data_len)
         }
-        83 => wire__crate__api__drain_live_dabs_impl(port, ptr, rust_vec_len, data_len),
-        84 => {
+        85 => wire__crate__api__drain_live_dabs_impl(port, ptr, rust_vec_len, data_len),
+        86 => {
             wire__crate__api__drain_stroke_acknowledgements_impl(port, ptr, rust_vec_len, data_len)
         }
-        85 => wire__crate__api__drain_tile_updates_impl(port, ptr, rust_vec_len, data_len),
-        86 => wire__crate__api__duplicate_brush_impl(port, ptr, rust_vec_len, data_len),
-        87 => wire__crate__api__duplicate_layer_impl(port, ptr, rust_vec_len, data_len),
-        88 => wire__crate__api__duplicate_project_layer_impl(port, ptr, rust_vec_len, data_len),
-        89 => wire__crate__api__end_stroke_impl(port, ptr, rust_vec_len, data_len),
-        90 => wire__crate__api__engine_health_impl(port, ptr, rust_vec_len, data_len),
-        91 => wire__crate__api__erase_vector_segment_impl(port, ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__export_brush_impl(port, ptr, rust_vec_len, data_len),
-        93 => wire__crate__api__export_document_impl(port, ptr, rust_vec_len, data_len),
-        94 => wire__crate__api__export_png_impl(port, ptr, rust_vec_len, data_len),
-        95 => wire__crate__api__export_time_lapse_impl(port, ptr, rust_vec_len, data_len),
-        96 => wire__crate__api__fill_region_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__crate__api__gradient_fill_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__grow_selection_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__history_snapshot_impl(port, ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__import_brush_impl(port, ptr, rust_vec_len, data_len),
-        101 => wire__crate__api__import_brush_pack_verified_impl(port, ptr, rust_vec_len, data_len),
-        102 => wire__crate__api__import_brush_verified_impl(port, ptr, rust_vec_len, data_len),
-        103 => wire__crate__api__import_image_brush_impl(port, ptr, rust_vec_len, data_len),
-        104 => {
+        87 => wire__crate__api__drain_tile_updates_impl(port, ptr, rust_vec_len, data_len),
+        88 => wire__crate__api__duplicate_brush_impl(port, ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__duplicate_layer_impl(port, ptr, rust_vec_len, data_len),
+        90 => wire__crate__api__duplicate_project_layer_impl(port, ptr, rust_vec_len, data_len),
+        91 => wire__crate__api__end_stroke_impl(port, ptr, rust_vec_len, data_len),
+        92 => wire__crate__api__engine_health_impl(port, ptr, rust_vec_len, data_len),
+        93 => wire__crate__api__erase_vector_segment_impl(port, ptr, rust_vec_len, data_len),
+        94 => wire__crate__api__export_brush_impl(port, ptr, rust_vec_len, data_len),
+        95 => wire__crate__api__export_document_impl(port, ptr, rust_vec_len, data_len),
+        96 => wire__crate__api__export_png_impl(port, ptr, rust_vec_len, data_len),
+        97 => wire__crate__api__export_time_lapse_impl(port, ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__fill_region_impl(port, ptr, rust_vec_len, data_len),
+        99 => wire__crate__api__gradient_fill_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__grow_selection_impl(port, ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__history_snapshot_impl(port, ptr, rust_vec_len, data_len),
+        102 => wire__crate__api__import_brush_impl(port, ptr, rust_vec_len, data_len),
+        103 => wire__crate__api__import_brush_pack_verified_impl(port, ptr, rust_vec_len, data_len),
+        104 => wire__crate__api__import_brush_verified_impl(port, ptr, rust_vec_len, data_len),
+        105 => wire__crate__api__import_image_brush_impl(port, ptr, rust_vec_len, data_len),
+        106 => {
             wire__crate__api__import_krita_bundle_verified_impl(port, ptr, rust_vec_len, data_len)
         }
-        105 => wire__crate__api__inspect_brush_import_impl(port, ptr, rust_vec_len, data_len),
-        106 => wire__crate__api__invert_selection_impl(port, ptr, rust_vec_len, data_len),
-        107 => wire__crate__api__layer_summaries_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__crate__api__layers_impl(port, ptr, rust_vec_len, data_len),
-        109 => wire__crate__api__liquify_layer_impl(port, ptr, rust_vec_len, data_len),
-        110 => wire__crate__api__live_surface_native_device_handle_impl(
+        107 => wire__crate__api__inspect_brush_import_impl(port, ptr, rust_vec_len, data_len),
+        108 => wire__crate__api__invert_selection_impl(port, ptr, rust_vec_len, data_len),
+        109 => wire__crate__api__layer_summaries_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__crate__api__layers_impl(port, ptr, rust_vec_len, data_len),
+        111 => wire__crate__api__liquify_layer_impl(port, ptr, rust_vec_len, data_len),
+        112 => wire__crate__api__live_surface_native_device_handle_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        111 => wire__crate__api__merge_layers_impl(port, ptr, rust_vec_len, data_len),
-        112 => wire__crate__api__mesh_layer_impl(port, ptr, rust_vec_len, data_len),
-        113 => wire__crate__api__move_layer_impl(port, ptr, rust_vec_len, data_len),
-        114 => wire__crate__api__navigate_history_impl(port, ptr, rust_vec_len, data_len),
-        115 => wire__crate__api__open_document_impl(port, ptr, rust_vec_len, data_len),
-        116 => wire__crate__api__open_studio_project_impl(port, ptr, rust_vec_len, data_len),
-        117 => wire__crate__api__perspective_layer_impl(port, ptr, rust_vec_len, data_len),
-        118 => wire__crate__api__project_active_document_impl(port, ptr, rust_vec_len, data_len),
-        119 => wire__crate__api__project_can_redo_impl(port, ptr, rust_vec_len, data_len),
-        120 => wire__crate__api__project_can_undo_impl(port, ptr, rust_vec_len, data_len),
-        121 => wire__crate__api__project_snapshot_impl(port, ptr, rust_vec_len, data_len),
-        122 => wire__crate__api__push_pointer_packet_impl(port, ptr, rust_vec_len, data_len),
-        123 => {
+        113 => wire__crate__api__merge_layers_impl(port, ptr, rust_vec_len, data_len),
+        114 => wire__crate__api__mesh_layer_impl(port, ptr, rust_vec_len, data_len),
+        115 => wire__crate__api__move_layer_impl(port, ptr, rust_vec_len, data_len),
+        116 => wire__crate__api__navigate_history_impl(port, ptr, rust_vec_len, data_len),
+        117 => wire__crate__api__open_document_impl(port, ptr, rust_vec_len, data_len),
+        118 => wire__crate__api__open_studio_project_impl(port, ptr, rust_vec_len, data_len),
+        119 => wire__crate__api__perspective_layer_impl(port, ptr, rust_vec_len, data_len),
+        120 => wire__crate__api__project_active_document_impl(port, ptr, rust_vec_len, data_len),
+        121 => wire__crate__api__project_can_redo_impl(port, ptr, rust_vec_len, data_len),
+        122 => wire__crate__api__project_can_undo_impl(port, ptr, rust_vec_len, data_len),
+        123 => wire__crate__api__project_snapshot_impl(port, ptr, rust_vec_len, data_len),
+        124 => wire__crate__api__push_pointer_packet_impl(port, ptr, rust_vec_len, data_len),
+        125 => {
             wire__crate__api__push_project_pointer_packet_impl(port, ptr, rust_vec_len, data_len)
         }
-        124 => wire__crate__api__read_comic_project_impl(port, ptr, rust_vec_len, data_len),
-        125 => wire__crate__api__read_composite_tile_impl(port, ptr, rust_vec_len, data_len),
-        126 => {
-            wire__crate__api__read_composite_tiles_snapshot_impl(port, ptr, rust_vec_len, data_len)
-        }
-        127 => wire__crate__api__read_layer_thumbnail_impl(port, ptr, rust_vec_len, data_len),
-        128 => {
+        126 => wire__crate__api__read_comic_project_impl(port, ptr, rust_vec_len, data_len),
+        127 => wire__crate__api__read_composite_tile_impl(port, ptr, rust_vec_len, data_len),
+        128 => wire__crate__api__read_layer_thumbnail_impl(port, ptr, rust_vec_len, data_len),
+        129 => {
             wire__crate__api__read_project_composite_tile_impl(port, ptr, rust_vec_len, data_len)
         }
-        129 => wire__crate__api__read_tile_impl(port, ptr, rust_vec_len, data_len),
-        130 => wire__crate__api__redo_impl(port, ptr, rust_vec_len, data_len),
-        131 => wire__crate__api__redo_project_impl(port, ptr, rust_vec_len, data_len),
-        132 => wire__crate__api__rename_brush_impl(port, ptr, rust_vec_len, data_len),
-        133 => wire__crate__api__render_live_dab_packet_impl(port, ptr, rust_vec_len, data_len),
-        134 => wire__crate__api__resize_live_surface_impl(port, ptr, rust_vec_len, data_len),
-        135 => wire__crate__api__revision_impl(port, ptr, rust_vec_len, data_len),
-        136 => wire__crate__api__save_document_impl(port, ptr, rust_vec_len, data_len),
-        137 => wire__crate__api__save_project_as_impl(port, ptr, rust_vec_len, data_len),
-        138 => wire__crate__api__select_color_range_impl(port, ptr, rust_vec_len, data_len),
-        139 => wire__crate__api__select_ellipse_impl(port, ptr, rust_vec_len, data_len),
-        140 => wire__crate__api__select_lasso_impl(port, ptr, rust_vec_len, data_len),
-        141 => wire__crate__api__select_layer_opacity_impl(port, ptr, rust_vec_len, data_len),
-        142 => wire__crate__api__select_rectangle_impl(port, ptr, rust_vec_len, data_len),
-        143 => {
+        130 => wire__crate__api__read_tile_impl(port, ptr, rust_vec_len, data_len),
+        131 => wire__crate__api__redo_impl(port, ptr, rust_vec_len, data_len),
+        132 => wire__crate__api__redo_project_impl(port, ptr, rust_vec_len, data_len),
+        133 => wire__crate__api__rename_brush_impl(port, ptr, rust_vec_len, data_len),
+        134 => wire__crate__api__render_live_dab_packet_impl(port, ptr, rust_vec_len, data_len),
+        135 => wire__crate__api__resize_live_surface_impl(port, ptr, rust_vec_len, data_len),
+        136 => wire__crate__api__revision_impl(port, ptr, rust_vec_len, data_len),
+        137 => wire__crate__api__save_document_impl(port, ptr, rust_vec_len, data_len),
+        138 => wire__crate__api__save_project_as_impl(port, ptr, rust_vec_len, data_len),
+        139 => wire__crate__api__select_color_range_impl(port, ptr, rust_vec_len, data_len),
+        140 => wire__crate__api__select_ellipse_impl(port, ptr, rust_vec_len, data_len),
+        141 => wire__crate__api__select_lasso_impl(port, ptr, rust_vec_len, data_len),
+        142 => wire__crate__api__select_layer_opacity_impl(port, ptr, rust_vec_len, data_len),
+        143 => wire__crate__api__select_rectangle_impl(port, ptr, rust_vec_len, data_len),
+        144 => {
             wire__crate__api__set_layer_brightness_contrast_impl(port, ptr, rust_vec_len, data_len)
         }
-        144 => wire__crate__api__set_live_viewport_impl(port, ptr, rust_vec_len, data_len),
-        145 => wire__crate__api__set_panel_mask_geometry_impl(port, ptr, rust_vec_len, data_len),
-        146 => wire__crate__api__set_project_panel_bounds_impl(port, ptr, rust_vec_len, data_len),
-        147 => wire__crate__api__set_project_panel_polygon_impl(port, ptr, rust_vec_len, data_len),
-        148 => wire__crate__api__set_vector_point_impl(port, ptr, rust_vec_len, data_len),
-        149 => wire__crate__api__shrink_selection_impl(port, ptr, rust_vec_len, data_len),
-        150 => wire__crate__api__simplify_vector_stroke_impl(port, ptr, rust_vec_len, data_len),
-        151 => wire__crate__api__split_project_panel_impl(port, ptr, rust_vec_len, data_len),
-        152 => wire__crate__api__stage_brush_import_impl(port, ptr, rust_vec_len, data_len),
-        153 => wire__crate__api__studio_add_effect_line_impl(port, ptr, rust_vec_len, data_len),
-        154 => wire__crate__api__studio_add_material_impl(port, ptr, rust_vec_len, data_len),
-        155 => wire__crate__api__studio_add_styled_balloon_impl(port, ptr, rust_vec_len, data_len),
-        156 => wire__crate__api__studio_add_tone_impl(port, ptr, rust_vec_len, data_len),
-        157 => wire__crate__api__studio_batch_export_page_manifests_impl(
+        145 => wire__crate__api__set_live_viewport_impl(port, ptr, rust_vec_len, data_len),
+        146 => wire__crate__api__set_panel_mask_geometry_impl(port, ptr, rust_vec_len, data_len),
+        147 => wire__crate__api__set_project_panel_bounds_impl(port, ptr, rust_vec_len, data_len),
+        148 => wire__crate__api__set_project_panel_polygon_impl(port, ptr, rust_vec_len, data_len),
+        149 => wire__crate__api__set_vector_point_impl(port, ptr, rust_vec_len, data_len),
+        150 => wire__crate__api__shrink_selection_impl(port, ptr, rust_vec_len, data_len),
+        151 => wire__crate__api__simplify_vector_stroke_impl(port, ptr, rust_vec_len, data_len),
+        152 => wire__crate__api__split_project_panel_impl(port, ptr, rust_vec_len, data_len),
+        153 => wire__crate__api__stage_brush_import_impl(port, ptr, rust_vec_len, data_len),
+        154 => wire__crate__api__studio_add_effect_line_impl(port, ptr, rust_vec_len, data_len),
+        155 => wire__crate__api__studio_add_material_impl(port, ptr, rust_vec_len, data_len),
+        156 => wire__crate__api__studio_add_styled_balloon_impl(port, ptr, rust_vec_len, data_len),
+        157 => wire__crate__api__studio_add_tone_impl(port, ptr, rust_vec_len, data_len),
+        158 => wire__crate__api__studio_batch_export_page_manifests_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        158 => wire__crate__api__studio_batch_export_pages_impl(port, ptr, rust_vec_len, data_len),
-        159 => wire__crate__api__studio_batch_export_webtoon_segments_impl(
+        159 => wire__crate__api__studio_batch_export_pages_impl(port, ptr, rust_vec_len, data_len),
+        160 => wire__crate__api__studio_batch_export_webtoon_segments_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        160 => {
+        161 => {
             wire__crate__api__studio_print_preview_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        161 => {
+        162 => {
             wire__crate__api__studio_project_portable_digest_impl(port, ptr, rust_vec_len, data_len)
         }
-        162 => wire__crate__api__studio_project_to_json_impl(port, ptr, rust_vec_len, data_len),
-        163 => wire__crate__api__studio_remove_effect_line_impl(port, ptr, rust_vec_len, data_len),
-        164 => wire__crate__api__studio_remove_material_impl(port, ptr, rust_vec_len, data_len),
-        165 => wire__crate__api__studio_remove_page_impl(port, ptr, rust_vec_len, data_len),
-        166 => wire__crate__api__studio_remove_tone_impl(port, ptr, rust_vec_len, data_len),
-        167 => wire__crate__api__studio_render_page_preview_impl(port, ptr, rust_vec_len, data_len),
-        168 => wire__crate__api__studio_reorder_page_impl(port, ptr, rust_vec_len, data_len),
-        169 => wire__crate__api__studio_resize_gutter_impl(port, ptr, rust_vec_len, data_len),
-        170 => wire__crate__api__studio_search_dialogue_impl(port, ptr, rust_vec_len, data_len),
-        171 => wire__crate__api__studio_set_balloon_style_impl(port, ptr, rust_vec_len, data_len),
-        172 => wire__crate__api__studio_set_balloon_tail_impl(port, ptr, rust_vec_len, data_len),
-        173 => wire__crate__api__studio_set_dialogue_impl(port, ptr, rust_vec_len, data_len),
-        174 => wire__crate__api__studio_set_effect_line_impl(port, ptr, rust_vec_len, data_len),
-        175 => wire__crate__api__studio_set_page_layout_impl(port, ptr, rust_vec_len, data_len),
-        176 => wire__crate__api__studio_set_tone_impl(port, ptr, rust_vec_len, data_len),
-        177 => wire__crate__api__studio_webtoon_segments_impl(port, ptr, rust_vec_len, data_len),
-        178 => wire__crate__api__transform_layer_impl(port, ptr, rust_vec_len, data_len),
-        179 => wire__crate__api__transform_vector_stroke_impl(port, ptr, rust_vec_len, data_len),
-        180 => wire__crate__api__undo_impl(port, ptr, rust_vec_len, data_len),
-        181 => wire__crate__api__undo_project_impl(port, ptr, rust_vec_len, data_len),
-        182 => wire__crate__api__update_brush_color_impl(port, ptr, rust_vec_len, data_len),
-        183 => wire__crate__api__update_brush_draft_impl(port, ptr, rust_vec_len, data_len),
-        184 => wire__crate__api__update_brush_settings_impl(port, ptr, rust_vec_len, data_len),
-        185 => wire__crate__api__update_layer_presentation_impl(port, ptr, rust_vec_len, data_len),
-        186 => wire__crate__api__update_layer_properties_impl(port, ptr, rust_vec_len, data_len),
-        187 => wire__crate__api__vector_stroke_summaries_impl(port, ptr, rust_vec_len, data_len),
+        163 => wire__crate__api__studio_project_to_json_impl(port, ptr, rust_vec_len, data_len),
+        164 => wire__crate__api__studio_remove_effect_line_impl(port, ptr, rust_vec_len, data_len),
+        165 => wire__crate__api__studio_remove_material_impl(port, ptr, rust_vec_len, data_len),
+        166 => wire__crate__api__studio_remove_page_impl(port, ptr, rust_vec_len, data_len),
+        167 => wire__crate__api__studio_remove_tone_impl(port, ptr, rust_vec_len, data_len),
+        168 => wire__crate__api__studio_render_page_preview_impl(port, ptr, rust_vec_len, data_len),
+        169 => wire__crate__api__studio_reorder_page_impl(port, ptr, rust_vec_len, data_len),
+        170 => wire__crate__api__studio_resize_gutter_impl(port, ptr, rust_vec_len, data_len),
+        171 => wire__crate__api__studio_search_dialogue_impl(port, ptr, rust_vec_len, data_len),
+        172 => wire__crate__api__studio_set_balloon_style_impl(port, ptr, rust_vec_len, data_len),
+        173 => wire__crate__api__studio_set_balloon_tail_impl(port, ptr, rust_vec_len, data_len),
+        174 => wire__crate__api__studio_set_dialogue_impl(port, ptr, rust_vec_len, data_len),
+        175 => wire__crate__api__studio_set_effect_line_impl(port, ptr, rust_vec_len, data_len),
+        176 => wire__crate__api__studio_set_page_layout_impl(port, ptr, rust_vec_len, data_len),
+        177 => wire__crate__api__studio_set_tone_impl(port, ptr, rust_vec_len, data_len),
+        178 => wire__crate__api__studio_webtoon_segments_impl(port, ptr, rust_vec_len, data_len),
+        179 => wire__crate__api__transform_layer_impl(port, ptr, rust_vec_len, data_len),
+        180 => wire__crate__api__transform_vector_stroke_impl(port, ptr, rust_vec_len, data_len),
+        181 => wire__crate__api__undo_impl(port, ptr, rust_vec_len, data_len),
+        182 => wire__crate__api__undo_project_impl(port, ptr, rust_vec_len, data_len),
+        183 => wire__crate__api__update_brush_color_impl(port, ptr, rust_vec_len, data_len),
+        184 => wire__crate__api__update_brush_draft_impl(port, ptr, rust_vec_len, data_len),
+        185 => wire__crate__api__update_brush_settings_impl(port, ptr, rust_vec_len, data_len),
+        186 => wire__crate__api__update_layer_presentation_impl(port, ptr, rust_vec_len, data_len),
+        187 => wire__crate__api__update_layer_properties_impl(port, ptr, rust_vec_len, data_len),
+        188 => wire__crate__api__vector_stroke_summaries_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -11881,6 +11969,26 @@ impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
 
 impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<ComicProjectHandle>> for ComicProjectHandle {
     fn into_into_dart(self) -> FrbWrapper<ComicProjectHandle> {
+        self.into()
+    }
+}
+
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<CompositeTilesSnapshotHandle> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
+            .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<CompositeTilesSnapshotHandle>
+{
+}
+
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<CompositeTilesSnapshotHandle>>
+    for CompositeTilesSnapshotHandle
+{
+    fn into_into_dart(self) -> FrbWrapper<CompositeTilesSnapshotHandle> {
         self.into()
     }
 }
@@ -12531,6 +12639,18 @@ impl SseEncode for ComicProjectHandle {
     }
 }
 
+impl SseEncode for CompositeTilesSnapshotHandle {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <RustOpaqueMoi<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+        >>::sse_encode(
+            flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self),
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for DocumentHandle {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -12592,6 +12712,19 @@ impl SseEncode for StudioProjectHandle {
 
 impl SseEncode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        let (ptr, size) = self.sse_encode_raw();
+        <usize>::sse_encode(ptr, serializer);
+        <i32>::sse_encode(size, serializer);
+    }
+}
+
+impl SseEncode
+    for RustOpaqueMoi<
+        flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+    >
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -13333,6 +13466,24 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_project_ink_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+        >::increment_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_project_ink_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+        >::decrement_strong_count(ptr as _);
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_project_ink_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle(
         ptr: *const std::ffi::c_void,
     ) {
@@ -13481,6 +13632,24 @@ mod web {
         ptr: *const std::ffi::c_void,
     ) {
         MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>>::decrement_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+        >::increment_strong_count(ptr as _);
+    }
+
+    #[wasm_bindgen]
+    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle(
+        ptr: *const std::ffi::c_void,
+    ) {
+        MoiArc::<
+            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>,
+        >::decrement_strong_count(ptr as _);
     }
 
     #[wasm_bindgen]

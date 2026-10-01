@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-#![allow(clippy::all)]
 #![allow(
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
@@ -9,6 +8,7 @@
 
 mod api;
 #[allow(
+    unsafe_code,
     clippy::all,
     clippy::semicolon_if_nothing_returned,
     clippy::redundant_else,
