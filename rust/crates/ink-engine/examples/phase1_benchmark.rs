@@ -11,14 +11,9 @@ use ink_test_support::one_sample;
 use std::collections::HashSet;
 use std::time::Instant;
 
-fn main() {
-    let spec = DocumentSpec {
-        width_px: 4096,
-        height_px: 4096,
-        dpi: 300.0,
-        color_space: ColorSpace::Srgb,
-        background: Rgba8::default(),
-    };
+const LATENCY_ITERATIONS: usize = 128;
+
+fn measure_packet_to_dirty_latency(spec: DocumentSpec) -> (u128, usize) {
     let latency_samples = [
         (16.0, 16.0, 0.5),
         (300.0, 16.0, 0.6),
@@ -28,10 +23,12 @@ fn main() {
     let mut latency_document = Document::new(DocumentId::from_u128(0xBEEF), spec)
         .expect("latency benchmark document must be valid");
     let latency_layer = latency_document.layers()[0].id;
-    let mut elapsed_micros = Vec::with_capacity(32);
+    let mut elapsed_micros = Vec::with_capacity(LATENCY_ITERATIONS);
     let mut maximum_dirty_tiles = 0usize;
-    for iteration in 0..32 {
-        let stroke = ink_model::StrokeId::from_u128(0x2000 + iteration);
+    for iteration in 0..LATENCY_ITERATIONS {
+        let stroke = ink_model::StrokeId::from_u128(
+            0x2000_u128 + u128::try_from(iteration).expect("bounded iteration"),
+        );
         latency_document
             .dispatch(EditorCommand::BeginStroke {
                 stroke,
@@ -47,6 +44,13 @@ fn main() {
         }
         let events = latency_document.drain_events().expect("latency events");
         elapsed_micros.push(started.elapsed().as_micros());
+        // The real Flutter consumer drains confirmed dabs as frames are
+        // presented. Keep the synthetic consumer moving between iterations;
+        // otherwise this benchmark eventually measures a permanently full
+        // preview queue rather than packet-to-dirty latency.
+        latency_document
+            .drain_live_dabs_available(65_536)
+            .expect("drain benchmark preview dabs");
         let dirty_tiles = events
             .iter()
             .filter_map(|event| match event {
@@ -75,6 +79,18 @@ fn main() {
     let p95_index = ((elapsed_micros.len() * 95).saturating_sub(1) / 100)
         .min(elapsed_micros.len().saturating_sub(1));
     let p95 = elapsed_micros.get(p95_index).copied().unwrap_or_default();
+    (p95, maximum_dirty_tiles)
+}
+
+fn main() {
+    let spec = DocumentSpec {
+        width_px: 4096,
+        height_px: 4096,
+        dpi: 300.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let (p95, maximum_dirty_tiles) = measure_packet_to_dirty_latency(spec);
 
     let mut memory_document = Document::new(DocumentId::from_u128(0xCAFE), spec)
         .expect("memory benchmark document must be valid");
@@ -106,7 +122,7 @@ fn main() {
     }
     println!(
         "{{\"latency_iterations\":{},\"p95_packet_to_dirty_us\":{},\"max_dirty_tiles\":{},\"memory_layers\":{},\"estimated_engine_bytes\":{}}}",
-        elapsed_micros.len(),
+        LATENCY_ITERATIONS,
         p95,
         maximum_dirty_tiles,
         layers.len(),

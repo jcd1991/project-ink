@@ -174,6 +174,7 @@ class CanvasScreen extends StatefulWidget {
     @visibleForTesting this.nativePointerPacketsOverride,
     @visibleForTesting this.nativePointerReadyOverride,
     @visibleForTesting this.nativePencilCommandsOverride,
+    @visibleForTesting this.nativeCanvasDiagnosticEventsOverride,
     @visibleForTesting this.livePreviewControllerFactory,
   }) : engine = engine ?? InMemoryEngineApi();
   final EngineApi engine;
@@ -249,6 +250,9 @@ class CanvasScreen extends StatefulWidget {
 
   @visibleForTesting
   final Stream<String>? nativePencilCommandsOverride;
+
+  @visibleForTesting
+  final Stream<Map<String, Object?>>? nativeCanvasDiagnosticEventsOverride;
 
   @visibleForTesting
   final LivePreviewController Function(EngineApi engine)?
@@ -494,7 +498,9 @@ class _CanvasScreenState extends State<CanvasScreen>
       });
     }
     if (platform == TargetPlatform.iOS) {
-      _nativeCanvasDiagnosticSubscription = nativeCanvasDiagnosticEvents()
+      _nativeCanvasDiagnosticSubscription = (widget
+                  .nativeCanvasDiagnosticEventsOverride ??
+              nativeCanvasDiagnosticEvents())
           .listen(
             (event) => _canvasDiagnostics.record(
               'native.${event['kind'] ?? 'event'}',

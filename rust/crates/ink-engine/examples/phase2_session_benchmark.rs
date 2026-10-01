@@ -64,6 +64,13 @@ fn main() {
             .expect("end session stroke");
         document.drain_events().expect("drain session events");
         elapsed_micros.push(started.elapsed().as_micros());
+        // Model Flutter consuming the confirmed preview stream each frame.
+        // Without a consumer, the bounded queue fills during this accelerated
+        // session and later strokes measure overflow scans rather than engine
+        // work under normal presentation.
+        document
+            .drain_live_dabs_available(65_536)
+            .expect("drain session preview dabs");
 
         if (index + 1) % CHECKPOINT_INTERVAL == 0 {
             checkpoints.push((index + 1, document.estimated_working_memory_bytes()));

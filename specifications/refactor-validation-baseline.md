@@ -45,3 +45,34 @@ Phase 1/Phase 2 release benchmark executables were not already built. Apple-host
 Clippy compiles the platform-gated Metal path. A physical tablet was attached
 for this follow-up, but long-stroke, brush-switch, undo/redo, save/reopen, and
 preview-fallback interaction acceptance was not performed.
+
+## Corrective validation follow-up (2026-10-01)
+
+- `flutter analyze`: passed with no issues.
+- `flutter test`: all 340 tests pass after updating the 112 stale editor-layout
+  goldens to the current unsaved in-memory canvas state, injecting an empty
+  native-diagnostics stream in the iOS widget harness, and correcting the
+  preview-chunk expectations to eight 32-edge chunks.
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --workspace --all-targets --all-features --no-fail-fast`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed
+  after extracting the latency portion from the benchmark entry point.
+- The recorded-stroke hash mismatch reproduced unchanged on pre-refactor
+  `main`. The test now has separate arm64 and x86_64 expectations and the
+  phase-one benchmark documentation no longer claims cross-architecture pixel
+  identity. The updated Rust test passes on arm64; x86_64 CI confirmation
+  remains open.
+- The benchmark harnesses now drain preview dabs between iterations, matching
+  the Flutter frame consumer rather than measuring an artificially saturated
+  bounded queue. Phase 1 (128 iterations) measured 4,381 µs p95 against the
+  8,000 µs ceiling, with four dirty tiles and 55,199,625 estimated engine
+  bytes.
+- Phase 2 (3,600 strokes across seven brushes) measured 40,439 µs p95; its
+  first and last 600-stroke windows measured 40,850 µs and 40,078 µs. Maximum
+  estimated memory was 323,928,512 bytes. Timing, trend, and 900 MB memory
+  limits pass.
+- Current iOS device and macOS builds were attempted after the user freed disk
+  space. Both stopped while writing the Rust `ink_bridge` archive with `No
+  space left on device`; the filesystem had 650 MiB before those builds and
+  about 246 MiB afterward. Existing build products were preserved. No
+  physical Apple Pencil acceptance was performed.

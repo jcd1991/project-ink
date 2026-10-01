@@ -541,6 +541,7 @@ Future<void> _pumpEditor(
                 nativePointerPacketsOverride: const Stream.empty(),
                 nativePointerReadyOverride: const Stream.empty(),
                 nativePencilCommandsOverride: const Stream.empty(),
+                nativeCanvasDiagnosticEventsOverride: const Stream.empty(),
               ),
             ),
       ),

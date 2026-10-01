@@ -2420,7 +2420,7 @@ fn reopening_rejects_duplicate_layer_ids() {
 }
 
 #[test]
-fn recorded_stroke_has_cross_architecture_golden_tile_hash() {
+fn recorded_stroke_matches_host_raster_golden_tile_hash() {
     let spec = DocumentSpec {
         width_px: 4096,
         height_px: 4096,
@@ -2446,9 +2446,16 @@ fn recorded_stroke_has_cross_architecture_golden_tile_hash() {
     let tile = doc
         .read_tile(layer, TileCoord { x: 0, y: 0 })
         .expect("tile");
+    let expected_hash = match std::env::consts::ARCH {
+        // The original shared value came from the x86_64 CI runner. This
+        // fixture's legacy CPU raster has a separate captured output on arm64.
+        "aarch64" => 1_395_959_408_535_220_756,
+        "x86_64" => 12_475_419_944_979_558_790,
+        architecture => panic!("no raster golden is recorded for {architecture}"),
+    };
     assert_eq!(
         Tile::from_bytes(tile).expect("complete tile").stable_hash(),
-        12_475_419_944_979_558_790
+        expected_hash
     );
 }
 

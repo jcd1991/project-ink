@@ -9,7 +9,10 @@ cargo run -p ink-engine --release --example phase1_benchmark
 The example emits one JSON object with:
 
 - `p95_packet_to_dirty_us`: release-mode Rust time from enqueueing the four
-  recorded samples through worker completion and dirty-event drain.
+  recorded samples through worker completion and dirty-event drain. The
+  harness drains the corresponding preview dabs between iterations to model
+  the Flutter frame consumer and avoid measuring a permanently saturated
+  preview queue.
 - `max_dirty_tiles`: unique `(layer, tile)` coordinates touched by that
   four-tile fixture.
 - `memory_layers`: ordinary raster-layer count in the memory scenario.
@@ -19,10 +22,12 @@ The example emits one JSON object with:
 
 The benchmark is a regression signal, not a physical latency claim. Phase 1
 stylus-to-visible-update targets still require timestamped traces on the M1/M4
-iPads and Galaxy S23 Ultra. The engine's raster recorded-stroke golden test
-asserts tile hash `16603516411072420276`, and the vector-ink golden test asserts
-tile hash `4780892121892926211`; run both on arm64 and x64 CI lanes when those
-hosted runners are available.
+iPads and Galaxy S23 Ultra. The legacy CPU recorded-stroke fixture uses
+architecture-specific tile hashes: `1395959408535220756` on arm64 and
+`12475419944979558790` on x86_64. This detects regressions within each target;
+it does not claim bit-identical legacy raster pixels across architectures.
+The vector-ink golden test asserts tile hash `4780892121892926211`; run the
+golden checks on arm64 and x86_64 CI lanes.
 
 The Rust CI lane treats this as a regression guard, not a device acceptance
 claim: packet-to-dirty p95 must remain at or below 8 ms, the fixture must touch
@@ -71,7 +76,9 @@ cargo run -p ink-engine --release --example phase2_session_benchmark
 It replays 3,600 short strokes across the Phase 2 built-in brushes using the
 same public command and pointer paths as the app. The JSON output reports
 checkpoint memory, overall p95 stroke time, and the first/final 600-stroke p95
-windows. The harness is a repeatable engine regression signal; it does not
-claim physical stylus-to-display latency or process RSS. A run passes the
-engine memory gate when `max_memory_bytes` remains below the 900 MiB document
-ceiling and the final-window timing does not regress against the first window.
+windows. The harness drains preview dabs between iterations to model the
+Flutter frame consumer and avoid measuring a permanently saturated queue. It
+is a repeatable engine regression signal; it does not claim physical
+stylus-to-display latency or process RSS. A run passes the engine memory gate
+when `max_memory_bytes` remains below the 900 MiB document ceiling and the
+final-window timing does not regress against the first window.

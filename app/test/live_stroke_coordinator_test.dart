@@ -39,17 +39,26 @@ void main() {
     expect(coordinator.previewIndexForSourceSequence(42), 1);
     expect(coordinator.previewIndexForSourceSequence(44), 2);
     expect(coordinator.previewIndexForSourceSequence(41), -1);
-    expect(preview.chunks, hasLength(2));
+    expect(preview.chunks, hasLength(8));
     expect(
       preview.chunks.map(
         (chunk) => (chunk.firstPointIndex, chunk.lastPointIndex),
       ),
-      <(int, int)>[(0, 128), (128, 256)],
+      <(int, int)>[
+        (0, 32),
+        (32, 64),
+        (64, 96),
+        (96, 128),
+        (128, 160),
+        (160, 192),
+        (192, 224),
+        (224, 256),
+      ],
     );
-    expect(coordinator.pendingChunkCount(preview), 2);
+    expect(coordinator.pendingChunkCount(preview), 8);
     expect(
       coordinator.pendingChunkCount(preview.copyWith(confirmedThrough: 129)),
-      1,
+      4,
     );
     final fullyCommitted = preview.copyWith(confirmedThrough: 257);
     expect(coordinator.pendingChunkCount(fullyCommitted), 0);

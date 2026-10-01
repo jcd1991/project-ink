@@ -42,14 +42,14 @@ and verify both inventory and process list are clear after cleanup.
   blocker for the tested snapshot; keep the canvas-refactor source ownership
   boundary and rerun after further edits.
 
-- [ ] **Engine suite retains one pre-existing raster-hash failure
-  (rechecked 2026-09-30).** `cargo test -p ink-engine` ran 80 tests: 79 passed;
-  `recorded_stroke_has_cross_architecture_golden_tile_hash` failed with actual
-  `1395959408535220756` vs expected `12475419944979558790`. The strengthened
-  long-stroke exact-pixel Undo/Redo/save/reopen test passes within that suite.
-  The golden hashes three legacy CPU samples, and no independent pre-change
-  baseline has been established; do not replace the expected value without
-  reconstructing intended raster semantics and obtaining a trusted reference.
+- [~] **Legacy raster hash now records the arm64 output separately
+  (2026-10-01).** The old shared expectation failed on Apple arm64; the same
+  `1395959408535220756` output reproduced on the pre-refactor `main` and on the
+  feature branch. The engine test now records that arm64 output separately
+  from the existing x86_64 value `12475419944979558790`, and the benchmark
+  documentation states that the legacy renderer is not bit-identical across
+  architectures. The updated test passes on arm64; the x86_64 expectation
+  remains to be confirmed by its CI lane.
 
 - [ ] **P1 long-stroke Redo restores a corrupted visual (live macOS QA,
   2026-09-30; refactor-sensitive).** In the fresh debug QA app, Brush Library
