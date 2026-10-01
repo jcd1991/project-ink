@@ -1,7 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/bridge/engine_api.dart';
 import 'package:project_ink/documents/autosave_coordinator.dart';
-import 'dart:async';
 
 class _RecordingEngine extends InMemoryEngineApi {
   final List<String> savedPaths = <String>[];
@@ -48,6 +49,39 @@ void main() {
       await autosave.flush();
 
       expect(engine.savedPaths, ['/tmp/long-stroke.inkproj']);
+      await autosave.dispose(flush: false);
+    },
+  );
+
+  test(
+    'defers checkpoints and explicit flush until a continuous edit ends',
+    () async {
+      final engine = _RecordingEngine();
+      final autosave = AutosaveCoordinator(
+        engine: engine,
+        path: '/tmp/active-stroke.inkproj',
+        debounce: const Duration(milliseconds: 1),
+      );
+
+      autosave.beginContinuousEdit();
+      autosave.markDirty();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(engine.savedPaths, isEmpty);
+      expect(autosave.autosaveDeferred, isTrue);
+      expect(autosave.isDirty, isTrue);
+
+      var flushed = false;
+      final flushing = autosave.flush().then((_) => flushed = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(flushed, isFalse);
+      expect(engine.savedPaths, isEmpty);
+
+      autosave.endContinuousEdit();
+      await flushing;
+
+      expect(engine.savedPaths, ['/tmp/active-stroke.inkproj']);
+      expect(autosave.autosaveDeferred, isFalse);
+      expect(autosave.isDirty, isFalse);
       await autosave.dispose(flush: false);
     },
   );
