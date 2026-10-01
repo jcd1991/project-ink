@@ -185,12 +185,13 @@ fixture tiles, or 900 MB of estimated engine-owned memory.
   remains an export façade. `ComicWorkspaceController` owns the Rust comic
   project capability, and comic projections/painters live in
   `comic_presentation.dart`.
-- `CanvasScreen` remains the Flutter composition/lifecycle point. Input queue,
-  live stroke preview, tile cache, autosave, native surface, and independent
-  workspace components retain their existing collaborators. Preserve the
-  serialized confirmed-packet queue, page rebinding, save-before-close order,
-  undo/history transaction boundaries, and CPU fallback when editing these
-  seams.
+- `CanvasScreen` remains the Flutter composition/lifecycle point.
+  `CanvasDocumentActions`, `CanvasPreviewSynchronization`, and
+  `CanvasTileSynchronization` isolate document workflows, native preview
+  lifecycle, and coherent tile publication. `StrokeOperationQueue` serializes
+  bridge work and recovers after operation errors. Preserve confirmed-packet
+  order, page rebinding, save-before-close order, undo/history transaction
+  boundaries, and CPU fallback when editing these seams.
 
 See [`app/README.md`](app/README.md) for controller disposal order and the
 pinned flutter_rust_bridge 2.13.0 generation command.

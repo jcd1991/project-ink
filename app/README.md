@@ -75,9 +75,13 @@ flutter run -d macos
   controller when the workspace session ends so it closes that capability.
   Widgets that listen to the controller remove their listener and dispose
   their own text and animation controllers in `dispose`.
-- `CanvasScreen` composes document, input, tile, preview, and workspace
-  collaborators. Keep pointer queueing, page rebinding, undo/history,
-  autosave, and preview-to-CPU fallback semantics at their existing seams.
+- `CanvasScreen` is the composition and lifecycle point. Its private
+  `CanvasDocumentActions`, `CanvasPreviewSynchronization`, and
+  `CanvasTileSynchronization` mixins own the document workflow, native preview
+  lifecycle, and coherent CPU tile publication boundaries. The
+  `StrokeOperationQueue` owns ordered bridge work and error recovery. Keep page
+  rebinding, undo/history, autosave, and preview-to-CPU fallback semantics at
+  their existing seams.
 - `AutosaveCoordinator.dispose()` must finish its final checkpoint before the
   Rust document engine is closed. Retire a live surface before registering a
   replacement surface; its native handle is tied to the old engine generation.

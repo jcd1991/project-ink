@@ -18,7 +18,7 @@ Captured before the Rust and Dart/Flutter refactor on 2026-10-01.
 | `cargo test --workspace --all-targets --all-features` | 1 failure: `recorded_stroke_has_cross_architecture_golden_tile_hash` produced `1395959408535220756`, expected `12475419944979558790`; other engine tests passed. This known mismatch is already documented in `specifications/phase3.85-be-illustration-comic-parity.md`; keep the golden unchanged until independently resolved. |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Blocked by `clippy::redundant_locals` at `ink-model/src/lib.rs:194` (`let kind = kind;`). |
 | `flutter analyze` | Exited nonzero with two infos: string interpolation in `canvas_screen.dart:10568` and missing braces in `canvas_pointer_failure_test.dart:463`. |
-| `flutter test` | 226 passed, 113 failed. Failures include many editor layout golden image diffs on this macOS host; diagnostics were written under ignored `app/test/failures/`. Do not regenerate goldens as part of a structural refactor. |
+| `flutter test` | 226 passed, 113 failed. Failures include editor layout golden image diffs on this macOS host and a pre-existing `live_stroke_coordinator_test` expectation of two 128-point chunks while the implementation emits eight 32-point chunks. Diagnostics were written under ignored `app/test/failures/`. Do not regenerate goldens or change preview chunking as part of a structural refactor. |
 
 ## Not measured
 
@@ -34,7 +34,7 @@ Captured after the ownership and bridge changes on the same Apple Silicon host.
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed. Bridge-wide `clippy::all` suppression is removed; remaining complexity allowances are local to command/transaction or long scenario tests. |
 | `cargo test --workspace --all-targets --all-features --no-fail-fast` | One failure: the same engine golden hash mismatch (`1395959408535220756` vs `12475419944979558790`). All other workspace test targets passed, including 35 bridge tests and 15 comic tests. |
 | `flutter analyze` | Passed with no issues after extracting bridge adapters and comic/canvas presentation widgets. |
-| `flutter test` | 226 passed, 113 failed. Failures remain editor-layout goldens on this macOS host, matching the captured baseline. Pointer-failure, persistence, tile, and live-render tests passed. |
+| `flutter test` | 226 passed, 113 failed, matching the captured baseline: editor-layout golden diffs plus the same preview chunk-count expectation mismatch. Pointer-failure, document-action, autosave, persistence, and tile tests passed; the live-stroke coordinator expectation remains unresolved. |
 | FRB generated API | The 2.13.0-generated Rust and Dart bindings compile against the current Rust API. Regeneration corrected stale checked-in composite-tile bindings to the existing capture/compose API; other exported API names and types remain unchanged. |
 
 Release benchmarks were not rerun: less than 1 GiB remained free and the
