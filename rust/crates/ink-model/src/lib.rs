@@ -191,7 +191,6 @@ pub struct Layer {
 impl Layer {
     #[must_use]
     pub fn new(id: LayerId, kind: LayerKind, name: impl Into<String>) -> Self {
-        let kind = kind;
         Self {
             id,
             parent: None,

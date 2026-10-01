@@ -1820,13 +1820,17 @@ impl ComicProject {
             };
             let (text_markup, text_y, text_font_size) = svg_text_content(
                 &balloon.text,
-                text_x,
-                text_center_y,
-                text_style.font_size_px,
-                (r.width - text_style.font_size_px * 2.0).max(text_style.font_size_px),
-                (r.height - text_style.font_size_px * 2.0).max(text_style.font_size_px),
-                centered_text,
-                text_style.orientation == TextOrientation::Vertical,
+                SvgTextBox {
+                    x: text_x,
+                    center_y: text_center_y,
+                    font_size: text_style.font_size_px,
+                    max_width: (r.width - text_style.font_size_px * 2.0)
+                        .max(text_style.font_size_px),
+                    max_height: (r.height - text_style.font_size_px * 2.0)
+                        .max(text_style.font_size_px),
+                    centered: centered_text,
+                    vertical: text_style.orientation == TextOrientation::Vertical,
+                },
             );
             if balloon.shape == BalloonShape::Narration {
                 writeln!(
@@ -2356,8 +2360,8 @@ fn escape_xml(value: &str) -> String {
     escaped
 }
 
-fn svg_text_content(
-    text: &str,
+#[derive(Clone, Copy)]
+struct SvgTextBox {
     x: f32,
     center_y: f32,
     font_size: f32,
@@ -2365,7 +2369,18 @@ fn svg_text_content(
     max_height: f32,
     centered: bool,
     vertical: bool,
-) -> (String, f32, f32) {
+}
+
+fn svg_text_content(text: &str, layout: SvgTextBox) -> (String, f32, f32) {
+    let SvgTextBox {
+        x,
+        center_y,
+        font_size,
+        max_width,
+        max_height,
+        centered,
+        vertical,
+    } = layout;
     if vertical || text.is_empty() {
         return (escape_xml(text), center_y, font_size);
     }
@@ -2398,6 +2413,8 @@ fn svg_text_content(
     (markup, first_y, text_font_size)
 }
 
+// The cast is safe after clamping the finite positive result into 1..=256.
+#[allow(clippy::cast_sign_loss)]
 fn wrap_svg_text_lines(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
     let max_chars = (max_width / (font_size * 0.55).max(1.0))
         .floor()

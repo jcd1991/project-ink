@@ -143,10 +143,11 @@ impl TileStore {
         // anywhere in the document, even when this requested coordinate is
         // transparent. Preserve that global allocated/non-allocated bit with
         // a transparent sentinel at the first requested coordinate.
-        if snapshot.tiles.is_empty() && !self.tiles.is_empty() {
-            if let Some(coordinate) = coordinates.first() {
-                snapshot.tiles.insert(*coordinate, Tile::default());
-            }
+        if snapshot.tiles.is_empty()
+            && !self.tiles.is_empty()
+            && let Some(coordinate) = coordinates.first()
+        {
+            snapshot.tiles.insert(*coordinate, Tile::default());
         }
         snapshot
     }
