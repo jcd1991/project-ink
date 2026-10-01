@@ -24,7 +24,6 @@
 		A10000000000000000000004 /* InkFlutterViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* InkFlutterViewController.swift */; };
 		A10000000000000000000005 /* InkLiveTextureRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* InkLiveTextureRegistry.swift */; };
 		A10000000000000000000006 /* InkPencilGestureRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* InkPencilGestureRecognizer.swift */; };
-		A10000000000000000000007 /* InkCanvasDiagnosticsExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* InkCanvasDiagnosticsExporter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -80,7 +79,6 @@
 		A10000000000000000000014 /* InkFlutterViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkFlutterViewController.swift; sourceTree = "<group>"; };
 		A10000000000000000000015 /* InkLiveTextureRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkLiveTextureRegistry.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* InkPencilGestureRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkPencilGestureRecognizer.swift; sourceTree = "<group>"; };
-		A10000000000000000000017 /* InkCanvasDiagnosticsExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkCanvasDiagnosticsExporter.swift; sourceTree = "<group>"; };
 		A83E80BB6D6DCF96C8338450 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
 		A8727516D42728BE78DB2595 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -186,7 +184,6 @@
 				A10000000000000000000014 /* InkFlutterViewController.swift */,
 				A10000000000000000000015 /* InkLiveTextureRegistry.swift */,
 				A10000000000000000000016 /* InkPencilGestureRecognizer.swift */,
-				A10000000000000000000017 /* InkCanvasDiagnosticsExporter.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -419,7 +416,6 @@
 				A10000000000000000000004 /* InkFlutterViewController.swift in Sources */,
 				A10000000000000000000005 /* InkLiveTextureRegistry.swift in Sources */,
 				A10000000000000000000006 /* InkPencilGestureRecognizer.swift in Sources */,
-				A10000000000000000000007 /* InkCanvasDiagnosticsExporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

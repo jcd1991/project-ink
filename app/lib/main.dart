@@ -33,6 +33,15 @@ Future<void> main() async {
     return previousPlatformErrorHandler?.call(error, stack) ?? false;
   };
   debugPrint('Project Ink startup: Flutter binding ready');
+  try {
+    final tracePath = await diagnostics.startRollingLog(
+      metadata: <String, Object?>{'platform': Platform.operatingSystem},
+    );
+    debugPrint('Project Ink rolling canvas diagnostics: $tracePath');
+  } catch (error, stack) {
+    // Diagnostics are best-effort and must never prevent the editor opening.
+    debugPrint('Project Ink rolling diagnostics unavailable: $error\n$stack');
+  }
   // Keep a local recovery checkpoint for new sessions as well as for projects
   // opened through the document picker. Without this path a released stroke
   // was only an in-memory edit until the user completed an explicit Save

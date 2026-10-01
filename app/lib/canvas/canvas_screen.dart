@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -59,9 +58,6 @@ String _documentDisplayName(String? path) {
 
 const _comicProjectOpenFailureMessage =
     'Could not open the selected comic project. It may be damaged, unsupported, or inaccessible. Your current project remains open.';
-const bool _autoStartCanvasDiagnostics = bool.fromEnvironment(
-  'INK_AUTO_START_CANVAS_DIAGNOSTICS',
-);
 const bool _disableIpadDabRenderer = bool.fromEnvironment(
   'INK_DISABLE_IPAD_GPU_STROKE_RENDERER',
   // Keep the compiled brush dab surface as the normal iPad renderer. Define
@@ -451,6 +447,25 @@ class _CanvasScreenState extends State<CanvasScreen>
   void initState() {
     super.initState();
     _configureLivePreviewSurface();
+    _canvasDiagnostics.record('canvas.session_started', <String, Object?>{
+      'platform': (widget.targetPlatform ?? defaultTargetPlatform).name,
+      'documentWidth': widget.engine.documentInfo.widthPx,
+      'documentHeight': widget.engine.documentInfo.heightPx,
+      'engineRevision': widget.engine.revision,
+      'activeTool': _activeTool.name,
+      'nativeDabRendererEnabled':
+          _livePreviewSurface is MacLiveSurfaceController,
+      'brushId': _activeBrushId,
+      'brushName': _brushLibrary.selected?.name ?? '',
+      'liveGpuController': _livePreviewSurface != null,
+      'devicePixelRatio':
+          WidgetsBinding
+              .instance
+              .platformDispatcher
+              .views
+              .first
+              .devicePixelRatio,
+    });
     final preferences = widget.workspacePreferences;
     final layout = _workspaceLayoutFor(
       preferences?.workspaceId ?? 'illustration',
@@ -490,13 +505,6 @@ class _CanvasScreenState extends State<CanvasScreen>
       (_) => unawaited(_refreshTiles()),
     );
     final platform = widget.targetPlatform ?? defaultTargetPlatform;
-    if (_autoStartCanvasDiagnostics && platform == TargetPlatform.iOS) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_canvasDiagnostics.isRecording) {
-          unawaited(_startCanvasDiagnostics(trigger: 'debug_launch_flag'));
-        }
-      });
-    }
     if (platform == TargetPlatform.iOS) {
       _nativeCanvasDiagnosticSubscription = (widget
                   .nativeCanvasDiagnosticEventsOverride ??
@@ -1578,9 +1586,9 @@ class _CanvasScreenState extends State<CanvasScreen>
   void dispose() {
     _finishStrokeAutosaveHold(reason: 'canvas_disposed');
     _disposed = true;
-    if (_canvasDiagnostics.isRecording) {
-      unawaited(_canvasDiagnostics.stopCapture(reason: 'canvas_disposed'));
-    }
+    _canvasDiagnostics.record('canvas.session_ended', <String, Object?>{
+      'engineRevision': widget.engine.revision,
+    });
     for (final draftId in _activeBrushDrafts.values) {
       unawaited(
         widget.engine.cancelBrushDraft(draftId).catchError((Object error) {
@@ -3712,160 +3720,6 @@ class _CanvasScreenState extends State<CanvasScreen>
       if (mounted) setState(() => _activeColor = color);
     } catch (error, stack) {
       debugPrint('Project Ink eyedropper failed: $error\n$stack');
-    }
-  }
-
-  Future<void> _showCanvasDiagnostics() async {
-    if (!mounted) return;
-    final recorder = _canvasDiagnostics;
-    await showDialog<void>(
-      context: context,
-      builder:
-          (dialogContext) => AnimatedBuilder(
-            animation: recorder,
-            builder: (context, _) {
-              final recording = recorder.isRecording;
-              final path = recorder.activePath ?? recorder.latestPath;
-              return AlertDialog(
-                title: const Text('Canvas input diagnostics'),
-                content: SizedBox(
-                  width: 440,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        recorder.hitSizeLimit
-                            ? 'Capture reached its 32 MB safety limit.'
-                            : recording
-                            ? 'Capture is running (${(recorder.writtenBytes / (1024 * 1024)).toStringAsFixed(1)} MB).'
-                            : 'Capture is stopped.',
-                      ),
-                      const SizedBox(height: 10),
-                      const Text(
-                        'Records exact pointer packets, rendered GPU dab batches, committed canvas tile pixels, frame revisions, and native or engine errors. Captures stay on this device until you export them. No telemetry is uploaded automatically.',
-                      ),
-                      if (path != null) ...[
-                        const SizedBox(height: 10),
-                        SelectableText(
-                          path,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(),
-                    child: const Text('Close'),
-                  ),
-                  if (path != null && !recording)
-                    TextButton.icon(
-                      onPressed: () => unawaited(_exportCanvasDiagnostics()),
-                      icon: const Icon(Icons.ios_share),
-                      label: const Text('Export trace'),
-                    ),
-                  FilledButton.icon(
-                    onPressed:
-                        recording
-                            ? () => unawaited(recorder.stopCapture())
-                            : () => unawaited(_startCanvasDiagnostics()),
-                    icon: Icon(
-                      recording ? Icons.stop : Icons.fiber_manual_record,
-                    ),
-                    label: Text(recording ? 'Stop capture' : 'Start capture'),
-                  ),
-                ],
-              );
-            },
-          ),
-    );
-  }
-
-  Future<void> _startCanvasDiagnostics({String trigger = 'manual'}) async {
-    try {
-      final tracePath = await _canvasDiagnostics.startCapture(
-        metadata: <String, Object?>{
-          'platform': (widget.targetPlatform ?? defaultTargetPlatform).name,
-          'documentWidth': widget.engine.documentInfo.widthPx,
-          'documentHeight': widget.engine.documentInfo.heightPx,
-          'engineRevision': widget.engine.revision,
-          'activeTool': _activeTool.name,
-          'captureTrigger': trigger,
-          'nativeDabRendererEnabled':
-              _livePreviewSurface is MacLiveSurfaceController,
-          'brushId': _activeBrushId,
-          'brushName': _brushLibrary.selected?.name ?? '',
-          'liveGpuController': _livePreviewSurface != null,
-          'devicePixelRatio':
-              WidgetsBinding
-                  .instance
-                  .platformDispatcher
-                  .views
-                  .first
-                  .devicePixelRatio,
-        },
-      );
-      debugPrint('Project Ink canvas diagnostics recording to $tracePath');
-    } catch (error, stack) {
-      debugPrint(
-        'Project Ink diagnostic capture could not start: $error\n$stack',
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not start diagnostic capture: $error')),
-        );
-      }
-    }
-  }
-
-  Future<void> _exportCanvasDiagnostics() async {
-    final recorder = _canvasDiagnostics;
-    final tracePath =
-        recorder.isRecording
-            ? await recorder.stopCapture(reason: 'export')
-            : await recorder.flush();
-    if (tracePath == null) return;
-    try {
-      final platform = widget.targetPlatform ?? defaultTargetPlatform;
-      if (platform == TargetPlatform.iOS) {
-        final didExport = await const MethodChannel(
-          'org.projectink.studio/canvas_diagnostics_export_v1',
-        ).invokeMethod<bool>('exportTrace', <String, Object?>{
-          'path': tracePath,
-        });
-        if (didExport != true) return;
-      } else {
-        final saveLocation = await getSaveLocation(
-          acceptedTypeGroups: const [
-            XTypeGroup(
-              label: 'Project Ink diagnostic trace',
-              extensions: ['jsonl'],
-            ),
-          ],
-          suggestedName: 'project-ink-canvas-trace.jsonl',
-          confirmButtonText: 'Export trace',
-        );
-        if (saveLocation == null) return;
-        var destination = saveLocation.path;
-        if (!destination.toLowerCase().endsWith('.jsonl')) {
-          destination = '$destination.jsonl';
-        }
-        await File(tracePath).copy(destination);
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Diagnostic trace exported.')),
-        );
-      }
-    } catch (error, stack) {
-      debugPrint('Project Ink diagnostic trace export failed: $error\n$stack');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not export diagnostic trace: $error')),
-        );
-      }
     }
   }
 
@@ -6761,7 +6615,6 @@ class _CanvasScreenState extends State<CanvasScreen>
                     onGestureSettings: _showGestureSettings,
                     onBrushColor: _showBrushColorSettings,
                     onAccessibilitySettings: _showAccessibilitySettings,
-                    onCanvasDiagnostics: _showCanvasDiagnostics,
                     largeControls: _largeControls,
                     leftHanded: _leftHandedToolbar,
                     onTools: () => _selectPanel('tools', context),
@@ -9062,7 +8915,6 @@ class _TopBar extends StatelessWidget {
     required this.onGestureSettings,
     required this.onBrushColor,
     required this.onAccessibilitySettings,
-    required this.onCanvasDiagnostics,
     required this.largeControls,
     required this.leftHanded,
     required this.onTools,
@@ -9105,7 +8957,6 @@ class _TopBar extends StatelessWidget {
   final VoidCallback onGestureSettings;
   final VoidCallback onBrushColor;
   final VoidCallback onAccessibilitySettings;
-  final VoidCallback onCanvasDiagnostics;
   final bool largeControls;
   final bool leftHanded;
   final VoidCallback onTools;
@@ -9360,12 +9211,6 @@ class _TopBar extends StatelessWidget {
                 onPressed: onAccessibilitySettings,
                 hitSize: tabletStudioMode ? 48 : 32,
               ),
-              InkCommandButton(
-                icon: Icons.monitor_heart_outlined,
-                label: 'Canvas input diagnostics',
-                onPressed: onCanvasDiagnostics,
-                hitSize: tabletStudioMode ? 48 : 32,
-              ),
               if (contextControls != null && !compactDesktop) ...[
                 const VerticalDivider(width: 12, indent: 7, endIndent: 7),
                 contextControls!,
@@ -9517,7 +9362,6 @@ class _TopBar extends StatelessWidget {
               onSelected: (value) {
                 if (value == 'mode') onToggleTabletMode();
                 if (value == 'comic') onWorkspaceSelected('comic');
-                if (value == 'diagnostics') onCanvasDiagnostics();
               },
               itemBuilder:
                   (_) => [
@@ -9530,10 +9374,6 @@ class _TopBar extends StatelessWidget {
                     const PopupMenuItem(
                       value: 'comic',
                       child: Text('Comic workspace'),
-                    ),
-                    const PopupMenuItem(
-                      value: 'diagnostics',
-                      child: Text('Canvas input diagnostics'),
                     ),
                   ],
               child: const SizedBox(width: 40, child: Icon(Icons.more_horiz)),

@@ -82,3 +82,25 @@ preview-fallback interaction acceptance was not performed.
   health marker passed. Long Apple Pencil strokes, brush switching, undo/redo,
   save/reopen, preview fallback, and physical latency capture still need direct
   interaction on the device; no physical input acceptance is claimed.
+
+## Rolling diagnostics and current-branch gate rerun (2026-10-01)
+
+- `cargo fmt --all -- --check`, `cargo test --workspace --all-targets
+  --all-features --no-fail-fast`, and `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`: passed on the current branch.
+- `flutter analyze`: passed with no issues. `flutter test`: all 341 tests
+  passed, including the new rolling-segment recorder test. The editor-layout
+  goldens were refreshed for the intentional removal of the diagnostics UI.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 flutter build ios --debug
+  --no-codesign`: passed. The signed profile build also installed and launched
+  on the connected iPad; Flutter startup, Rust initialization, and the engine
+  health marker passed. Startup created the automatic rolling log in the
+  private app diagnostics directory.
+- `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 flutter build macos --debug`:
+  passed.
+- Phase 1/Phase 2 benchmark results above remain applicable: no Rust engine
+  sources changed after those measurements.
+- Physical Pencil acceptance (long strokes, brush switching, undo/redo,
+  save/reopen, preview fallback) is still awaiting direct interaction. The
+  local host has only the arm64 Rust target and cannot run x86_64 binaries
+  because Rosetta is unavailable; the x86_64 golden remains unconfirmed.

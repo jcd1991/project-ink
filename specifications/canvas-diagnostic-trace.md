@@ -1,15 +1,18 @@
 # Canvas diagnostic trace
 
-Project Ink has an opt-in local recorder for investigating input, brush
-rendering, canvas presentation, and native device failures. Start and stop it
-from **Canvas input diagnostics** in the canvas toolbar. The recorder is off by
-default, writes only while the user starts a capture, and never uploads data.
+Project Ink maintains a device-local rolling log for investigating input,
+brush rendering, canvas presentation, and native device failures. It starts
+when the app starts, runs without a canvas toolbar control, and never uploads
+data. Failure to initialize the log does not prevent the editor from opening.
 
 ## Captured data
 
 The recorder writes newline-delimited JSON to the app's private
 `Documents/Project Ink/Diagnostics` folder. Each row has a monotonically
-increasing `seq`, elapsed `tUs`, and event `type`.
+increasing `seq`, elapsed `tUs`, and event `type`. A `log.start` row identifies
+the app process and a `canvas.session_started` row records the active canvas
+context. A `log.segment_rotated` row marks segment changes and reports any rows
+dropped while the file was being rotated.
 
 - `input.native_packet` captures the exact incoming UIKit Pencil packet, then
   the packet after native queue compaction. `input.engine_packet` captures the
@@ -34,14 +37,15 @@ increasing `seq`, elapsed `tUs`, and event `type`.
   texture errors. `error` records caught Flutter, Rust-bridge, storage, and
   renderer failures with stack traces when available.
 
-The app caps each trace at 32 MiB and periodically flushes it so most data is
-retained if the app exits unexpectedly. A `capture.truncated` row identifies a
-trace that reached its cap. The app records document dimensions and rendering
-context but omits document names and file paths. Pointer coordinates, pressure,
-brush-color dabs, and committed tile pixels can reveal artwork; keep the trace
-private and export it only when you choose. On iPad, **Export trace** opens the
-Files export picker. Other supported desktop platforms use the system save
-dialog.
+The recorder rotates at 32 MiB and retains at most the current and previous
+segment (64 MiB total). It prunes older segments when a new log starts or
+rotates. Segments are flushed at rotation and graceful shutdown; an abrupt app
+exit may leave the last buffered rows unwritten. The app records document
+dimensions and rendering context but omits document names and file paths.
+Pointer coordinates, pressure, brush-color dabs, and committed tile pixels can
+reveal artwork. Keep the private app-container logs secure. Developers can
+retrieve them with the platform device tools; there is no in-app capture or
+export UI.
 
 The recorder captures errors visible to Project Ink. It cannot collect
 operating-system crash reports or failures hidden inside iPadOS; those require

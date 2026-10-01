@@ -2,12 +2,10 @@ import Flutter
 import Darwin
 import Foundation
 import UIKit
-import UniformTypeIdentifiers
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let providerDocumentPicker = InkProviderDocumentPicker()
-  private let canvasDiagnosticsExporter = InkCanvasDiagnosticsExporter()
 
   override func application(
     _ application: UIApplication,
@@ -48,30 +46,6 @@ import UniformTypeIdentifiers
     liveTextureChannel.setMethodCallHandler { call, result in
       liveTextures.handle(call, result: result)
     }
-    let canvasDiagnosticsExportChannel = FlutterMethodChannel(
-      name: "org.projectink.studio/canvas_diagnostics_export_v1",
-      binaryMessenger: engineBridge.applicationRegistrar.messenger()
-    )
-    canvasDiagnosticsExportChannel.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "exportTrace" else {
-        result(FlutterMethodNotImplemented)
-        return
-      }
-      guard let arguments = call.arguments as? [String: Any],
-        let tracePath = arguments["path"] as? String,
-        let self,
-        let presenter = self.topViewController()
-      else {
-        result(FlutterError(
-          code: "invalid_arguments",
-          message: "A local trace path and active view are required.",
-          details: nil
-        ))
-        return
-      }
-      self.canvasDiagnosticsExporter.export(path: tracePath, from: presenter, result: result)
-    }
-
     let providerChannel = FlutterMethodChannel(
       name: "org.projectink.studio/provider_documents_v1",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
