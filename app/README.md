@@ -66,3 +66,32 @@ flutter analyze
 flutter test
 flutter run -d macos
 ```
+
+## Code ownership and lifecycle
+
+- `EngineApi` is the Dart-side contract. `FrbEngineApi` adapts the generated
+  Rust API for production; `InMemoryEngineApi` supports isolated tests.
+- `ComicWorkspaceController` owns its Rust project handle. Dispose the
+  controller when the workspace session ends so it closes that capability.
+  Widgets that listen to the controller remove their listener and dispose
+  their own text and animation controllers in `dispose`.
+- `CanvasScreen` composes document, input, tile, preview, and workspace
+  collaborators. Keep pointer queueing, page rebinding, undo/history,
+  autosave, and preview-to-CPU fallback semantics at their existing seams.
+- `AutosaveCoordinator.dispose()` must finish its final checkpoint before the
+  Rust document engine is closed. Retire a live surface before registering a
+  replacement surface; its native handle is tied to the old engine generation.
+- Comic presentation painters and summaries are stateless projections of Rust
+  view types. They do not own project state or mutate the document.
+
+## Flutter Rust Bridge generation
+
+The Rust runtime and Dart runtime are pinned to flutter_rust_bridge 2.13.0.
+Generated files are checked in under `rust/crates/ink-bridge/src/` and
+`app/lib/bridge/generated/`; edit `api.rs`, never generated files. Install the
+matching generator with `cargo install flutter_rust_bridge_codegen --version
+2.13.0 --locked`, then run `../scripts/generate_frb.sh` from this directory.
+Review the complete generated diff after changing exported Rust signatures,
+and keep the generated Rust/Dart API, `api.dart` adapter calls, and platform
+native-host interfaces in sync. Do not upgrade only one runtime package or
+regenerate with an unpinned global generator.

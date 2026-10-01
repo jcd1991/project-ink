@@ -1717,12 +1717,15 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
         ..add(coordinate.x)
         ..add(coordinate.y);
     }
-    return decodeCompositeTileSnapshot(
-      await rust.readCompositeTilesSnapshot(
-        handle: _handle,
-        coordinates: flatCoordinates,
-      ),
+    final captured = await rust.captureCompositeTilesSnapshot(
+      handle: _handle,
+      coordinates: flatCoordinates,
     );
+    // Pixel composition runs against a separate immutable Rust handle. The
+    // expensive work must not retain the document's opaque bridge lock, which
+    // would serialize incoming Pencil and touch packets behind tile reads.
+    final packet = await rust.composeCompositeTilesSnapshot(snapshot: captured);
+    return decodeCompositeTileSnapshot(packet);
   }
 
   @override

@@ -23,3 +23,22 @@ Captured before the Rust and Dart/Flutter refactor on 2026-10-01.
 ## Not measured
 
 Release benchmark binaries were not built because the host had 2.7 GiB free while existing Rust and Flutter build caches occupied several GiB. Preserve those caches and user files; establish benchmark measurements when adequate space is available. No physical tablet acceptance was run during this baseline capture.
+
+## Post-refactor validation status
+
+Captured after the ownership and bridge changes on the same Apple Silicon host.
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed after refactor. |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed. Bridge-wide `clippy::all` suppression is removed; remaining complexity allowances are local to command/transaction or long scenario tests. |
+| `cargo test --workspace --all-targets --all-features --no-fail-fast` | One failure: the same engine golden hash mismatch (`1395959408535220756` vs `12475419944979558790`). All other workspace test targets passed, including 35 bridge tests and 15 comic tests. |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed. |
+| `flutter analyze` | Passed with no issues after extracting bridge adapters and comic/canvas presentation widgets. |
+| `flutter test` | 226 passed, 113 failed. Failures remain editor-layout goldens on this macOS host, matching the captured baseline. Pointer-failure, persistence, tile, and live-render tests passed. |
+| FRB generated API | The 2.13.0-generated Rust and Dart bindings compile against the current Rust API. Regeneration corrected stale checked-in composite-tile bindings to the existing capture/compose API; all other existing exported API names/types remain unchanged. |
+
+Release benchmarks were not rerun: less than 1 GiB remained free and the
+Phase 1/Phase 2 release benchmark executables were not already built. Apple-host
+Clippy compiles the platform-gated Metal path, but no physical tablet acceptance
+was run because no tablet is attached to this task.

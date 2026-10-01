@@ -2103,15 +2103,25 @@ Future<Uint8List> readCompositeTile({
 }) =>
     RustLib.instance.api.crateApiReadCompositeTile(handle: handle, x: x, y: y);
 
-/// Read a bounded group of authoritative composite tiles from one immutable
-/// document revision. `coordinates` is a flat x,y list; each packet record
-/// contains its coordinates followed by one fixed-size BGRA tile.
-Future<Uint8List> readCompositeTilesSnapshot({
+/// Capture the requested tile bytes and revision without doing pixel
+/// composition while holding the document handle. `coordinates` is a flat
+/// x,y list. The returned opaque snapshot has its own bridge lock, so pointer
+/// packets can continue while the caller composites its immutable pixels.
+Future<CompositeTilesSnapshotHandle> captureCompositeTilesSnapshot({
   required DocumentHandle handle,
   required List<int> coordinates,
-}) => RustLib.instance.api.crateApiReadCompositeTilesSnapshot(
+}) => RustLib.instance.api.crateApiCaptureCompositeTilesSnapshot(
   handle: handle,
   coordinates: coordinates,
+);
+
+/// Composite an immutable tile snapshot captured by
+/// [`capture_composite_tiles_snapshot`]. This call uses the snapshot's own
+/// opaque handle, leaving the document handle free for incoming pointer work.
+Future<Uint8List> composeCompositeTilesSnapshot({
+  required CompositeTilesSnapshotHandle snapshot,
+}) => RustLib.instance.api.crateApiComposeCompositeTilesSnapshot(
+  snapshot: snapshot,
 );
 
 /// Read a bounded RGBA layer thumbnail for the responsive layer panel.
@@ -2143,10 +2153,10 @@ Future<List<EngineEvent>> drainEvents({required DocumentHandle handle}) =>
 /// control/data boundary with fixed-width little-endian fields. Version 3
 /// drains tile invalidations and exact stroke-tile coverage from the same
 /// event snapshot. Header: `u16 version`, `u16 flags`, `u32 tile_count`,
-/// `u32 acknowledgement_count`. Tile records are `u64 revision`, `u128
-/// `layer_id`, `i32 tile_x`, and `i32 tile_y`; acknowledgement records retain
-/// the fixed-width prefix documented by `drain_stroke_acknowledgements` and
-/// append exact dirty composite-tile coordinates.
+/// `u32 acknowledgement_count`. Tile records contain a `u64 revision`,
+/// `u128 layer_id`, `i32 tile_x`, and `i32 tile_y`; acknowledgements retain
+/// the fixed-width prefix documented by `drain_stroke_acknowledgements`, then
+/// append exact dirty composite-tile coordinates and bounded stroke metrics.
 Future<Uint8List> drainTileUpdates({required DocumentHandle handle}) =>
     RustLib.instance.api.crateApiDrainTileUpdates(handle: handle);
 
@@ -2181,6 +2191,9 @@ Future<List<VectorStrokeSummary>> vectorStrokeSummaries({
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>>
 abstract class ComicProjectHandle implements RustOpaqueInterface {}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CompositeTilesSnapshotHandle>>
+abstract class CompositeTilesSnapshotHandle implements RustOpaqueInterface {}
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DocumentHandle>>
 abstract class DocumentHandle implements RustOpaqueInterface {}
