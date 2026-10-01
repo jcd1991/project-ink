@@ -301,6 +301,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
   int _cpuCommitBatchId = 0;
   bool _strokeActive = false;
   bool _activeStrokeIsTouch = false;
+  bool _strokeAutosaveHoldActive = false;
   // After the crossing sample has been clipped by Rust, captured pointer
   // motion outside the artwork (and any re-entry) cannot alter the stroke.
   // Ignore those moves so a long off-canvas drag cannot backlog bridge work.
@@ -812,6 +813,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       widget.onEngineReplaced?.call(oldWidget.engine, oldSurfaceDisposal);
       _pendingNativePackets.clear();
       _nativePacketDrainQueued = false;
+      _finishStrokeAutosaveHold(reason: 'engine_replaced');
       _strokeActive = false;
       _activeStrokeIsTouch = false;
       _refreshRequested = false;
@@ -1535,6 +1537,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   @override
   void dispose() {
+    _finishStrokeAutosaveHold(reason: 'canvas_disposed');
     _disposed = true;
     if (_canvasDiagnostics.isRecording) {
       unawaited(_canvasDiagnostics.stopCapture(reason: 'canvas_disposed'));
@@ -1779,6 +1782,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
       _enqueueStrokeWork(() => _handleToolEventSafely(event));
       return;
     }
+    if (event is PointerDownEvent &&
+        (event.kind == PointerDeviceKind.stylus ||
+            event.kind == PointerDeviceKind.invertedStylus ||
+            event.kind == PointerDeviceKind.mouse)) {
+      _beginStrokeAutosaveHold();
+    }
     if (event.kind == PointerDeviceKind.touch) {
       if (_touchDown.length > 1) {
         _cancelTouchDrawingStroke(reason: 'second_touch_during_stroke');
@@ -1789,7 +1798,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
           !_singleFingerNavigation &&
           !_strokeActive;
       if (_touchDrawingStrokeActive || canStartTouchStroke) {
-        if (canStartTouchStroke) _touchDrawingStrokeActive = true;
+        if (canStartTouchStroke) {
+          _touchDrawingStrokeActive = true;
+          _beginStrokeAutosaveHold();
+        }
         final sourceSequence = _nextPointerSequence();
         final preparedPosition = _applyStrokeConstraint(
           _safeInputPosition(_canvasPosition(event.localPosition)),
@@ -2959,6 +2971,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
         _activeTool != IllustrationTool.eraser) {
       return;
     }
+    if (hasDown) _beginStrokeAutosaveHold();
     if (widget.onPerformanceSnapshot == null) {
       _lastPacketMicros = null;
     } else {
@@ -3147,6 +3160,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
         ),
         'strokeWorkQueueDepth': _strokeOperations.length,
         'nativePacketQueueDepth': _pendingNativePackets.length,
+        'autosaveDeferredForStroke': _strokeAutosaveHoldActive,
         'nativeTextureEnabled': _livePreviewSurface != null,
         'nativeTextureReady':
             _livePreviewSurface?.textureId.value != null &&
@@ -3363,6 +3377,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
         _finishConstraintStroke();
         _stylusHoldTimer?.cancel();
         _stylusLastPosition = null;
+        _finishStrokeAutosaveHold(
+          reason: hasCancel ? 'pencil_boundary_cancel' : 'pencil_boundary_up',
+        );
         unawaited(_refreshLayerThumbnails());
         unawaited(_refreshTiles());
       }
@@ -3506,6 +3523,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
         _retirePreviewIfAlreadyCpuCovered(source: 'native_pencil_end');
       }
       _finishConstraintStroke();
+      _finishStrokeAutosaveHold(
+        reason: hasCancel ? 'pencil_cancel' : 'pencil_up',
+      );
     }
     // The periodic 16 ms tile poll is the live presentation clock while a
     // stroke is active. Refreshing after every packet makes the CPU tile
@@ -3573,6 +3593,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       _stylusHoldTimer?.cancel();
       _stylusLastPosition = null;
       _finishConstraintStroke();
+      _finishStrokeAutosaveHold(reason: 'touch_cancel');
       unawaited(_refreshTiles());
     });
   }
@@ -4422,6 +4443,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
   );
 
   Future<void> _beginActiveBrushStroke() async {
+    _beginStrokeAutosaveHold();
     final pendingQuickSize = _pendingQuickBrushSize;
     if (pendingQuickSize != null) {
       _persistBrushSize(pendingQuickSize);
@@ -4532,6 +4554,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
       _finishConstraintStroke();
       _stylusHoldTimer?.cancel();
       _stylusLastPosition = null;
+      _finishStrokeAutosaveHold(
+        reason: cancelled ? 'pointer_boundary_cancel' : 'pointer_boundary_up',
+      );
       unawaited(_refreshLayerThumbnails());
       unawaited(_refreshTiles());
       return;
@@ -4653,6 +4678,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
       _finishConstraintStroke();
       _stylusHoldTimer?.cancel();
       _stylusLastPosition = null;
+      _finishStrokeAutosaveHold(
+        reason: event is PointerCancelEvent ? 'pointer_cancel' : 'pointer_up',
+      );
       unawaited(_refreshLayerThumbnails());
     }
     // Keep CPU presentation on the fixed 16 ms poll during the stroke. The
@@ -4900,6 +4928,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
   }) async {
     if (!_strokeActive) {
       _awaitingPreviewCommit = false;
+      _finishStrokeAutosaveHold(reason: 'stroke_abort_without_active_stroke');
       if (!preservePreview) {
         _liveStrokeCoordinator.clear();
         _lastPublishedPreviewAcknowledgement = null;
@@ -4929,6 +4958,28 @@ class _CanvasScreenState extends State<CanvasScreen> {
     _stylusHoldTimer?.cancel();
     _stylusLastPosition = null;
     widget.autosave?.markDirty();
+    _finishStrokeAutosaveHold(reason: 'stroke_abort');
+  }
+
+  void _beginStrokeAutosaveHold() {
+    if (_strokeAutosaveHoldActive) return;
+    _strokeAutosaveHoldActive = true;
+    widget.autosave?.beginContinuousEdit();
+    _canvasDiagnostics.record('canvas.autosave_deferred_for_stroke', {
+      'nativePacketQueueDepth': _pendingNativePackets.length,
+      'strokeWorkQueueDepth': _strokeOperations.length,
+    });
+  }
+
+  void _finishStrokeAutosaveHold({required String reason}) {
+    if (!_strokeAutosaveHoldActive) return;
+    _strokeAutosaveHoldActive = false;
+    widget.autosave?.endContinuousEdit();
+    _canvasDiagnostics.record('canvas.autosave_resumed_after_stroke', {
+      'reason': reason,
+      'nativePacketQueueDepth': _pendingNativePackets.length,
+      'strokeWorkQueueDepth': _strokeOperations.length,
+    });
   }
 
   void _armDrawAndHold(Offset position) {
@@ -6264,6 +6315,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     _finishConstraintStroke();
     _stylusHoldTimer?.cancel();
     _stylusLastPosition = null;
+    _finishStrokeAutosaveHold(reason: 'vector_stroke_finished');
   }
 
   void _updateBrushDraft(BrushPresetView preset) {
