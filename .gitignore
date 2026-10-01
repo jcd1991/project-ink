@@ -4,7 +4,12 @@
 # Local build products and diagnostic captures
 /build/
 /app/macos/build/
+/app/ios/build/
+/app/android/app/build/
+/app/linux/build/
+/app/windows/build/
 /artifacts/
+/app/test/failures/
 /outputs/*.apk
 /app/outputs/*.apk
 
