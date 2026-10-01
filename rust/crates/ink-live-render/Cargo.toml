@@ -1,0 +1,32 @@
+[package]
+name = "ink-live-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["gpu"]
+gpu = ["dep:pollster", "dep:wgpu"]
+
+[dependencies]
+pollster = { version = "0.3", optional = true }
+wgpu = { version = "0.20", optional = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+metal = "0.28.0"
+wgpu-hal = { version = "0.21.1", features = ["metal"] }
+
+[lints.rust]
+# The Apple IOSurface adapter imports a texture owned by the Flutter texture
+# registry. Its unsafe boundary is confined to the Metal import methods and
+# validates dimensions/format before handing ownership to wgpu.
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[[example]]
+name = "live_surface_benchmark"
+required-features = ["gpu"]
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

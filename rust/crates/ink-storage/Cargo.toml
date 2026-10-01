@@ -1,0 +1,19 @@
+[package]
+name = "ink-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ink-comic = { path = "../ink-comic" }
+ink-command = { path = "../ink-command" }
+ink-model = { path = "../ink-model" }
+ink-raster = { path = "../ink-raster" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.13"
+sha2 = "0.10"
+
+[lints]
+workspace = true

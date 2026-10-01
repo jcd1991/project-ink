@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+  "rust/crates/ink-model",
+  "rust/crates/ink-command",
+  "rust/crates/ink-input",
+  "rust/crates/ink-brush",
+  "rust/crates/ink-raster",
+  "rust/crates/ink-compositor",
+  "rust/crates/ink-storage",
+  "rust/crates/ink-export",
+  "rust/crates/ink-engine",
+  "rust/crates/ink-bridge",
+  "rust/crates/ink-test-support",
+  "rust/crates/ink-tools",
+  "rust/crates/ink-comic",
+  "rust/crates/ink-live-render",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/project-ink/project-ink"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

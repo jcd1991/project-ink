@@ -1,0 +1,12 @@
+[package]
+name = "ink-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ink-raster = { path = "../ink-raster" }
+
+[lints]
+workspace = true
+

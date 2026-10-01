@@ -1,0 +1,35 @@
+PODS:
+  - file_selector_macos (0.0.1):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+  - ink_bridge (0.0.1):
+    - FlutterMacOS
+  - shared_preferences_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - file_selector_macos (from `Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - ink_bridge (from `Flutter/ephemeral/.symlinks/plugins/ink_bridge/macos`)
+  - shared_preferences_foundation (from `Flutter/ephemeral/.symlinks/plugins/shared_preferences_foundation/darwin`)
+
+EXTERNAL SOURCES:
+  file_selector_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  ink_bridge:
+    :path: Flutter/ephemeral/.symlinks/plugins/ink_bridge/macos
+  shared_preferences_foundation:
+    :path: Flutter/ephemeral/.symlinks/plugins/shared_preferences_foundation/darwin
+
+SPEC CHECKSUMS:
+  file_selector_macos: 9e9e068e90ebee155097d00e89ae91edb2374db7
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
+  ink_bridge: a0329e68616ace200d4a78c3ea6eab2a90c16cab
+  shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
+
+PODFILE CHECKSUM: 2ec95bf3db5223b3aa89893b7286a77e09e8c2ae
+
+COCOAPODS: 1.17.0

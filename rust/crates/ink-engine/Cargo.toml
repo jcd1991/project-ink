@@ -1,0 +1,27 @@
+[package]
+name = "ink-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ink-comic = { path = "../ink-comic" }
+ink-brush = { path = "../ink-brush" }
+ink-command = { path = "../ink-command" }
+ink-input = { path = "../ink-input" }
+ink-live-render = { path = "../ink-live-render", default-features = false }
+ink-model = { path = "../ink-model" }
+ink-raster = { path = "../ink-raster" }
+ink-storage = { path = "../ink-storage" }
+ink-export = { path = "../ink-export" }
+ink-compositor = { path = "../ink-compositor" }
+ink-tools = { path = "../ink-tools" }
+serde_json = "1"
+
+[dev-dependencies]
+ink-test-support = { path = "../ink-test-support" }
+ink-live-render = { path = "../ink-live-render", features = ["gpu"] }
+sha2 = "0.10"
+
+[lints]
+workspace = true

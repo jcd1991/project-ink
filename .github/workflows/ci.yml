@@ -1,0 +1,286 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: 1.98.1
+
+jobs:
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Enforce Phase 1 CPU benchmark guardrails
+        shell: bash
+        run: |
+          report="$(cargo run -p ink-engine --release --example phase1_benchmark)"
+          echo "$report"
+          test "$(jq -r '.p95_packet_to_dirty_us' <<<"$report")" -le 8000
+          test "$(jq -r '.max_dirty_tiles' <<<"$report")" -le 4
+          test "$(jq -r '.estimated_engine_bytes' <<<"$report")" -lt 900000000
+      - name: Enforce Phase 2 mixed-brush session guardrails
+        shell: bash
+        run: |
+          report="$(cargo run -p ink-engine --release --example phase2_session_benchmark)"
+          echo "$report"
+          test "$(jq -r '.strokes' <<<"$report")" -eq 3600
+          test "$(jq -r '.phase_two_brushes' <<<"$report")" -ge 7
+          test "$(jq -r '.p95_stroke_us' <<<"$report")" -le 50000
+          test "$(jq -r '.max_memory_bytes' <<<"$report")" -lt 900000000
+          initial_memory="$(jq -r '.initial_memory_bytes' <<<"$report")"
+          final_memory="$(jq -r '.final_memory_bytes' <<<"$report")"
+          max_memory="$(jq -r '.max_memory_bytes' <<<"$report")"
+          test "$initial_memory" -gt 0
+          test "$final_memory" -gt 0
+          test "$max_memory" -ge "$final_memory"
+          first="$(jq -r '.first_window_p95_us' <<<"$report")"
+          last="$(jq -r '.last_window_p95_us' <<<"$report")"
+          test "$first" -gt 0
+          test "$last" -le "$((first * 2))"
+
+  replay-determinism:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            architecture: x86_64
+          - runner: macos-14
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Verify runner architecture
+        shell: bash
+        run: |
+          actual=$(uname -m)
+          echo "runner=${{ matrix.runner }} expected=${{ matrix.architecture }} actual=${actual}"
+          case "${{ matrix.architecture }}" in
+            x86_64) test "$actual" = "x86_64" ;;
+            arm64) test "$actual" = "arm64" ;;
+          esac
+      - run: cargo test -p ink-engine golden_tile_hash
+
+  flutter:
+    runs-on: ubuntu-22.04
+    needs: rust
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version-file: app/pubspec.yaml
+          cache: true
+      - run: flutter --version
+      - run: flutter pub get
+        working-directory: app
+      - run: flutter analyze
+        working-directory: app
+      - run: flutter test
+        working-directory: app
+      - name: Evaluate Phase 1 trace fixtures
+        shell: bash
+        run: |
+          dart tools/phase1_trace_report.dart fixtures/phase1_trace/pass.jsonl ipad-m4
+          if dart tools/phase1_trace_report.dart fixtures/phase1_trace/fail.jsonl ipad-m4; then
+            echo "The known-bad trace fixture unexpectedly passed" >&2
+            exit 1
+          fi
+
+  build-macos-ios:
+    runs-on: macos-14
+    needs: flutter
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version-file: app/pubspec.yaml
+          cache: true
+      - run: flutter config --enable-macos-desktop
+      - run: flutter --version
+      - run: flutter pub get
+        working-directory: app
+      - run: flutter build macos --debug
+        working-directory: app
+      - run: flutter build ios --debug --simulator --no-codesign
+        working-directory: app
+      - name: Run iOS native unit tests
+        run: >-
+          xcodebuild test
+          -workspace app/ios/Runner.xcworkspace
+          -scheme Runner
+          -destination 'platform=iOS Simulator,OS=latest,name=iPhone 15'
+          -quiet
+      - name: Run macOS native unit tests
+        run: >-
+          xcodebuild test
+          -workspace app/macos/Runner.xcworkspace
+          -scheme Runner
+          -destination 'platform=macOS'
+          -quiet
+      - name: Verify Apple build outputs
+        shell: bash
+        run: |
+          test -d app/build/macos/Build/Products/Debug/project_ink.app
+          test -d app/build/ios/iphonesimulator/Runner.app
+          find app/build/macos/Build/Products/Debug/project_ink.app -type f -exec shasum -a 256 {} + > app/build/macos-debug-files.sha256
+          find app/build/ios/iphonesimulator/Runner.app -type f -exec shasum -a 256 {} + > app/build/ios-simulator-debug-files.sha256
+      - name: Upload Apple debug artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: project-ink-apple-debug-${{ github.sha }}
+          path: |
+            app/build/macos/Build/Products/Debug/project_ink.app
+            app/build/ios/iphonesimulator/Runner.app
+            app/build/macos-debug-files.sha256
+            app/build/ios-simulator-debug-files.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  build-android:
+    runs-on: ubuntu-22.04
+    needs: flutter
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version-file: app/pubspec.yaml
+          cache: true
+      - run: flutter --version
+      - name: Install Android SDK and NDK versions
+        shell: bash
+        run: |
+          export PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "ndk;27.1.12297006" \
+            "ndk;28.2.13676358"
+          test -d "${ANDROID_HOME}/ndk/27.1.12297006"
+          test -d "${ANDROID_HOME}/ndk/28.2.13676358"
+      - run: flutter pub get
+        working-directory: app
+      - run: flutter build apk --debug --target-platform android-arm64
+        working-directory: app
+      - name: Run Android native unit tests
+        working-directory: app/android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+      - name: Verify Android build output
+        shell: bash
+        run: |
+          test -f app/build/app/outputs/flutter-apk/app-debug.apk
+          shasum -a 256 app/build/app/outputs/flutter-apk/app-debug.apk | tee app/build/android-arm64-debug.sha256
+      - name: Upload Android debug artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: project-ink-android-arm64-debug-${{ github.sha }}
+          path: |
+            app/build/app/outputs/flutter-apk/app-debug.apk
+            app/build/android-arm64-debug.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    runs-on: windows-2022
+    needs: flutter
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version-file: app/pubspec.yaml
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter --version
+      - run: flutter pub get
+        working-directory: app
+      - run: flutter build windows --debug
+        working-directory: app
+      - name: Verify Windows build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path app/build/windows/x64/runner/Debug/project_ink.exe)) { throw "Windows executable missing" }
+          Get-FileHash app/build/windows/x64/runner/Debug/project_ink.exe -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  project_ink.exe"
+          } | Set-Content -NoNewline app/build/windows-x64-debug.sha256
+          if ((Get-Content app/build/windows-x64-debug.sha256).Length -lt 64) { throw "Windows checksum missing" }
+      - name: Upload Windows debug artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: project-ink-windows-x64-debug-${{ github.sha }}
+          path: |
+            app/build/windows/x64/runner/Debug
+            app/build/windows-x64-debug.sha256
+          if-no-files-found: error
+          retention-days: 7
+      - name: Run native Windows live-texture lifecycle test
+        working-directory: app
+        run: flutter test integration_test/desktop_live_texture_smoke_test.dart -d windows
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    needs: flutter
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes clang cmake ninja-build pkg-config libgtk-3-dev libstdc++-12-dev xvfb
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version-file: app/pubspec.yaml
+          cache: true
+      - run: flutter config --enable-linux-desktop
+      - run: flutter --version
+      - run: flutter pub get
+        working-directory: app
+      - name: Test bounded native live-texture core
+        shell: bash
+        run: |
+          clang++ -std=c++17 -Wall -Wextra -Werror \
+            app/native/live_texture_core.cc \
+            app/native/live_texture_core_test.cc \
+            -o /tmp/project-ink-live-texture-core-test
+          /tmp/project-ink-live-texture-core-test
+      - run: flutter build linux --debug
+        working-directory: app
+      - name: Verify Linux build output
+        shell: bash
+        run: |
+          test -x app/build/linux/x64/debug/bundle/project_ink
+          sha256sum app/build/linux/x64/debug/bundle/project_ink | tee app/build/linux-x64-debug.sha256
+      - name: Upload Linux debug artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: project-ink-linux-x64-debug-${{ github.sha }}
+          path: |
+            app/build/linux/x64/debug/bundle
+            app/build/linux-x64-debug.sha256
+          if-no-files-found: error
+          retention-days: 7
+      - name: Run native Linux live-texture lifecycle test
+        working-directory: app
+        run: xvfb-run -a flutter test integration_test/desktop_live_texture_smoke_test.dart -d linux

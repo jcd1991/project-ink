@@ -1,0 +1,15 @@
+[package]
+name = "ink-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+png = "0.17"
+jpeg-encoder = "0.6"
+webp = "0.3"
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }

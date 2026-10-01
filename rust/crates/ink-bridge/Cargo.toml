@@ -1,0 +1,39 @@
+[package]
+name = "ink_bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0"
+ink-command = { path = "../ink-command" }
+ink-comic = { path = "../ink-comic" }
+ink-brush = { path = "../ink-brush" }
+ink-engine = { path = "../ink-engine" }
+ink-export = { path = "../ink-export" }
+ink-tools = { path = "../ink-tools" }
+ink-model = { path = "../ink-model" }
+ink-raster = { path = "../ink-raster" }
+ink-storage = { path = "../ink-storage" }
+ink-live-render = { path = "../ink-live-render" }
+
+[lints.rust]
+# flutter_rust_bridge's generated transport contains narrowly-scoped FFI
+# unsafe blocks. Handwritten `api.rs` remains unsafe-free and is reviewed
+# independently from the generated bindings.
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+wildcard-imports = "allow"
+unreadable-literal = "allow"
+semicolon-if-nothing-returned = "allow"
+cast-sign-loss = "allow"
+cast-possible-truncation = "allow"
+cast-possible-wrap = "allow"
+cast-lossless = "allow"

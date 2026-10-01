@@ -1,0 +1,13 @@
+[package]
+name = "ink-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ink-model = { path = "../ink-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
