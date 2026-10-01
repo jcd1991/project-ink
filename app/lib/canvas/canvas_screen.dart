@@ -42,6 +42,7 @@ import 'workspace_panels.dart';
 import 'touch_gesture_classifier.dart';
 
 part 'canvas_document_actions.dart';
+part 'canvas_preview_synchronization.dart';
 
 String _documentDisplayName(String? path) {
   if (path == null || path.isEmpty) return 'Untitled';
@@ -257,13 +258,14 @@ class CanvasScreen extends StatefulWidget {
 }
 
 class _CanvasScreenState extends State<CanvasScreen>
-    with _CanvasDocumentActions {
+    with _CanvasDocumentActions, _CanvasPreviewSynchronization {
   static const Duration _tilePollInterval = Duration(milliseconds: 16);
   static const int _maxCpuHandoffSnapshotTiles = 256;
   // Negative IDs cannot collide with persisted UUID-backed layer IDs. They
   // identify the authoritative Rust composite stream in the Flutter cache.
   static const int _compositeLayerId = -1;
 
+  @override
   final GlobalKey _canvasKey = GlobalKey();
   final Map<int, Offset> _pointers = <int, Offset>{};
   final Map<int, Offset> _touchDown = <int, Offset>{};
@@ -273,7 +275,9 @@ class _CanvasScreenState extends State<CanvasScreen>
   final Map<int, Future<void>> _brushEditQueues = <int, Future<void>>{};
   final TileCache _tileBytes = TileCache();
   final TileImageCache _tileImages = TileImageCache();
+  @override
   final Phase1PerformanceTrace _performanceTrace = Phase1PerformanceTrace();
+  @override
   late final ValueNotifier<LiveStrokePreview?> _strokePreview =
       ValueNotifier<LiveStrokePreview?>(null);
   late final EditorCommandRegistry _commands = EditorCommandRegistry(
@@ -296,6 +300,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   StreamSubscription<void>? _nativePointerStatusSubscription;
   StreamSubscription<String>? _nativePencilCommandSubscription;
   StreamSubscription<Map<String, Object?>>? _nativeCanvasDiagnosticSubscription;
+  @override
   final CanvasDiagnosticRecorder _canvasDiagnostics =
       CanvasDiagnosticRecorder.instance;
   int _touchCount = 0;
@@ -317,6 +322,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   bool _refreshRequested = false;
   bool _refreshInitialRequested = false;
   bool _initialTilesLoaded = false;
+  @override
   bool _disposed = false;
   bool _nativePointerEnabled = false;
   int _nativeDiagnosticPacketCount = 0;
@@ -328,6 +334,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   bool _eraserActive = false;
   bool _quickMenuVisible = false;
   bool _colorSamplerArmed = false;
+  @override
   bool _mirrorCanvas = false;
   bool _touchGestureTriggered = false;
   Offset? _touchGesturePosition;
@@ -348,8 +355,9 @@ class _CanvasScreenState extends State<CanvasScreen>
   bool _documentActionRunning = false;
   @override
   int _documentActionGeneration = 0;
+  @override
   LivePreviewController? _livePreviewSurface;
-  bool _liveViewportSyncScheduled = false;
+  @override
   Future<void> _pendingLiveSurfaceDisposal = Future<void>.value();
   final List<StrokeAcknowledgement> _pendingLiveStrokeAcks =
       <StrokeAcknowledgement>[];
@@ -411,8 +419,11 @@ class _CanvasScreenState extends State<CanvasScreen>
   int _engineGeneration = 0;
   int? _lastPacketMicros;
   int _renderRevision = 0;
+  @override
   Offset _pan = Offset.zero;
+  @override
   double _scale = 1;
+  @override
   double _rotation = 0;
   double _scaleGestureStartScale = 1;
   double _scaleGestureStartRotation = 0;
@@ -1578,129 +1589,6 @@ class _CanvasScreenState extends State<CanvasScreen>
     _comicWorkspace.removeListener(_onComicWorkspaceChanged);
     _comicWorkspace.dispose();
     super.dispose();
-  }
-
-  void _configureLivePreviewSurface() {
-    final factory = widget.livePreviewControllerFactory;
-    if (factory != null) {
-      final controller = factory(widget.engine);
-      controller.gpuFrameReady.addListener(_onLiveFrameReadinessChanged);
-      _livePreviewSurface = controller;
-      return;
-    }
-    final platform = widget.targetPlatform ?? defaultTargetPlatform;
-    final engine = widget.engine;
-    // iPad presents the compiled brush dabs on the native GPU surface. The
-    // incremental Flutter path is an approximate fallback and should only be
-    // shown in explicit comparison builds; Rust CPU tiles remain authoritative
-    // and replace matching GPU coverage after commit.
-    final useDabTexturePreview =
-        platform == TargetPlatform.macOS ||
-        (platform == TargetPlatform.iOS && !_disableIpadDabRenderer);
-    if (useDabTexturePreview && engine is LiveRenderEngineApi) {
-      final controller = MacLiveSurfaceController(
-        engine: engine as LiveRenderEngineApi,
-        onDiagnosticEvent:
-            (type, fields) => _canvasDiagnostics.record(type, fields),
-        onTextureSubmission:
-            widget.onPerformanceSnapshot == null
-                ? null
-                : _performanceTrace.markNativeTextureSubmission,
-      );
-      controller.gpuFrameReady.addListener(_onLiveFrameReadinessChanged);
-      _livePreviewSurface = controller;
-    } else if (platform == TargetPlatform.android &&
-        engine is LiveDabSourceApi) {
-      final controller = AndroidLiveSurfaceController(
-        engine: engine as LiveDabSourceApi,
-      );
-      controller.gpuFrameReady.addListener(_onLiveFrameReadinessChanged);
-      _livePreviewSurface = controller;
-    } else if ((platform == TargetPlatform.windows ||
-            platform == TargetPlatform.linux) &&
-        engine is LiveDabSourceApi) {
-      final controller = NativeLiveSurfaceController(
-        engine: engine as LiveDabSourceApi,
-        textureAdapter: DesktopLiveTextureAdapter(),
-        platformName: platform == TargetPlatform.windows ? 'Windows' : 'Linux',
-        maxSurfaceBytes: 64 * 1024 * 1024,
-      );
-      controller.gpuFrameReady.addListener(_onLiveFrameReadinessChanged);
-      _livePreviewSurface = controller;
-    }
-  }
-
-  Future<void> _queueLiveSurfaceDisposal(LivePreviewController surface) {
-    final disposal = _pendingLiveSurfaceDisposal
-        .then((_) => surface.dispose())
-        .catchError((Object error, StackTrace stack) {
-          debugPrint('Project Ink live surface cleanup failed: $error\n$stack');
-        });
-    _pendingLiveSurfaceDisposal = disposal;
-    return disposal;
-  }
-
-  void _onLiveFrameReadinessChanged() {
-    final preview = _strokePreview.value;
-    if (preview != null) {
-      _setStrokePreview(preview.copyWith(revision: preview.revision + 1));
-    }
-  }
-
-  /// Replaces the current ephemeral path and releases cached GPU pictures
-  /// whose chunks are no longer reachable from the new path. ValueNotifier
-  /// listeners run synchronously, so a painter cannot still be using a removed
-  /// picture when it is disposed here.
-  void _setStrokePreview(LiveStrokePreview? next) {
-    final previous = _strokePreview.value;
-    _strokePreview.value = next;
-    if (previous == null) return;
-    final retained = <ui.Picture>{
-      for (final chunk in next?.chunks ?? const <LiveStrokePreviewChunk>[])
-        chunk.picture,
-    };
-    final disposed = <ui.Picture>{};
-    for (final chunk in previous.chunks) {
-      if (!retained.contains(chunk.picture) && disposed.add(chunk.picture)) {
-        chunk.picture.dispose();
-      }
-    }
-  }
-
-  void _scheduleLiveViewportSync() {
-    final liveSurface = _livePreviewSurface;
-    if (liveSurface == null || _liveViewportSyncScheduled || _disposed) return;
-    _liveViewportSyncScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _liveViewportSyncScheduled = false;
-      if (!mounted ||
-          _disposed ||
-          !identical(liveSurface, _livePreviewSurface)) {
-        return;
-      }
-      unawaited(_synchronizeLiveViewportAfterCleanup(liveSurface));
-    });
-  }
-
-  Future<void> _synchronizeLiveViewportAfterCleanup(
-    LivePreviewController liveSurface,
-  ) async {
-    await _pendingLiveSurfaceDisposal;
-    if (!mounted || _disposed || !identical(liveSurface, _livePreviewSurface)) {
-      return;
-    }
-    final renderObject = _canvasKey.currentContext?.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) return;
-    liveSurface.synchronizeViewport(
-      viewportSize: renderObject.size,
-      devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
-      pan: _pan,
-      scale: _scale,
-      rotation: _rotation,
-      mirrored: _mirrorCanvas,
-      documentWidth: widget.engine.documentInfo.widthPx,
-      documentHeight: widget.engine.documentInfo.heightPx,
-    );
   }
 
   void _onComicWorkspaceChanged() {
