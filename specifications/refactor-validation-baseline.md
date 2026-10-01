@@ -71,8 +71,14 @@ preview-fallback interaction acceptance was not performed.
   first and last 600-stroke windows measured 40,850 µs and 40,078 µs. Maximum
   estimated memory was 323,928,512 bytes. Timing, trend, and 900 MB memory
   limits pass.
-- Current iOS device and macOS builds were attempted after the user freed disk
-  space. Both stopped while writing the Rust `ink_bridge` archive with `No
-  space left on device`; the filesystem had 650 MiB before those builds and
-  about 246 MiB afterward. Existing build products were preserved. No
-  physical Apple Pencil acceptance was performed.
+- The first current iOS and macOS builds stopped while writing the Rust
+  `ink_bridge` archive with `No space left on device`. After more disk space
+  became available, both were rerun one at a time with Rust debug symbols and
+  incremental compilation disabled. `flutter build ios --debug --no-codesign`
+  and `flutter build macos --debug` both passed. The existing build products
+  were preserved.
+- The connected iPad Pro 11-inch (3rd generation) accepted an automatically
+  signed debug deployment. Flutter and Rust startup completed and the engine
+  health marker passed. Long Apple Pencil strokes, brush switching, undo/redo,
+  save/reopen, preview fallback, and physical latency capture still need direct
+  interaction on the device; no physical input acceptance is claimed.
