@@ -35,9 +35,13 @@ Captured after the ownership and bridge changes on the same Apple Silicon host.
 | `cargo test --workspace --all-targets --all-features --no-fail-fast` | One failure: the same engine golden hash mismatch (`1395959408535220756` vs `12475419944979558790`). All other workspace test targets passed, including 35 bridge tests and 15 comic tests. |
 | `flutter analyze` | Passed with no issues after extracting bridge adapters and comic/canvas presentation widgets. |
 | `flutter test` | 226 passed, 113 failed, matching the captured baseline: editor-layout golden diffs plus the same preview chunk-count expectation mismatch. Pointer-failure, document-action, autosave, persistence, and tile tests passed; the live-stroke coordinator expectation remains unresolved. |
+| `flutter build ios --debug --no-codesign` | Passed for iOS device architecture and produced `app/build/ios/iphoneos/Runner.app`. The connected iPad was not installed or interactively smoke-tested because this build disables signing. |
+| `flutter build macos --debug` | Passed and produced `app/build/macos/Build/Products/Debug/project_ink.app`. |
+| Focused Flutter tests after canvas extraction | Passed: `canvas_document_actions_test.dart`, `canvas_pointer_failure_test.dart`, `tile_cache_test.dart`, and `autosave_coordinator_test.dart`. |
 | FRB generated API | The 2.13.0-generated Rust and Dart bindings compile against the current Rust API. Regeneration corrected stale checked-in composite-tile bindings to the existing capture/compose API; other exported API names and types remain unchanged. |
 
 Release benchmarks were not rerun: less than 1 GiB remained free and the
 Phase 1/Phase 2 release benchmark executables were not already built. Apple-host
-Clippy compiles the platform-gated Metal path, but no physical tablet acceptance
-was run because no tablet is attached to this task.
+Clippy compiles the platform-gated Metal path. A physical tablet was attached
+for this follow-up, but long-stroke, brush-switch, undo/redo, save/reopen, and
+preview-fallback interaction acceptance was not performed.

@@ -323,8 +323,8 @@ class _CanvasScreenState extends State<CanvasScreen>
   // motion outside the artwork (and any re-entry) cannot alter the stroke.
   // Ignore those moves so a long off-canvas drag cannot backlog bridge work.
   bool _strokeCaptureEndedAtBoundary = false;
-  StrokeAcknowledgement? _lastPublishedPreviewAcknowledgement;
   @override
+  StrokeAcknowledgement? _lastPublishedPreviewAcknowledgement;
   bool _nativeLastSampleInsideDocument = false;
   bool _previewStoppedAtPageEdge = false;
   bool _interfaceHidden = false;
@@ -365,14 +365,14 @@ class _CanvasScreenState extends State<CanvasScreen>
   LivePreviewController? _livePreviewSurface;
   @override
   Future<void> _pendingLiveSurfaceDisposal = Future<void>.value();
+  @override
   final List<StrokeAcknowledgement> _pendingLiveStrokeAcks =
-  @override
       <StrokeAcknowledgement>[];
+  @override
   final List<StrokeAcknowledgement> _pendingCpuStrokeAcks =
-  @override
       <StrokeAcknowledgement>[];
-  bool _awaitingPreviewCommit = false;
   @override
+  bool _awaitingPreviewCommit = false;
   bool _showBrushes = false;
   bool _showLayers = false;
   bool _showTools = false;
@@ -422,16 +422,16 @@ class _CanvasScreenState extends State<CanvasScreen>
         },
       );
   final LayerSelectionModel _layerSelection = LayerSelectionModel();
-  List<LayerView> _layers = const [];
   @override
+  List<LayerView> _layers = const [];
   List<VectorStrokeSummaryView> _vectorStrokes = const [];
   bool _comicChangeScheduled = false;
+  @override
   int _engineGeneration = 0;
   @override
   int? _lastPacketMicros;
   @override
   int _renderRevision = 0;
-  @override
   @override
   Offset _pan = Offset.zero;
   @override
@@ -4752,6 +4752,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     return _boundedStrokePosition(start + delta * amount.clamp(0.0, 1.0));
   }
 
+  @override
   int _previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement) {
     return _liveStrokeCoordinator.previewIndexForSourceSequence(
       acknowledgement.highestCommittedSequence,
@@ -4780,7 +4781,6 @@ class _CanvasScreenState extends State<CanvasScreen>
       await _strokeOperations.idle;
       await widget.engine.undo();
       widget.autosave?.markDirty();
-  @override
       await _refreshLayerProjection();
       unawaited(_refreshTiles());
     } catch (error, stack) {
@@ -4857,7 +4857,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     widget.autosave?.beginContinuousEdit();
     _canvasDiagnostics.record('canvas.autosave_deferred_for_stroke', {
       'nativePacketQueueDepth': _pendingNativePackets.length,
-      'strokeWorkQueueDepth': _strokeOperations.length,
+      'strokeWorkQueueDepth': _strokeOperations.pendingCount,
     });
   }
 
@@ -4868,7 +4868,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     _canvasDiagnostics.record('canvas.autosave_resumed_after_stroke', {
       'reason': reason,
       'nativePacketQueueDepth': _pendingNativePackets.length,
-      'strokeWorkQueueDepth': _strokeOperations.length,
+      'strokeWorkQueueDepth': _strokeOperations.pendingCount,
     });
   }
 
