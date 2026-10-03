@@ -517,11 +517,19 @@ evidence remain separate hardware gates.
   Flutter tests, disk-backed Rust bridge journeys, and the macOS app build
   without entering the OS UI automation stage. It reports explicitly that the
   native AppKit UI suite was not run; `--full` remains the full automated gate.
+- Re-ran `app/tool/run_macos_alpha_checks.sh --workflows-only` on commit
+  `881638448c398fd53b571a4d3336d41fd481391a`: Flutter analysis passed, all
+  596 unit/widget tests passed, all seven disk-backed layer/brush/comic/drawing
+  and failure-preservation journeys passed, and the macOS debug app built.
+  The runner exited successfully and records each result in
+  `app/build/macos-alpha-checks/summary.txt`. As designed, this run skipped
+  XCUITest; it does not replace the separate visible AppKit evidence.
 - The paired physical iPad Pro (11-inch, 3rd generation; iPadOS 27.0) is
   currently visible to Flutter and `devicectl`. The acceptance preflight
-  reports 19.9 GiB free, above the runner's 18 GiB device threshold and below
-  its 28 GiB full-run threshold. Approved inactive simulator and macOS Xcode
-  build products were removed to recover space; per-run simulator checksum
+  reported 19.9 GiB free before the macOS workflow rerun. That rerun used disk;
+  current free space is about 12 GiB, below the 18 GiB device threshold and
+  28 GiB full-run threshold. Approved inactive simulator and macOS Xcode build
+  products were removed to recover space; per-run simulator checksum
   manifests were refreshed, and logs/Xcode result bundles remain preserved.
   No iPad build or install has started because automatic signing may register
   the iPad UDID with the configured developer team; authorization is pending.
