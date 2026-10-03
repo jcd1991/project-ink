@@ -39,6 +39,17 @@ Xcode DerivedData, logs, traces, and XCTest result bundles are kept under
 PROJECT_INK_IOS_SIMULATOR_UDID selects a simulator.
 PROJECT_INK_IPAD_PROFILE may be ipad-m1 or ipad-m4 if model detection fails.
 
+Each runner invocation isolates Flutter configuration under that run directory.
+Physical-device runs disable Flutter's LLDB debugging transport for the run and
+use Xcode's device debugging path; this works around a CoreDevice VM-service
+connection reset observed on the paired iPad. Flutter drive and Xcode test
+commands have bounded timeouts and terminate their process groups on timeout.
+After Flutter integration tests, XCUITest explicitly builds with
+`FLUTTER_TARGET=lib/main.dart`, so a generated integration-test target cannot
+leave the native UI tests launching an integration harness instead of the app.
+The artifact checksum manifest excludes per-run `xcode-derived-*` build caches
+but includes XCTest result bundles and test logs.
+
 Each run records state.json, run.log, run.pid, report.md, stage logs, Xcode
 result bundles, copied traces, and manually supplied memory evidence. A device
 lock prevents concurrent runs on one iPad. Resume checks Git revision, tracked

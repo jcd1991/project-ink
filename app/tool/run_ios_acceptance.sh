@@ -85,6 +85,10 @@ export XDG_CONFIG_HOME="$run_dir/flutter-config"
 mkdir -p "$XDG_CONFIG_HOME"
 flutter config --no-enable-swift-package-manager >/dev/null
 flutter config --build-dir build/ios-acceptance-output >/dev/null
+# Xcode 27's default CoreDevice/LLDB launch left Flutter's Dart VM endpoint
+# unreachable on the paired iPad. Keep this workaround local to this run.
+flutter config --no-enable-lldb-debugging >/dev/null
+export FLUTTER_LLDB_DEBUGGING=false
 export SYMROOT="$run_dir/xcode/symroot" OBJROOT="$run_dir/xcode/objroot"
 mkdir -p "$SYMROOT" "$OBJROOT"
 cd "$app_dir"
@@ -120,7 +124,13 @@ write_report() {
   state_simulator_id="$(cat "$run_dir/metadata/simulator-id" 2>/dev/null || true)"
   state_device_record="$(cat "$run_dir/metadata/device-record" 2>/dev/null || true)"
   if rg -q 'All tests passed\.' "$run_dir/logs/simulator.log" 2>/dev/null; then flutter_integration_result='passed; see simulator.log'; else flutter_integration_result='not run or failed; inspect stage log'; fi
-  if rg -q 'All tests passed\.' "$run_dir/logs/device.log" 2>/dev/null; then flutter_device_result='passed; see device.log'; else flutter_device_result='not run or failed; inspect stage log'; fi
+  if rg -q 'All tests passed\.' "$run_dir/logs/device.log" 2>/dev/null; then
+    flutter_device_result='passed; see device.log'
+  elif rg -q 'Dart VM Service was not discovered|Connection reset by peer|command timed out after' "$run_dir/logs/device.log" 2>/dev/null; then
+    flutter_device_result='failed: app installation completed, but the Flutter VM-service handshake timed out before the first integration test; see device.log'
+  else
+    flutter_device_result='not run or failed; inspect stage log'
+  fi
   if [[ -f "$run_dir/.stages/host" ]]; then host_result='passed; see host.log'; else host_result='not run'; fi
   if [[ -f "$run_dir/.stages/simulator" || -f "$run_dir/.stages/device" ]]; then native_result='passed; see xcresult bundles'; else native_result='blocked or not run; inspect xcresult bundles and stage log'; fi
   cat > "$run_dir/report.md" <<EOF
@@ -164,7 +174,9 @@ cleanup() {
   if [[ "$exit_status" -eq 0 ]]; then write_state complete "$active_stage" && write_report complete "$active_stage"; else write_state failed "$active_stage" && write_report failed "$active_stage"; fi
   if [[ -n "$lock_dir" && -d "$lock_dir" ]]; then rm -f "$lock_dir/run.pid"; rmdir "$lock_dir" 2>/dev/null || true; fi
   if [[ -n "${build_lock_dir:-}" && -d "$build_lock_dir" ]]; then rm -f "$build_lock_dir/run.pid"; rmdir "$build_lock_dir" 2>/dev/null || true; fi
-  (cd "$run_dir" && find . -type f ! -name artifacts.sha256 -print0 | sort -z | xargs -0 shasum -a 256) > "$run_dir/artifacts.sha256" 2>/dev/null || true
+  # DerivedData is a regenerable build cache, not acceptance evidence. Keep
+  # manifests focused on logs, reports, traces, screenshots, and result bundles.
+  (cd "$run_dir" && find . -type d -name 'xcode-derived-*' -prune -o -type f ! -name artifacts.sha256 -print0 | sort -z | xargs -0 shasum -a 256) > "$run_dir/artifacts.sha256" 2>/dev/null || true
   exit "$exit_status"
 }
 trap cleanup EXIT
@@ -187,7 +199,58 @@ run_stage() {
   touch "$run_dir/.stages/$active_stage"
   write_state running "$active_stage"
 }
-host_checks() { cd "$repo_dir"; cargo test --workspace --all-targets --all-features; cd "$app_dir"; flutter analyze; flutter test; }
+run_bounded() {
+  local timeout_seconds="$1"
+  shift
+  /usr/bin/perl - "$timeout_seconds" "$@" <<'PERL'
+use strict;
+use warnings;
+use POSIX qw(setsid WNOHANG);
+use Time::HiRes qw(time sleep);
+
+my $limit = shift @ARGV;
+my $pid = fork();
+die "cannot start bounded command: $!\n" unless defined $pid;
+if ($pid == 0) {
+  setsid() or die "cannot isolate bounded command: $!\n";
+  exec { $ARGV[0] } @ARGV or die "cannot execute bounded command: $!\n";
+}
+
+my $deadline = time() + $limit;
+my $status;
+while (1) {
+  my $finished = waitpid($pid, WNOHANG);
+  if ($finished == $pid) {
+    $status = $?;
+    last;
+  }
+  if (time() >= $deadline) {
+    print STDERR "iOS acceptance: command timed out after ${limit}s; stopping its process group\n";
+    kill 'TERM', -$pid;
+    my $grace_deadline = time() + 5;
+    while (time() < $grace_deadline) {
+      if (waitpid($pid, WNOHANG) == $pid) {
+        exit 124;
+      }
+      sleep 0.1;
+    }
+    kill 'KILL', -$pid;
+    waitpid($pid, 0);
+    exit 124;
+  }
+  sleep 0.2;
+}
+
+exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+PERL
+}
+host_checks() {
+  cd "$repo_dir"
+  run_bounded 1800 cargo test --workspace --all-targets --all-features
+  cd "$app_dir"
+  run_bounded 300 flutter analyze
+  run_bounded 1200 flutter test
+}
 get_simulator() {
   sim_override="$(printenv PROJECT_INK_IOS_SIMULATOR_UDID 2>/dev/null || true)"
   if [[ -n "$sim_override" ]]; then printf '%s' "$sim_override"; else
@@ -197,7 +260,7 @@ get_simulator() {
 flutter_acceptance() {
   cd "$app_dir"
   for target in integration_test/release_document_round_trip_test.dart integration_test/live_cpu_handoff_test.dart; do
-    flutter drive --driver test_driver/ios_acceptance.dart --target "$target" \
+    run_bounded 360 flutter drive --driver test_driver/ios_acceptance.dart --target "$target" \
       --flavor Acceptance --device-id "$1" --dart-define=PROJECT_INK_TRACE=true --no-pub
   done
 }
@@ -205,7 +268,7 @@ native_acceptance() {
   result="$run_dir/native-$2.xcresult"
   [[ ! -e "$result" ]] || result="$run_dir/native-$2-$(date -u +%H%M%S).xcresult"
   cd "$app_dir"
-  xcodebuild test -workspace ios/Runner.xcworkspace -scheme Acceptance -destination "id=$1" \
+  run_bounded 900 xcodebuild test -workspace ios/Runner.xcworkspace -scheme Acceptance -destination "id=$1" \
     -derivedDataPath "$run_dir/xcode-derived-$2" -resultBundlePath "$result" \
     -only-testing:RunnerUITests CODE_SIGN_STYLE=Automatic BUILD_DIR="$app_dir/build/ios-acceptance-output/ios" \
     FLUTTER_TARGET=lib/main.dart
