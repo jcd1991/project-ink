@@ -497,30 +497,33 @@ class CanvasTopBar extends StatelessWidget {
   Widget _commandOverflowMenu(
     BuildContext context,
     Set<String> excludedCommands,
-  ) => PopupMenuButton<EditorActionId>(
-    tooltip: 'More commands',
-    onSelected: onActionDispatch,
-    itemBuilder:
-        (_) => [
-          for (final name in commandBarItems)
-            if (name != 'separator' && !excludedCommands.contains(name))
-              for (final action in EditorActionId.values.where(
-                (candidate) => candidate.name == name,
-              ))
-                PopupMenuItem(
-                  value: action,
-                  enabled: !_isDocumentActionDisabled(action),
-                  child: Text(
-                    _commandBarLabel(action),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+  ) => Semantics(
+    identifier: 'more-commands',
+    child: PopupMenuButton<EditorActionId>(
+      tooltip: 'More commands',
+      onSelected: onActionDispatch,
+      itemBuilder:
+          (_) => [
+            for (final name in commandBarItems)
+              if (name != 'separator' && !excludedCommands.contains(name))
+                for (final action in EditorActionId.values.where(
+                  (candidate) => candidate.name == name,
+                ))
+                  PopupMenuItem(
+                    value: action,
+                    enabled: !_isDocumentActionDisabled(action),
+                    child: Text(
+                      _commandBarLabel(action),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-        ],
-    child: const SizedBox(
-      width: 40,
-      height: 36,
-      child: Icon(Icons.more_horiz, size: 20),
+          ],
+      child: const SizedBox(
+        width: 40,
+        height: 36,
+        child: Icon(Icons.more_horiz, size: 20),
+      ),
     ),
   );
 
@@ -580,6 +583,7 @@ class CanvasTopBar extends StatelessWidget {
           InkCommandButton(
             icon: Icons.folder_open_outlined,
             label: 'Open project',
+            identifier: 'open-project',
             onPressed: onOpen,
             hitSize: 48,
           ),
@@ -587,18 +591,21 @@ class CanvasTopBar extends StatelessWidget {
             InkCommandButton(
               icon: Icons.save_outlined,
               label: 'Save project',
+              identifier: 'save-project',
               onPressed: onSave,
               hitSize: 48,
             ),
           InkCommandButton(
             icon: Icons.undo,
             label: 'Undo',
+            identifier: 'undo',
             onPressed: onUndo,
             hitSize: 48,
           ),
           InkCommandButton(
             icon: Icons.redo,
             label: 'Redo',
+            identifier: 'redo',
             onPressed: onRedo,
             hitSize: 48,
           ),

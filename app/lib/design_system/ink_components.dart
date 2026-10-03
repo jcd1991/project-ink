@@ -204,6 +204,7 @@ class InkCommandButton extends StatelessWidget {
     required this.label,
     required this.onPressed,
     this.selected = false,
+    this.identifier,
     this.hitSize = 40,
     this.iconSize = 18,
   });
@@ -212,6 +213,7 @@ class InkCommandButton extends StatelessWidget {
   final String label;
   final VoidCallback? onPressed;
   final bool selected;
+  final String? identifier;
   final double hitSize;
   final double iconSize;
 
@@ -223,6 +225,7 @@ class InkCommandButton extends StatelessWidget {
       button: true,
       enabled: onPressed != null,
       selected: selected,
+      identifier: identifier,
       label: label,
       onTap: onPressed,
       child: ExcludeSemantics(

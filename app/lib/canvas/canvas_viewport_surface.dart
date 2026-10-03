@@ -87,6 +87,7 @@ class CanvasViewportSurface extends StatelessWidget {
     final transform = paintState.transform;
     return Semantics(
       container: true,
+      identifier: 'drawing-canvas',
       label: 'Drawing canvas',
       hint: 'Draw with your finger or stylus. Use two fingers to pan and zoom.',
       child: Listener(
