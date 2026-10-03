@@ -648,3 +648,14 @@ evidence remain separate hardware gates.
   The six-choice AppKit automation remains unverified. The recorded manual
   real-app matrix remains passed. Current free space is 10.3 GiB, below the
   physical-device run's 18 GiB minimum; no iPad build or install was started.
+- Recheck after the acceptance commits on 2026-10-03: the iPad remains connected
+  and the macOS runner preflight passes with no Project Ink process. Free disk
+  is 10.5 GiB, still below the physical-device run's 18 GiB minimum. The
+  focused red-close Cancel runner rebuilt the app successfully, then Xcode
+  timed out after 67.5 seconds while enabling UI automation; it launched no
+  test case. Result bundle:
+  `app/build/macos-alpha-checks/NativeDocumentSafety-testRedCloseCancelKeepsDirtyNamedProjectOpen-20261003-183555-81676.xcresult`.
+  The interactive six-choice matrix remains covered by the real-app record
+  `manual-xctest-20261003/records/macos-manual-safety.txt`. iPad signing and
+  Xcode UI-automation authorization have not been granted; no device install
+  or system privacy change was made.
