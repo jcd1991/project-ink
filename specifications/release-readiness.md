@@ -165,7 +165,7 @@ emulator, CI, and macOS-only results.
 Use disposable, checked-in fixtures and record exact artifact hashes and
 resulting project revisions.
 
-- [ ] New canvas → draw with at least two brush families → save → close → fresh
+- [x] New canvas → draw with at least two brush families → save → close → fresh
   process reopen → undo → redo → save and reopen again.
 - [ ] Edit, reorder, hide, group, mask, and delete layers; exercise primary
   targeting, locks, rollback, undo/redo, persistence, and reopen.
@@ -507,12 +507,14 @@ evidence remain separate hardware gates.
   hash and removed recovery. Cmd-Q Discard also preserved the package, exited,
   and allowed a fresh-process reopen without the discarded mark. The exact
   package hash records and binary identity note are in the manual acceptance
-  record. A separate fresh-process workflow created a visible stroke, saved and
-  closed the project, reopened it in a new app process, and verified Undo then
-  Redo visually. Package hashes after save, undo/redo, and a later Discard are
-  identical. This is partial workflow evidence: it uses one brush family and
-  does not yet cover a second post-redo save/reopen. XCUITest still timed out
-  before executing cases.
+  record. The full real-app workflow is also complete: after saving the initial
+  Pen/Technical Pen Ink stroke, selected HB Sketch Pencil from the Sketch
+  family, drew and saved a visibly thinner stroke, then closed and reopened in
+  a fresh process. Undo removed only the Sketch stroke; Redo restored it. A
+  save after Redo survived another close and fresh-process reopen, with the
+  package hash unchanged across that final reopen. The detailed hash records
+  are listed in the manual record. XCUITest still timed out before executing
+  cases.
 - Added `app/tool/run_macos_alpha_checks.sh --workflows-only` to rerun analysis,
   Flutter tests, disk-backed Rust bridge journeys, and the macOS app build
   without entering the OS UI automation stage. It reports explicitly that the
