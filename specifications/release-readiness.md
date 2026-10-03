@@ -16,6 +16,13 @@ release-supported.
   and document open; widget/channel coverage exercises each choice.
 - [x] Verify the close button and Cmd-Q interactively in a fresh macOS app
   session, including the actual AppKit callbacks and a dirty named document.
+  The 2026-10-03 real-app workflow also saved two distinct brush-family marks,
+  reopened them in a fresh process, verified Undo/Redo, saved after Redo, and
+  reopened both marks again. A subsequent malformed-package Open was rejected
+  while the active canvas remained visible; the active package hash still
+  matched its post-save reopen snapshot, and the damaged fixture hash was
+  unchanged by the attempt. External manual records and hashes are under
+  `ProjectInkAlphaValidation/manual-20261003/records/`.
 - [ ] New, standalone Open, comic Open, and import replacement use the same
   decision. A cancelled picker does not prompt or change the current document.
 - [x] Track edits since an explicit save separately from a pending recovery
@@ -54,6 +61,9 @@ release-supported.
   remain open.
 - [ ] Repeat failed/cancelled Save As, Open, comic Open, and import flows with
   disk-backed fixtures and compare source hashes before and after.
+  One failed standalone Open was checked manually in the real macOS app on
+  2026-10-03 using a malformed `.inkproj` fixture. It does not close the
+  remaining Save As, cancelled Open, comic Open, or import cases.
 
 ## Gate 2: release hardening
 
