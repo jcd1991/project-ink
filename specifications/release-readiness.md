@@ -525,6 +525,15 @@ evidence remain separate hardware gates.
   package hash unchanged across that final reopen. The detailed hash records
   are listed in the manual record. XCUITest still timed out before executing
   cases.
+- Real macOS layer presentation workflow: created a second paint layer in the
+  app, renamed it `Highlights`, drew on it, hid it, and saved the named project.
+  After opening that project in a fresh app session, the Layers panel showed
+  `Highlights` hidden and `Ink` visible. All six package file hashes matched
+  the post-save snapshot after reopen. The manual record is
+  `macos-layer-fresh-reopen.txt`. A focused widget regression test also
+  confirms that layer rename reloads the Rust-backed layer projection; this
+  fixed both layer and comic callbacks that had been wired to brush projection
+  loading. This run does not establish comic UI acceptance.
 - Added `app/tool/run_macos_alpha_checks.sh --workflows-only` to rerun analysis,
   Flutter tests, disk-backed Rust bridge journeys, and the macOS app build
   without entering the OS UI automation stage. It reports explicitly that the

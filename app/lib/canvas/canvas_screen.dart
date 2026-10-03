@@ -1003,7 +1003,7 @@ class _CanvasScreenState extends State<CanvasScreen>
             });
           },
           clearSelection: _clearSelection,
-          loadLayerProjections: _loadPhase2Projections,
+          loadLayerProjections: _refreshLayerProjection,
           selectLayer: _layerSelection.select,
           persistPanelState: _layerActions.queuePanelStatePersistence,
         ),
@@ -1292,7 +1292,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       layers: () => _layers,
       selection: () => _layerSelection,
       engineGeneration: () => _engineGeneration,
-      loadPhase2Projections: _loadPhase2Projections,
+      loadPhase2Projections: _refreshLayerProjection,
       refreshTiles: _refreshTiles,
       markDirty: () => widget.autosave?.markDirty(),
       soloLayerId: () => _soloLayerId,
