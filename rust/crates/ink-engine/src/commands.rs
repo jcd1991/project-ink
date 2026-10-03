@@ -2,14 +2,627 @@ use super::{
     ActiveStroke, BrushPreset, CompiledBrush, CompiledBrushState, DocumentSpec, EditorCommand,
     EngineError, EngineEvent, EngineState, HashMap, HashSet, Layer, LayerId, LayerKind, LayerState,
     MAX_COMMAND_JOURNAL_ENTRIES, MAX_FILL_PIXELS, MAX_LAYERS, MAX_PANEL_MASK_PIXELS, Rgba8,
-    SelectionMask, StrokeInputMetrics, TileDescriptor, TileStore, TimeLapseSample, TimeLapseStroke,
-    Transaction, VectorPoint, VectorStroke, advance_revision, apply_post_effects, builtin_library,
-    compositor_blend_mode, encode_command, flush_deferred_dual_dabs, history_label,
-    layer_subtree_ids, lock_recover, merge_raster_layers, next_layer_id, normalize_sibling_orders,
-    point_inside_polygon, rasterize_vector_stroke, rebuild_vector_layer, restore_brush_override,
-    time_lapse_has_capacity, trim_history_snapshots, validate_layer_tree, validate_vector_stroke,
+    SelectionMask, StrokeInputMetrics, Tile, TileDescriptor, TileStore, TimeLapseSample,
+    TimeLapseStroke, Transaction, VectorPoint, VectorStroke, advance_revision,
+    ancestor_has_mask_node, apply_post_effects, builtin_library, compositor_blend_mode,
+    encode_command, flush_deferred_dual_dabs, history_label, layer_subtree_ids, lock_recover,
+    merge_raster_layers, next_layer_id, normalize_sibling_orders, point_inside_polygon,
+    rasterize_vector_stroke, rebuild_vector_layer, restore_brush_override, time_lapse_has_capacity,
+    trim_history_snapshots, validate_layer_tree, validate_vector_stroke,
 };
 
+/// Commit a pending opacity preview as one ordinary, undoable command.
+pub(super) fn commit_pending_opacity_edit(
+    state: &mut EngineState,
+    expected_id: Option<u64>,
+) -> Result<u64, EngineError> {
+    let Some(edit) = state.opacity_edit else {
+        return if expected_id.is_some() {
+            Err(EngineError::InvalidCommand(
+                "layer opacity edit is no longer active".into(),
+            ))
+        } else {
+            Ok(state.revision)
+        };
+    };
+    if expected_id.is_some_and(|expected| expected != edit.id) {
+        return Err(EngineError::InvalidCommand(
+            "layer opacity edit ID does not match".into(),
+        ));
+    }
+    let current = state
+        .layers
+        .get(&edit.layer)
+        .ok_or(EngineError::InvalidLayer)?
+        .layer
+        .opacity;
+    if current == edit.original {
+        state.opacity_edit = None;
+        return Ok(state.revision);
+    }
+    ensure_unlocked(state, edit.layer)?;
+    state.opacity_edit = None;
+    state
+        .layers
+        .get_mut(&edit.layer)
+        .ok_or(EngineError::InvalidLayer)?
+        .layer
+        .opacity = edit.original;
+    dispatch_state(
+        state,
+        EditorCommand::SetLayerOpacity {
+            layer: edit.layer,
+            opacity: current,
+        },
+    )
+}
+
+pub(super) fn cancel_pending_opacity_edit(
+    state: &mut EngineState,
+    expected_id: Option<u64>,
+) -> Result<u64, EngineError> {
+    let Some(edit) = state.opacity_edit else {
+        return if expected_id.is_some() {
+            Err(EngineError::InvalidCommand(
+                "layer opacity edit is no longer active".into(),
+            ))
+        } else {
+            Ok(state.revision)
+        };
+    };
+    if expected_id.is_some_and(|expected| expected != edit.id) {
+        return Err(EngineError::InvalidCommand(
+            "layer opacity edit ID does not match".into(),
+        ));
+    }
+    state.opacity_edit = None;
+    let layer_state = state
+        .layers
+        .get_mut(&edit.layer)
+        .ok_or(EngineError::InvalidLayer)?;
+    if layer_state.layer.opacity == edit.original {
+        return Ok(state.revision);
+    }
+    layer_state.layer.opacity = edit.original;
+    advance_revision(state)?;
+    let revision = state.revision;
+    state.events.push(EngineEvent::LayersChanged { revision });
+    Ok(revision)
+}
+
+impl super::Document {
+    /// Start a temporary opacity preview for one stable layer identity.
+    pub fn begin_layer_opacity_edit(&mut self, layer: LayerId) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        {
+            let mut state = lock_recover(&self.state);
+            if let Some(edit) = state.opacity_edit {
+                if edit.layer == layer {
+                    return Ok(edit.id);
+                }
+                commit_pending_opacity_edit(&mut state, Some(edit.id))?;
+            }
+            ensure_unlocked(&state, layer)?;
+            let opacity = state
+                .layers
+                .get(&layer)
+                .ok_or(EngineError::InvalidLayer)?
+                .layer
+                .opacity;
+            let id = state.next_opacity_edit;
+            state.next_opacity_edit = id.checked_add(1).ok_or_else(|| {
+                EngineError::InvalidCommand("opacity edit ID space is exhausted".into())
+            })?;
+            state.opacity_edit = Some(super::state::LayerOpacityEdit {
+                id,
+                layer,
+                original: opacity,
+            });
+            Ok(id)
+        }
+    }
+
+    /// Preview opacity without adding history entries while the slider moves.
+    pub fn update_layer_opacity_edit(
+        &mut self,
+        edit_id: u64,
+        opacity: u16,
+    ) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        let mut state = lock_recover(&self.state);
+        let edit = state.opacity_edit.ok_or_else(|| {
+            EngineError::InvalidCommand("layer opacity edit is no longer active".into())
+        })?;
+        if edit.id != edit_id {
+            return Err(EngineError::InvalidCommand(
+                "layer opacity edit ID does not match".into(),
+            ));
+        }
+        ensure_unlocked(&state, edit.layer)?;
+        let layer_state = state
+            .layers
+            .get_mut(&edit.layer)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer_state.layer.opacity == opacity {
+            return Ok(state.revision);
+        }
+        layer_state.layer.opacity = opacity;
+        advance_revision(&mut state)?;
+        let revision = state.revision;
+        state.events.push(EngineEvent::LayersChanged { revision });
+        Ok(revision)
+    }
+
+    /// Commit a slider preview as exactly one undoable opacity command.
+    pub fn commit_layer_opacity_edit(&mut self, edit_id: u64) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        commit_pending_opacity_edit(&mut lock_recover(&self.state), Some(edit_id))
+    }
+
+    /// Restore the gesture-start opacity without recording an undo command.
+    pub fn cancel_layer_opacity_edit(&mut self, edit_id: u64) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        cancel_pending_opacity_edit(&mut lock_recover(&self.state), Some(edit_id))
+    }
+}
+
+/// Validate every requested subtree before removing any layer, then commit
+/// the complete deletion with one revision and one layer-change event.
+fn delete_layer_roots(state: &mut EngineState, requested: &[LayerId]) -> Result<(), EngineError> {
+    let (removed, surviving_parents) = delete_layer_plan(state, requested)?;
+
+    for id in removed {
+        state.layers.remove(&id);
+    }
+    for parent in surviving_parents {
+        normalize_sibling_orders(&mut state.layers, parent);
+    }
+    advance_revision(state)?;
+    state.events.push(EngineEvent::LayersChanged {
+        revision: state.revision,
+    });
+    Ok(())
+}
+
+/// Return the same structural deletion plan used by the committing command.
+/// The caller may inspect the plan without changing document state.
+fn delete_layer_plan(
+    state: &EngineState,
+    requested: &[LayerId],
+) -> Result<(HashSet<LayerId>, HashSet<Option<LayerId>>), EngineError> {
+    if requested.len() > 4_096 {
+        return Err(EngineError::InvalidCommand(
+            "delete request exceeds the 4096-layer safety limit".into(),
+        ));
+    }
+    if requested.is_empty()
+        || requested.iter().copied().collect::<HashSet<_>>().len() != requested.len()
+    {
+        return Err(EngineError::InvalidCommand(
+            "delete requires unique layer IDs".into(),
+        ));
+    }
+
+    let selected = requested.iter().copied().collect::<HashSet<_>>();
+    let mut roots = Vec::new();
+    for id in requested {
+        let layer = state.layers.get(id).ok_or(EngineError::InvalidLayer)?;
+        let mut parent = layer.layer.parent;
+        let mut has_selected_ancestor = false;
+        let mut visited = HashSet::new();
+        while let Some(parent_id) = parent {
+            if !visited.insert(parent_id) {
+                return Err(EngineError::InvalidCommand(
+                    "layer hierarchy contains a cycle".into(),
+                ));
+            }
+            if selected.contains(&parent_id) {
+                has_selected_ancestor = true;
+                break;
+            }
+            parent = state
+                .layers
+                .get(&parent_id)
+                .ok_or(EngineError::InvalidLayer)?
+                .layer
+                .parent;
+        }
+        if !has_selected_ancestor {
+            roots.push(*id);
+        }
+    }
+
+    let mut removed = HashSet::new();
+    let mut surviving_parents = HashSet::new();
+    for root_id in roots {
+        let root = state
+            .layers
+            .get(&root_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if root.layer.kind == LayerKind::PanelGroup {
+            return Err(EngineError::InvalidCommand(
+                "comic panel groups must be removed through the comic workspace".into(),
+            ));
+        }
+        surviving_parents.insert(root.layer.parent);
+        let mut subtree = vec![root_id];
+        let mut cursor = 0;
+        while cursor < subtree.len() {
+            let parent = subtree[cursor];
+            let children = state
+                .layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.parent == Some(parent)
+                        || (candidate.layer.kind == LayerKind::Mask
+                            && candidate.layer.mask_owner == Some(parent))
+                })
+                .map(|candidate| candidate.layer.id)
+                .collect::<Vec<_>>();
+            if !children.is_empty() && state.layers[&parent].layer.kind != LayerKind::Group {
+                return Err(EngineError::InvalidCommand(
+                    "only ordinary groups can be deleted with their children".into(),
+                ));
+            }
+            for child in children {
+                if !subtree.contains(&child) {
+                    subtree.push(child);
+                }
+            }
+            cursor += 1;
+        }
+        removed.extend(subtree);
+    }
+
+    if state.layers.len().saturating_sub(removed.len()) == 0 {
+        return Err(EngineError::InvalidCommand(
+            "a document must keep at least one layer".into(),
+        ));
+    }
+    reject_comic_owned_layers(state, &removed, "removed")?;
+
+    Ok((removed, surviving_parents))
+}
+
+/// Check the exact structural and lock rules used by selected-layer deletion
+/// without changing content, revision, or history.
+pub(super) fn preflight_delete_layer_roots(
+    state: &EngineState,
+    requested: &[LayerId],
+) -> Result<(), EngineError> {
+    for id in requested {
+        ensure_subtree_unlocked(state, *id)?;
+    }
+    delete_layer_plan(state, requested).map(|_| ())
+}
+
+fn reject_comic_owned_layers(
+    state: &EngineState,
+    layers: &HashSet<LayerId>,
+    action: &str,
+) -> Result<(), EngineError> {
+    let Some(comic_bytes) = &state.comic_json else {
+        return Ok(());
+    };
+    let project = ink_comic::ComicProject::from_json(comic_bytes).map_err(|error| {
+        EngineError::InvalidCommand(format!("cannot validate comic layer ownership: {error}"))
+    })?;
+    let bound_layers = project
+        .panel_layers
+        .iter()
+        .flat_map(|binding| {
+            [
+                binding.panel_group_id,
+                binding.mask_layer_id,
+                binding.sketch_layer_id,
+                binding.ink_layer_id,
+                binding.color_layer_id,
+                binding.tone_layer_id,
+                binding.effects_layer_id,
+            ]
+        })
+        .map(LayerId::from_u128)
+        .collect::<HashSet<_>>();
+    if layers.iter().any(|id| bound_layers.contains(id)) {
+        return Err(EngineError::InvalidCommand(format!(
+            "comic-owned layers must be {action} through the comic workspace"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn effective_lock_owner(
+    state: &EngineState,
+    layer: LayerId,
+) -> Result<Option<LayerId>, EngineError> {
+    let mut cursor = Some(layer);
+    let mut visited = HashSet::new();
+    while let Some(id) = cursor {
+        if !visited.insert(id) {
+            return Err(EngineError::InvalidCommand(
+                "layer hierarchy contains a cycle".into(),
+            ));
+        }
+        let current = state.layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+        if current.layer.locked {
+            return Ok(Some(id));
+        }
+        cursor = current.layer.parent;
+    }
+    Ok(None)
+}
+
+fn ensure_unlocked(state: &EngineState, layer: LayerId) -> Result<(), EngineError> {
+    if let Some(owner) = effective_lock_owner(state, layer)? {
+        return Err(EngineError::InvalidCommand(format!(
+            "layer {layer} is locked by layer {owner}; unlock the owning layer or group first"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_lock_owner_editable(state: &EngineState, layer: LayerId) -> Result<(), EngineError> {
+    if effective_lock_owner(state, layer)?.is_some_and(|owner| owner != layer) {
+        return ensure_unlocked(state, layer);
+    }
+    Ok(())
+}
+
+fn ensure_subtree_unlocked(state: &EngineState, root: LayerId) -> Result<(), EngineError> {
+    ensure_unlocked(state, root)?;
+    let mut pending = vec![root];
+    let mut cursor = 0;
+    while cursor < pending.len() {
+        let parent = pending[cursor];
+        for child in state.layers.values().filter(|candidate| {
+            candidate.layer.parent == Some(parent) || candidate.layer.mask_owner == Some(parent)
+        }) {
+            ensure_unlocked(state, child.layer.id)?;
+            if !pending.contains(&child.layer.id) {
+                pending.push(child.layer.id);
+            }
+        }
+        cursor += 1;
+    }
+    Ok(())
+}
+
+fn validate_distinct_unlocked_layers(
+    state: &EngineState,
+    layers: &[ink_model::LayerId],
+    operation: &str,
+) -> Result<(), EngineError> {
+    if layers.is_empty()
+        || layers
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != layers.len()
+    {
+        return Err(EngineError::InvalidCommand(format!(
+            "{operation} requires distinct layer IDs"
+        )));
+    }
+    for layer in layers {
+        ensure_unlocked(state, *layer)?;
+    }
+    Ok(())
+}
+
+fn validate_lock_access(state: &EngineState, command: &EditorCommand) -> Result<(), EngineError> {
+    match command {
+        EditorCommand::AddLayer {
+            parent: Some(parent),
+            ..
+        } => ensure_unlocked(state, *parent),
+        EditorCommand::DeleteLayer { layer }
+        | EditorCommand::UngroupLayer { group: layer }
+        | EditorCommand::DuplicateLayer { source: layer, .. }
+        | EditorCommand::DuplicateLayerWithMasks { source: layer, .. }
+        | EditorCommand::DuplicateLayerSubtree { source: layer, .. } => {
+            ensure_subtree_unlocked(state, *layer)
+        }
+        EditorCommand::DuplicateLayers {
+            sources: layers, ..
+        }
+        | EditorCommand::DeleteLayers { layers }
+        | EditorCommand::MergeLayersBulk { layers } => {
+            for layer in layers {
+                ensure_subtree_unlocked(state, *layer)?;
+            }
+            Ok(())
+        }
+        EditorCommand::GroupLayers { members, .. } => {
+            for layer in members {
+                ensure_subtree_unlocked(state, *layer)?;
+            }
+            Ok(())
+        }
+        EditorCommand::MergeLayers { target, source } => {
+            ensure_unlocked(state, *target)?;
+            ensure_subtree_unlocked(state, *source)
+        }
+        EditorCommand::MoveLayer { layer, parent, .. } => {
+            ensure_subtree_unlocked(state, *layer)?;
+            if let Some(parent) = parent {
+                ensure_unlocked(state, *parent)?;
+            }
+            Ok(())
+        }
+        EditorCommand::ReorderLayers { layers, .. } => validate_reorder_locks(state, layers),
+        EditorCommand::SetLayerVisibility { .. }
+        | EditorCommand::SetLayersVisibility { .. }
+        | EditorCommand::SetLayerLocked { .. }
+        | EditorCommand::Undo
+        | EditorCommand::Redo
+        | EditorCommand::EndStroke { .. }
+        | EditorCommand::CancelStroke { .. }
+        | EditorCommand::AddLayer { parent: None, .. }
+        | EditorCommand::CreatePanelLayerTree { .. } => Ok(()),
+        EditorCommand::SetLayersLocked { layers, .. } => {
+            for layer in layers {
+                ensure_lock_owner_editable(state, *layer)?;
+            }
+            Ok(())
+        }
+        EditorCommand::SetLayersLabel { layers, .. } => {
+            validate_distinct_unlocked_layers(state, layers, "bulk label")
+        }
+        EditorCommand::SetPanelMaskGeometry { mask, .. }
+        | EditorCommand::SetMaskEnabled { mask, .. }
+        | EditorCommand::SetMaskInverted { mask, .. } => ensure_unlocked(state, *mask),
+        EditorCommand::ApplyLayerMask { mask } => validate_mask_apply_target(state, *mask),
+        EditorCommand::SetLayerOpacity { layer, .. }
+        | EditorCommand::SetLayerBlendMode { layer, .. }
+        | EditorCommand::SetLayerGroupMode { layer, .. }
+        | EditorCommand::SetLayerAlphaLock { layer, .. }
+        | EditorCommand::SetLayerClipping { layer, .. }
+        | EditorCommand::SetLayerReference { layer, .. }
+        | EditorCommand::SetLayerLabel { layer, .. }
+        | EditorCommand::SetLayerName { layer, .. }
+        | EditorCommand::SetLayerAdjustment { layer, .. }
+        | EditorCommand::TransformLayer { layer, .. }
+        | EditorCommand::FillRegion { layer, .. }
+        | EditorCommand::GradientFill { layer, .. }
+        | EditorCommand::PerspectiveLayer { layer, .. }
+        | EditorCommand::MeshLayer { layer, .. }
+        | EditorCommand::LiquifyLayer { layer, .. }
+        | EditorCommand::AddVectorStroke { layer, .. }
+        | EditorCommand::TransformVectorStroke { layer, .. }
+        | EditorCommand::SimplifyVectorStroke { layer, .. }
+        | EditorCommand::ConnectVectorStrokes { layer, .. }
+        | EditorCommand::EraseVectorSegment { layer, .. }
+        | EditorCommand::SetVectorPoint { layer, .. }
+        | EditorCommand::BeginStroke { layer, .. } => ensure_unlocked(state, *layer),
+    }
+}
+
+fn validate_mask_apply_target(state: &EngineState, mask: LayerId) -> Result<(), EngineError> {
+    ensure_unlocked(state, mask)?;
+    let mask_layer = state
+        .layers
+        .get(&mask)
+        .filter(|layer| layer.layer.kind == LayerKind::Mask)
+        .ok_or_else(|| EngineError::InvalidCommand("apply requires a mask layer".into()))?;
+    let owner_id = mask_layer
+        .layer
+        .mask_owner
+        .ok_or_else(|| EngineError::InvalidCommand("mask must be attached to apply it".into()))?;
+    let owner = state
+        .layers
+        .get(&owner_id)
+        .ok_or(EngineError::InvalidLayer)?;
+    if owner.layer.kind != LayerKind::Raster {
+        return Err(EngineError::InvalidCommand(
+            "Apply Mask is supported for raster owners only".into(),
+        ));
+    }
+    ensure_unlocked(state, owner_id)
+}
+
+fn apply_layer_mask(state: &mut EngineState, mask: LayerId) -> Result<u64, EngineError> {
+    validate_mask_apply_target(state, mask)?;
+    let mask_state = state.layers.get(&mask).ok_or(EngineError::InvalidLayer)?;
+    let owner_id = mask_state
+        .layer
+        .mask_owner
+        .ok_or(EngineError::InvalidLayer)?;
+    let mask_layer = mask_state.layer.clone();
+    let mask_tiles = mask_state.tiles.clone();
+    let owner_coordinates = state
+        .layers
+        .get(&owner_id)
+        .ok_or(EngineError::InvalidLayer)?
+        .tiles
+        .allocated_coordinates();
+    for coordinate in &owner_coordinates {
+        let mask_tile = mask_tiles.read(*coordinate);
+        let owner = state
+            .layers
+            .get_mut(&owner_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        let owner_tile = owner.tiles.read(*coordinate);
+        for y in 0..ink_raster::TILE_SIZE {
+            let document_y = i64::from(coordinate.y)
+                .saturating_mul(i64::from(ink_raster::TILE_SIZE))
+                .saturating_add(i64::from(y));
+            if document_y < 0 || document_y >= i64::from(state.height_px) {
+                continue;
+            }
+            for x in 0..ink_raster::TILE_SIZE {
+                let document_x = i64::from(coordinate.x)
+                    .saturating_mul(i64::from(ink_raster::TILE_SIZE))
+                    .saturating_add(i64::from(x));
+                if document_x < 0 || document_x >= i64::from(state.width_px) {
+                    continue;
+                }
+                let mask_alpha = mask_tile.pixel_rgba(x, y).a;
+                let coverage = if mask_layer.mask_enabled {
+                    super::mask_coverage(
+                        mask_alpha,
+                        mask_layer.mask_stencil,
+                        mask_layer.mask_inverted,
+                    )
+                } else {
+                    u32::from(u8::MAX)
+                };
+                if coverage == u32::from(u8::MAX) {
+                    continue;
+                }
+                let pixel = owner_tile.pixel_rgba(x, y);
+                let scale = |channel: u8| ((u32::from(channel) * coverage + 127) / 255) as u8;
+                owner.tiles.set_pixel(
+                    u32::try_from(document_x).unwrap_or(u32::MAX),
+                    u32::try_from(document_y).unwrap_or(u32::MAX),
+                    Rgba8 {
+                        r: scale(pixel.r),
+                        g: scale(pixel.g),
+                        b: scale(pixel.b),
+                        a: scale(pixel.a),
+                    },
+                );
+            }
+        }
+    }
+    state.layers.remove(&mask);
+    let revision = advance_revision(state)?;
+    state.events.push(EngineEvent::TilesDirty {
+        revision,
+        tiles: owner_coordinates
+            .into_iter()
+            .map(|coordinate| TileDescriptor {
+                layer: owner_id,
+                coordinate,
+            })
+            .collect(),
+    });
+    state.events.push(EngineEvent::LayersChanged { revision });
+    Ok(revision)
+}
+
+fn validate_reorder_locks(state: &EngineState, layers: &[LayerId]) -> Result<(), EngineError> {
+    if layers.is_empty()
+        || layers
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != layers.len()
+    {
+        return Err(EngineError::InvalidCommand(
+            "multi-layer reorder requires distinct layer IDs".into(),
+        ));
+    }
+    for layer in layers {
+        ensure_subtree_unlocked(state, *layer)?;
+    }
+    Ok(())
+}
+
+// Keep the established command dispatcher together: splitting it now would
+// widen the mutation refactor beyond the lock-validation change.
 #[allow(clippy::too_many_lines)]
 pub(super) fn dispatch_state(
     state: &mut EngineState,
@@ -25,6 +638,7 @@ pub(super) fn dispatch_state(
             "finish or cancel the active stroke before another command".into(),
         ));
     }
+    validate_lock_access(state, &command)?;
     if state.journal.len() >= MAX_COMMAND_JOURNAL_ENTRIES {
         return Err(EngineError::InvalidCommand(
             "command journal safety limit reached; save and reopen the document".into(),
@@ -112,6 +726,7 @@ pub(super) fn dispatch_state(
                     "panel mask geometry requires a mask layer".into(),
                 ));
             }
+            mask_state.layer.mask_stencil = true;
             let mut dirty = mask_state.tiles.allocated_coordinates();
             mask_state.tiles.clear();
             for y in min_y..=max_y {
@@ -239,6 +854,10 @@ pub(super) fn dispatch_state(
             for (id, parent, child_order, kind, name) in definitions {
                 let mut layer = Layer::new(id, kind, name);
                 layer.parent = parent;
+                if id == *mask {
+                    layer.mask_owner = Some(*panel_group);
+                    layer.mask_stencil = true;
+                }
                 layer.order = if parent.is_none() {
                     u32::try_from(root_order).unwrap_or(u32::MAX)
                 } else {
@@ -284,6 +903,31 @@ pub(super) fn dispatch_state(
             }
             let id = next_layer_id(&state.layers)?;
             let mut layer = Layer::new(id, *kind, format!("Layer {}", id.0));
+            if *kind == LayerKind::Mask {
+                layer.mask_owner = if parent.is_some_and(|parent_id| {
+                    state.layers.get(&parent_id).is_some_and(|candidate| {
+                        matches!(
+                            candidate.layer.kind,
+                            LayerKind::Group | LayerKind::PanelGroup
+                        )
+                    })
+                }) {
+                    *parent
+                } else {
+                    state
+                        .layers
+                        .values()
+                        .filter(|candidate| {
+                            candidate.layer.parent == *parent
+                                && matches!(
+                                    candidate.layer.kind,
+                                    LayerKind::Raster | LayerKind::VectorInk
+                                )
+                        })
+                        .max_by_key(|candidate| candidate.layer.order)
+                        .map(|candidate| candidate.layer.id)
+                };
+            }
             if *kind == LayerKind::Adjustment {
                 layer.adjustment = Some(ink_model::LayerAdjustment::BrightnessContrast {
                     brightness: 0,
@@ -312,40 +956,45 @@ pub(super) fn dispatch_state(
                 revision: state.revision,
             });
         }
-        EditorCommand::DeleteLayer { layer } => {
-            if state.layers.len() <= 1 {
+        EditorCommand::GroupLayers { group, members } => {
+            if members.len() < 2
+                || members.len() > 4_096
+                || state.layers.len() >= MAX_LAYERS
+                || state.revision == u64::MAX
+                || next_layer_id(&state.layers)? != *group
+            {
                 return Err(EngineError::InvalidCommand(
-                    "a document must keep at least one layer".into(),
+                    "group selection is invalid or exceeds the layer safety limit".into(),
                 ));
             }
-            let root = state.layers.get(layer).ok_or(EngineError::InvalidLayer)?;
-            if root.layer.kind == LayerKind::PanelGroup {
+            let unique_members = members.iter().copied().collect::<HashSet<_>>();
+            if unique_members.len() != members.len() {
                 return Err(EngineError::InvalidCommand(
-                    "comic panel groups must be removed through the comic workspace".into(),
+                    "a layer can only appear once in a group selection".into(),
                 ));
             }
-            let removed_parent = root.layer.parent;
-            let mut subtree = vec![*layer];
-            let mut cursor = 0;
-            while cursor < subtree.len() {
-                let parent = subtree[cursor];
-                let children = state
+            let first = state
+                .layers
+                .get(&members[0])
+                .ok_or(EngineError::InvalidLayer)?;
+            let parent = first.layer.parent;
+            if members.iter().any(|member| {
+                state
                     .layers
-                    .values()
-                    .filter(|candidate| candidate.layer.parent == Some(parent))
-                    .map(|candidate| candidate.layer.id)
-                    .collect::<Vec<_>>();
-                if !children.is_empty() && state.layers[&parent].layer.kind != LayerKind::Group {
-                    return Err(EngineError::InvalidCommand(
-                        "only ordinary groups can be deleted with their children".into(),
-                    ));
-                }
-                for child in children {
-                    if !subtree.contains(&child) {
-                        subtree.push(child);
-                    }
-                }
-                cursor += 1;
+                    .get(member)
+                    .is_none_or(|candidate| candidate.layer.parent != parent)
+            }) {
+                return Err(EngineError::InvalidCommand(
+                    "group selected layers from the same parent".into(),
+                ));
+            }
+            if members
+                .iter()
+                .any(|member| state.layers[member].layer.kind == LayerKind::PanelGroup)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "comic panel groups must be grouped through the comic workspace".into(),
+                ));
             }
             if let Some(comic_bytes) = &state.comic_json {
                 let project = ink_comic::ComicProject::from_json(comic_bytes).map_err(|error| {
@@ -369,23 +1018,193 @@ pub(super) fn dispatch_state(
                     })
                     .map(LayerId::from_u128)
                     .collect::<HashSet<_>>();
-                if subtree.iter().any(|id| bound_layers.contains(id)) {
-                    return Err(EngineError::InvalidCommand(
-                        "comic-owned layers must be removed through the comic workspace".into(),
-                    ));
+                for member in members {
+                    if layer_subtree_ids(&state.layers, *member)?
+                        .iter()
+                        .any(|id| bound_layers.contains(id))
+                    {
+                        return Err(EngineError::InvalidCommand(
+                            "comic-owned layers must be grouped through the comic workspace".into(),
+                        ));
+                    }
                 }
             }
-            for removed in subtree {
-                state.layers.remove(&removed);
+            let mut siblings = state
+                .layers
+                .values()
+                .filter(|candidate| candidate.layer.parent == parent)
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            siblings.sort_unstable();
+            let selected_positions = siblings
+                .iter()
+                .enumerate()
+                .filter_map(|(position, (_, id))| unique_members.contains(id).then_some(position))
+                .collect::<Vec<_>>();
+            if selected_positions.len() != members.len() {
+                return Err(EngineError::InvalidLayer);
             }
-            // Removing a subtree leaves compact sibling ordering at the
-            // surviving parent, preserving deterministic composition/reopen.
-            normalize_sibling_orders(&mut state.layers, removed_parent);
+            let first_selected = selected_positions[0];
+            let last_selected = *selected_positions.last().ok_or_else(|| {
+                EngineError::InvalidCommand("group requires at least two layers".into())
+            })?;
+            // Attached masks are structural companions of their selected
+            // owners. Carry them into the new group with those owners so the
+            // visible hierarchy matches the explicit mask_owner relationship.
+            let attached_mask_ids = state
+                .layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.kind == LayerKind::Mask
+                        && candidate.layer.parent == parent
+                        && candidate
+                            .layer
+                            .mask_owner
+                            .is_some_and(|owner| unique_members.contains(&owner))
+                })
+                .map(|candidate| candidate.layer.id)
+                .collect::<HashSet<_>>();
+            // Grouping non-contiguous selections changes their relationship to
+            // unselected layers. Reject masks and clipping in that span because
+            // their legacy adjacency-dependent behavior cannot be preserved.
+            // Explicitly attached masks move with selected owners and are safe.
+            let selected_range = &siblings[first_selected..=last_selected];
+            if selected_range.iter().any(|(_, id)| {
+                let layer = &state.layers[id].layer;
+                layer.kind == LayerKind::Mask && !attached_mask_ids.contains(id)
+            }) {
+                return Err(EngineError::InvalidCommand(
+                    "grouping this range could move a mask away from its owner".into(),
+                ));
+            }
+            if selected_range
+                .iter()
+                .any(|(_, id)| state.layers[id].layer.clipping)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "grouping this range could change clipping behavior".into(),
+                ));
+            }
+            let group_children = siblings
+                .iter()
+                .filter_map(|(_, id)| {
+                    (unique_members.contains(id) || attached_mask_ids.contains(id)).then_some(*id)
+                })
+                .collect::<Vec<_>>();
+            let mut new_siblings = Vec::with_capacity(siblings.len() - group_children.len() + 1);
+            for (position, (_, id)) in siblings.iter().enumerate() {
+                if position == last_selected {
+                    new_siblings.push(*group);
+                }
+                if !unique_members.contains(id) && !attached_mask_ids.contains(id) {
+                    new_siblings.push(*id);
+                }
+            }
+            let mut group_layer = Layer::new(*group, LayerKind::Group, "Group");
+            group_layer.parent = parent;
+            group_layer.group_mode = ink_model::LayerGroupMode::PassThrough;
+            group_layer.order = u32::try_from(last_selected).unwrap_or(u32::MAX);
+            for (order, member) in group_children.iter().enumerate() {
+                let child = state
+                    .layers
+                    .get_mut(member)
+                    .ok_or(EngineError::InvalidLayer)?;
+                child.layer.parent = Some(*group);
+                child.layer.order = u32::try_from(order).unwrap_or(u32::MAX);
+            }
+            state.layers.insert(
+                *group,
+                LayerState {
+                    layer: group_layer,
+                    tiles: TileStore::default(),
+                    vectors: Vec::new(),
+                },
+            );
+            for (order, sibling_id) in new_siblings.into_iter().enumerate() {
+                if let Some(sibling) = state.layers.get_mut(&sibling_id) {
+                    sibling.layer.order = u32::try_from(order).unwrap_or(u32::MAX);
+                }
+            }
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {
                 revision: state.revision,
             });
         }
+        EditorCommand::UngroupLayer { group } => {
+            let group_state = state.layers.get(group).ok_or(EngineError::InvalidLayer)?;
+            let group_layer = &group_state.layer;
+            if group_layer.kind != LayerKind::Group {
+                return Err(EngineError::InvalidCommand(
+                    "only ordinary groups can be ungrouped here".into(),
+                ));
+            }
+            if group_layer.group_mode != ink_model::LayerGroupMode::PassThrough
+                || group_layer.blend_mode != ink_model::LayerBlendMode::Normal
+                || group_layer.opacity != u16::MAX
+                || group_layer.clipping
+                || group_layer.reference
+            {
+                return Err(EngineError::InvalidCommand("ungroup requires a pass-through, Normal, 100% group without clipping or reference state".into()));
+            }
+            let subtree = layer_subtree_ids(&state.layers, *group)?;
+            reject_comic_owned_layers(state, &subtree.iter().copied().collect(), "ungrouped")?;
+            let parent = group_layer.parent;
+            let mut siblings = state
+                .layers
+                .values()
+                .filter(|candidate| candidate.layer.parent == parent)
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            siblings.sort_unstable();
+            let Some(group_index) = siblings.iter().position(|(_, id)| id == group) else {
+                return Err(EngineError::InvalidLayer);
+            };
+            let mut children = state
+                .layers
+                .values()
+                .filter(|candidate| candidate.layer.parent == Some(*group))
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            if children.is_empty() {
+                return Err(EngineError::InvalidCommand(
+                    "empty groups have nothing to ungroup".into(),
+                ));
+            }
+            children.sort_unstable();
+            let unsafe_nodes = state.layers.values().any(|candidate| {
+                ((subtree.contains(&candidate.layer.id) || candidate.layer.parent == parent)
+                    && candidate.layer.id != *group)
+                    && (candidate.layer.kind == LayerKind::Mask || candidate.layer.clipping)
+            });
+            if unsafe_nodes {
+                return Err(EngineError::InvalidCommand(
+                    "ungroup could change mask or clipping relationships".into(),
+                ));
+            }
+            let mut replacement = Vec::with_capacity(siblings.len() - 1 + children.len());
+            for (index, (_, sibling)) in siblings.iter().enumerate() {
+                if index == group_index {
+                    replacement.extend(children.iter().map(|(_, id)| *id));
+                } else {
+                    replacement.push(*sibling);
+                }
+            }
+            for (order, id) in replacement.into_iter().enumerate() {
+                if let Some(child) = state.layers.get_mut(&id) {
+                    if child.layer.parent == Some(*group) {
+                        child.layer.parent = parent;
+                    }
+                    child.layer.order = u32::try_from(order).unwrap_or(u32::MAX);
+                }
+            }
+            state.layers.remove(group);
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::DeleteLayer { layer } => delete_layer_roots(state, &[*layer])?,
+        EditorCommand::DeleteLayers { layers } => delete_layer_roots(state, layers)?,
         EditorCommand::DuplicateLayer { source, duplicate } => {
             if state.layers.len() >= MAX_LAYERS {
                 return Err(EngineError::InvalidCommand(
@@ -484,6 +1303,154 @@ pub(super) fn dispatch_state(
                 });
             }
         }
+        EditorCommand::DuplicateLayerWithMasks {
+            source,
+            duplicate,
+            masks,
+        } => {
+            let source_state = state.layers.get(source).ok_or(EngineError::InvalidLayer)?;
+            if source_state.layer.kind == LayerKind::PanelGroup
+                || source_state.layer.kind == LayerKind::Mask
+                || state
+                    .layers
+                    .values()
+                    .any(|candidate| candidate.layer.parent == Some(*source))
+            {
+                return Err(EngineError::InvalidCommand(
+                    "only paint leaf layers with attached masks can be duplicated this way".into(),
+                ));
+            }
+            let mut attached_masks = state
+                .layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.kind == LayerKind::Mask
+                        && candidate.layer.mask_owner == Some(*source)
+                })
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            attached_masks.sort_unstable();
+            if attached_masks.is_empty()
+                || masks.len() != attached_masks.len()
+                || masks
+                    .iter()
+                    .zip(&attached_masks)
+                    .any(|((old, _), (_, expected))| old != expected)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "duplicate mask mapping does not match the owner's attached masks".into(),
+                ));
+            }
+            if state.layers.len().saturating_add(1 + masks.len()) > MAX_LAYERS {
+                return Err(EngineError::InvalidCommand(
+                    "document layer safety limit reached".into(),
+                ));
+            }
+            let parent = source_state.layer.parent;
+            let mut expected_id = next_layer_id(&state.layers)?.0;
+            let requested_ids =
+                std::iter::once(*duplicate).chain(masks.iter().map(|(_, copied)| *copied));
+            for requested in requested_ids {
+                if state.layers.contains_key(&requested) || requested.0 != expected_id {
+                    return Err(EngineError::InvalidCommand(
+                        "duplicate layer ID is not the next available ID".into(),
+                    ));
+                }
+                expected_id = expected_id.checked_add(1).ok_or_else(|| {
+                    EngineError::InvalidCommand("layer ID space exhausted".into())
+                })?;
+            }
+            if let Some(comic_bytes) = &state.comic_json {
+                let project = ink_comic::ComicProject::from_json(comic_bytes).map_err(|error| {
+                    EngineError::InvalidCommand(format!(
+                        "cannot validate comic layer ownership: {error}"
+                    ))
+                })?;
+                let owned = project.panel_layers.iter().any(|binding| {
+                    [
+                        binding.panel_group_id,
+                        binding.mask_layer_id,
+                        binding.sketch_layer_id,
+                        binding.ink_layer_id,
+                        binding.color_layer_id,
+                        binding.tone_layer_id,
+                        binding.effects_layer_id,
+                    ]
+                    .contains(&source.0)
+                });
+                if owned {
+                    return Err(EngineError::InvalidCommand(
+                        "comic-owned layers must be duplicated through the comic workspace".into(),
+                    ));
+                }
+            }
+            let mut owner_copy = source_state.clone();
+            owner_copy.layer.id = *duplicate;
+            owner_copy.layer.name = format!("{} Copy", source_state.layer.name);
+            let mut copies = vec![(*duplicate, owner_copy)];
+            for ((source_mask, duplicate_mask), _) in masks.iter().zip(&attached_masks) {
+                let mut mask_copy = state
+                    .layers
+                    .get(source_mask)
+                    .ok_or(EngineError::InvalidLayer)?
+                    .clone();
+                mask_copy.layer.id = *duplicate_mask;
+                mask_copy.layer.mask_owner = Some(*duplicate);
+                copies.push((*duplicate_mask, mask_copy));
+            }
+            let dirty = copies
+                .iter()
+                .flat_map(|(id, layer)| {
+                    layer
+                        .tiles
+                        .tiles()
+                        .into_iter()
+                        .map(move |(coordinate, _)| TileDescriptor {
+                            layer: *id,
+                            coordinate,
+                        })
+                })
+                .collect::<Vec<_>>();
+            for (id, layer) in copies {
+                state.layers.insert(id, layer);
+            }
+            let mut siblings = state
+                .layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.parent == parent
+                        && candidate.layer.id != *duplicate
+                        && !masks
+                            .iter()
+                            .any(|(_, copied)| candidate.layer.id == *copied)
+                })
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            siblings.sort_unstable();
+            let mut ordered = Vec::with_capacity(siblings.len() + masks.len() + 1);
+            for (_, id) in siblings {
+                ordered.push(id);
+                if id == *source {
+                    ordered.push(*duplicate);
+                    ordered.extend(masks.iter().map(|(_, copied)| *copied));
+                }
+            }
+            for (order, id) in ordered.into_iter().enumerate() {
+                if let Some(layer) = state.layers.get_mut(&id) {
+                    layer.layer.order = u32::try_from(order).unwrap_or(u32::MAX);
+                }
+            }
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+            if !dirty.is_empty() {
+                state.events.push(EngineEvent::TilesDirty {
+                    revision: state.revision,
+                    tiles: dirty,
+                });
+            }
+        }
         EditorCommand::DuplicateLayerSubtree { source, duplicates } => {
             if duplicates.is_empty()
                 || state.layers.len().saturating_add(duplicates.len()) > MAX_LAYERS
@@ -569,6 +1536,10 @@ pub(super) fn dispatch_state(
                     .layer
                     .parent
                     .map(|id| remap.get(&id).copied().unwrap_or(id));
+                copy.layer.mask_owner = copy
+                    .layer
+                    .mask_owner
+                    .map(|id| remap.get(&id).copied().unwrap_or(id));
                 if index == 0 {
                     copy.layer.name = format!("{} Copy", copy.layer.name);
                 }
@@ -623,6 +1594,302 @@ pub(super) fn dispatch_state(
                 });
             }
         }
+        EditorCommand::DuplicateLayers {
+            sources,
+            duplicates,
+        } => {
+            if !(2..=4_096).contains(&sources.len())
+                || duplicates.is_empty()
+                || duplicates.len() > 4_096
+                || sources.iter().copied().collect::<HashSet<_>>().len() != sources.len()
+                || state.layers.len().saturating_add(duplicates.len()) > MAX_LAYERS
+            {
+                return Err(EngineError::InvalidCommand(
+                    "bulk duplicate requires distinct layer roots within the layer limit".into(),
+                ));
+            }
+            let parent = state
+                .layers
+                .get(&sources[0])
+                .ok_or(EngineError::InvalidLayer)?
+                .layer
+                .parent;
+            let mut expected_sources = Vec::new();
+            for source in sources {
+                let source_state = state.layers.get(source).ok_or(EngineError::InvalidLayer)?;
+                if source_state.layer.parent != parent
+                    || source_state.layer.kind == LayerKind::Mask
+                    || source_state.layer.kind == LayerKind::PanelGroup
+                {
+                    return Err(EngineError::InvalidCommand(
+                        "bulk duplicate requires sibling roots and cannot target masks or comic layers".into(),
+                    ));
+                }
+                let has_children = state
+                    .layers
+                    .values()
+                    .any(|candidate| candidate.layer.parent == Some(*source));
+                let mut tree = if source_state.layer.kind == LayerKind::Group {
+                    layer_subtree_ids(&state.layers, *source)?
+                } else if has_children {
+                    return Err(EngineError::InvalidCommand(
+                        "only ordinary groups can duplicate layer subtrees".into(),
+                    ));
+                } else {
+                    vec![*source]
+                };
+                let mut masks = state
+                    .layers
+                    .values()
+                    .filter(|candidate| {
+                        candidate.layer.kind == LayerKind::Mask
+                            && candidate.layer.mask_owner == Some(*source)
+                    })
+                    .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                    .collect::<Vec<_>>();
+                masks.sort_unstable();
+                tree.extend(masks.into_iter().map(|(_, id)| id));
+                expected_sources.extend(tree);
+            }
+            if expected_sources.len() != duplicates.len()
+                || expected_sources
+                    .iter()
+                    .zip(duplicates)
+                    .any(|(expected, (actual, _))| expected != actual)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "bulk duplicate mapping does not match the selected layer hierarchy".into(),
+                ));
+            }
+            let mut expected_id = next_layer_id(&state.layers)?.0;
+            let mut remap = HashMap::with_capacity(duplicates.len());
+            for (old, new) in duplicates {
+                if state.layers.contains_key(new)
+                    || new.0 != expected_id
+                    || remap.insert(*old, *new).is_some()
+                {
+                    return Err(EngineError::InvalidCommand(
+                        "bulk duplicate IDs are not the next available IDs".into(),
+                    ));
+                }
+                expected_id = expected_id.checked_add(1).ok_or_else(|| {
+                    EngineError::InvalidCommand("layer ID space exhausted".into())
+                })?;
+            }
+            if sources
+                .iter()
+                .any(|id| state.layers[id].layer.kind == LayerKind::PanelGroup)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "comic panel structures must be duplicated through the comic workspace".into(),
+                ));
+            }
+            if let Some(comic_bytes) = &state.comic_json {
+                let project = ink_comic::ComicProject::from_json(comic_bytes).map_err(|error| {
+                    EngineError::InvalidCommand(format!(
+                        "cannot validate comic layer ownership: {error}"
+                    ))
+                })?;
+                let bound = project
+                    .panel_layers
+                    .iter()
+                    .flat_map(|binding| {
+                        [
+                            binding.panel_group_id,
+                            binding.mask_layer_id,
+                            binding.sketch_layer_id,
+                            binding.ink_layer_id,
+                            binding.color_layer_id,
+                            binding.tone_layer_id,
+                            binding.effects_layer_id,
+                        ]
+                    })
+                    .map(LayerId::from_u128)
+                    .collect::<HashSet<_>>();
+                if expected_sources.iter().any(|id| bound.contains(id)) {
+                    return Err(EngineError::InvalidCommand(
+                        "comic-owned layers must be duplicated through the comic workspace".into(),
+                    ));
+                }
+            }
+            let mut copies = Vec::with_capacity(duplicates.len());
+            for (old, new) in duplicates {
+                let mut copy = state.layers[old].clone();
+                copy.layer.id = *new;
+                copy.layer.parent = copy
+                    .layer
+                    .parent
+                    .map(|id| remap.get(&id).copied().unwrap_or(id));
+                copy.layer.mask_owner = copy
+                    .layer
+                    .mask_owner
+                    .map(|id| remap.get(&id).copied().unwrap_or(id));
+                if sources.contains(old) {
+                    copy.layer.name = format!("{} Copy", copy.layer.name);
+                }
+                copies.push((*old, *new, copy));
+            }
+            let dirty = copies
+                .iter()
+                .flat_map(|(_, id, layer)| {
+                    layer
+                        .tiles
+                        .tiles()
+                        .into_iter()
+                        .map(move |(coordinate, _)| TileDescriptor {
+                            layer: *id,
+                            coordinate,
+                        })
+                })
+                .collect::<Vec<_>>();
+            for (_, id, copy) in &copies {
+                state.layers.insert(*id, copy.clone());
+            }
+            let copied_ids = remap.values().copied().collect::<HashSet<_>>();
+            let mut siblings = state
+                .layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.parent == parent && !copied_ids.contains(&candidate.layer.id)
+                })
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            siblings.sort_unstable();
+            let mut ordered = Vec::with_capacity(siblings.len() + sources.len());
+            for (_, sibling) in siblings {
+                ordered.push(sibling);
+                if sources.contains(&sibling) {
+                    let source = sibling;
+                    ordered.extend(copies.iter().filter_map(|(old, new, copy)| {
+                        (copy.layer.parent == parent
+                            && (*old == source || copy.layer.mask_owner == Some(source)))
+                        .then_some(*new)
+                    }));
+                }
+            }
+            for (order, id) in ordered.into_iter().enumerate() {
+                if let Some(layer) = state.layers.get_mut(&id) {
+                    layer.layer.order = u32::try_from(order).unwrap_or(u32::MAX);
+                }
+            }
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+            if !dirty.is_empty() {
+                state.events.push(EngineEvent::TilesDirty {
+                    revision: state.revision,
+                    tiles: dirty,
+                });
+            }
+        }
+        EditorCommand::MergeLayersBulk { layers } => {
+            if !(2..=4_096).contains(&layers.len())
+                || layers.iter().copied().collect::<HashSet<_>>().len() != layers.len()
+            {
+                return Err(EngineError::InvalidCommand(
+                    "bulk merge requires at least two distinct layers".into(),
+                ));
+            }
+            let parent = state
+                .layers
+                .get(&layers[0])
+                .ok_or(EngineError::InvalidLayer)?
+                .layer
+                .parent;
+            let mut siblings = state
+                .layers
+                .values()
+                .filter(|candidate| candidate.layer.parent == parent)
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            siblings.sort_unstable();
+            let positions = layers
+                .iter()
+                .map(|id| {
+                    siblings
+                        .iter()
+                        .position(|(_, sibling)| sibling == id)
+                        .ok_or(EngineError::InvalidLayer)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut sorted_positions = positions.clone();
+            sorted_positions.sort_unstable();
+            if sorted_positions
+                .windows(2)
+                .any(|pair| pair[1] != pair[0] + 1)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "bulk merge requires contiguous sibling layers".into(),
+                ));
+            }
+            let ordered = sorted_positions
+                .iter()
+                .map(|position| siblings[*position].1)
+                .collect::<Vec<_>>();
+            let target = *ordered.first().ok_or(EngineError::InvalidLayer)?;
+            if ordered.iter().any(|id| {
+                let layer = &state.layers[id].layer;
+                layer.kind != LayerKind::Raster
+                    || !layer.visible
+                    || layer.blend_mode != ink_model::LayerBlendMode::Normal
+                    || layer.clipping
+                    || state
+                        .layers
+                        .values()
+                        .any(|child| child.layer.parent == Some(*id))
+                    || ancestor_has_mask_node(&state.layers, &state.layers[id])
+            }) || ordered
+                .iter()
+                .any(|id| state.layers[id].layer.kind == LayerKind::Mask)
+                || state.layers.values().any(|layer| {
+                    layer.layer.parent == parent && layer.layer.kind == LayerKind::Mask
+                })
+            {
+                return Err(EngineError::InvalidCommand(
+                    "safe bulk merge requires visible, unlocked standalone raster siblings without masks, clipping, or effects".into(),
+                ));
+            }
+            if state.layers[&target].layer.opacity != u16::MAX {
+                return Err(EngineError::InvalidCommand(
+                    "exact merge requires the lowest target at 100% opacity".into(),
+                ));
+            }
+            for id in &ordered {
+                for (_, bytes) in state.layers[id].tiles.tiles() {
+                    Tile::from_bytes(bytes).map_err(|error| {
+                        EngineError::InvalidCommand(format!("merge tile is invalid: {error:?}"))
+                    })?;
+                }
+            }
+            let before = state.layers.clone();
+            let mut dirty = HashSet::new();
+            for source in ordered.iter().skip(1) {
+                match merge_raster_layers(state, target, *source) {
+                    Ok(tiles) => dirty.extend(tiles),
+                    Err(error) => {
+                        state.layers = before;
+                        return Err(error);
+                    }
+                }
+            }
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+            if !dirty.is_empty() {
+                state.events.push(EngineEvent::TilesDirty {
+                    revision: state.revision,
+                    tiles: dirty
+                        .into_iter()
+                        .map(|coordinate| TileDescriptor {
+                            layer: target,
+                            coordinate,
+                        })
+                        .collect(),
+                });
+            }
+        }
         EditorCommand::MergeLayers { target, source } => {
             let dirty = merge_raster_layers(state, *target, *source)?;
             advance_revision(state)?;
@@ -659,6 +1926,61 @@ pub(super) fn dispatch_state(
                 .get_mut(layer)
                 .ok_or(EngineError::InvalidLayer)?;
             layer_state.layer.visible = *visible;
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::SetMaskEnabled { mask, enabled } => {
+            let layer_state = state
+                .layers
+                .get_mut(mask)
+                .ok_or(EngineError::InvalidLayer)?;
+            if layer_state.layer.kind != LayerKind::Mask {
+                return Err(EngineError::InvalidCommand(
+                    "mask operation requires a mask layer".into(),
+                ));
+            }
+            layer_state.layer.mask_enabled = *enabled;
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::SetMaskInverted { mask, inverted } => {
+            let layer_state = state
+                .layers
+                .get_mut(mask)
+                .ok_or(EngineError::InvalidLayer)?;
+            if layer_state.layer.kind != LayerKind::Mask {
+                return Err(EngineError::InvalidCommand(
+                    "mask operation requires a mask layer".into(),
+                ));
+            }
+            layer_state.layer.mask_inverted = *inverted;
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::ApplyLayerMask { mask } => {
+            apply_layer_mask(state, *mask)?;
+        }
+        EditorCommand::SetLayersVisibility { layers, visible } => {
+            let unique: std::collections::HashSet<_> = layers.iter().copied().collect();
+            if layers.is_empty() || unique.len() != layers.len() {
+                return Err(EngineError::InvalidCommand(
+                    "bulk visibility requires distinct layer IDs".into(),
+                ));
+            }
+            if layers.iter().any(|layer| !state.layers.contains_key(layer)) {
+                return Err(EngineError::InvalidLayer);
+            }
+            for layer in layers {
+                if let Some(layer_state) = state.layers.get_mut(layer) {
+                    layer_state.layer.visible = *visible;
+                }
+            }
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {
                 revision: state.revision,
@@ -705,6 +2027,57 @@ pub(super) fn dispatch_state(
                 .get_mut(layer)
                 .ok_or(EngineError::InvalidLayer)?;
             layer_state.layer.alpha_lock = *enabled;
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::SetLayerLocked { layer, locked } => {
+            let layer_state = state
+                .layers
+                .get_mut(layer)
+                .ok_or(EngineError::InvalidLayer)?;
+            layer_state.layer.locked = *locked;
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::SetLayersLocked { layers, locked } => {
+            let unique: std::collections::HashSet<_> = layers.iter().copied().collect();
+            if layers.is_empty() || unique.len() != layers.len() {
+                return Err(EngineError::InvalidCommand(
+                    "bulk lock requires distinct layer IDs".into(),
+                ));
+            }
+            if layers.iter().any(|layer| !state.layers.contains_key(layer)) {
+                return Err(EngineError::InvalidLayer);
+            }
+            for layer in layers {
+                if let Some(layer_state) = state.layers.get_mut(layer) {
+                    layer_state.layer.locked = *locked;
+                }
+            }
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::SetLayersLabel { layers, label } => {
+            let unique: std::collections::HashSet<_> = layers.iter().copied().collect();
+            if layers.is_empty() || unique.len() != layers.len() {
+                return Err(EngineError::InvalidCommand(
+                    "bulk label requires distinct layer IDs".into(),
+                ));
+            }
+            if layers.iter().any(|layer| !state.layers.contains_key(layer)) {
+                return Err(EngineError::InvalidLayer);
+            }
+            for layer in layers {
+                if let Some(layer_state) = state.layers.get_mut(layer) {
+                    layer_state.layer.label = *label;
+                }
+            }
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {
                 revision: state.revision,
@@ -1952,6 +3325,16 @@ pub(super) fn dispatch_state(
                         .get(&current_id)
                         .and_then(|candidate| candidate.layer.parent);
                 }
+                if !state.layers.get(parent).is_some_and(|candidate| {
+                    matches!(
+                        candidate.layer.kind,
+                        LayerKind::Group | LayerKind::PanelGroup
+                    )
+                }) {
+                    return Err(EngineError::InvalidCommand(
+                        "layers can only be moved into a group".into(),
+                    ));
+                }
             }
             let old_parent = state
                 .layers
@@ -1959,13 +3342,38 @@ pub(super) fn dispatch_state(
                 .ok_or(EngineError::InvalidLayer)?
                 .layer
                 .parent;
+            let moving_layer = state.layers.get(layer).ok_or(EngineError::InvalidLayer)?;
+            if moving_layer.layer.kind == LayerKind::Mask
+                && moving_layer.layer.mask_owner.is_some()
+                && old_parent != *parent
+            {
+                return Err(EngineError::InvalidCommand(
+                    "move the mask owner to keep its attached mask together".into(),
+                ));
+            }
+            let mut attached_masks = state
+                .layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.kind == LayerKind::Mask
+                        && candidate.layer.mask_owner == Some(*layer)
+                })
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            attached_masks.sort_unstable();
+            let attached_mask_ids = attached_masks
+                .iter()
+                .map(|(_, id)| *id)
+                .collect::<HashSet<_>>();
             // Preserve the relative order of all unaffected siblings, then
-            // insert the moved node at the requested bounded index.
+            // insert the moved node and its masks at the requested index.
             let mut target_siblings = state
                 .layers
                 .values()
                 .filter(|candidate| {
-                    candidate.layer.parent == *parent && candidate.layer.id != *layer
+                    candidate.layer.parent == *parent
+                        && candidate.layer.id != *layer
+                        && !attached_mask_ids.contains(&candidate.layer.id)
                 })
                 .map(|candidate| (candidate.layer.order, candidate.layer.id))
                 .collect::<Vec<_>>();
@@ -1974,8 +3382,16 @@ pub(super) fn dispatch_state(
                 .unwrap_or(usize::MAX)
                 .min(target_siblings.len());
             target_siblings.insert(insertion, (u32::MAX, *layer));
+            for (offset, (_, mask_id)) in attached_masks.iter().enumerate() {
+                target_siblings.insert(insertion + offset + 1, (u32::MAX, *mask_id));
+            }
             if let Some(layer_state) = state.layers.get_mut(layer) {
                 layer_state.layer.parent = *parent;
+            }
+            for (_, mask_id) in &attached_masks {
+                if let Some(mask_state) = state.layers.get_mut(mask_id) {
+                    mask_state.layer.parent = *parent;
+                }
             }
             for (order, (_, sibling_id)) in target_siblings.into_iter().enumerate() {
                 if let Some(sibling) = state.layers.get_mut(&sibling_id) {
@@ -1984,6 +3400,107 @@ pub(super) fn dispatch_state(
             }
             if old_parent != *parent {
                 normalize_sibling_orders(&mut state.layers, old_parent);
+            }
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+        }
+        EditorCommand::ReorderLayers { layers, index } => {
+            let mut roots = Vec::new();
+            for id in layers {
+                let item = state.layers.get(id).ok_or(EngineError::InvalidLayer)?;
+                if item.layer.kind == LayerKind::PanelGroup {
+                    return Err(EngineError::InvalidCommand(
+                        "comic-owned layers must be reordered in the Comics workspace".into(),
+                    ));
+                }
+                let normalized = item.layer.mask_owner.unwrap_or(*id);
+                let mut parent = state
+                    .layers
+                    .get(&normalized)
+                    .ok_or(EngineError::InvalidLayer)?
+                    .layer
+                    .parent;
+                let mut nested = false;
+                let mut visited = HashSet::new();
+                while let Some(parent_id) = parent {
+                    if !visited.insert(parent_id) {
+                        return Err(EngineError::InvalidCommand(
+                            "layer hierarchy contains a cycle".into(),
+                        ));
+                    }
+                    if roots.contains(&parent_id) {
+                        nested = true;
+                        break;
+                    }
+                    let ancestor = state
+                        .layers
+                        .get(&parent_id)
+                        .ok_or(EngineError::InvalidLayer)?;
+                    if ancestor.layer.kind == LayerKind::PanelGroup {
+                        return Err(EngineError::InvalidCommand(
+                            "comic-owned layers must be reordered in the Comics workspace".into(),
+                        ));
+                    }
+                    parent = ancestor.layer.parent;
+                }
+                if !nested && !roots.contains(&normalized) {
+                    roots.push(normalized);
+                }
+            }
+            if roots.is_empty() {
+                return Err(EngineError::InvalidCommand(
+                    "multi-layer reorder has no structural roots".into(),
+                ));
+            }
+            let parent = state
+                .layers
+                .get(&roots[0])
+                .ok_or(EngineError::InvalidLayer)?
+                .layer
+                .parent;
+            if roots.iter().any(|id| {
+                state
+                    .layers
+                    .get(id)
+                    .is_none_or(|item| item.layer.parent != parent)
+            }) {
+                return Err(EngineError::InvalidCommand(
+                    "selected layers must share one sibling stack to reorder together".into(),
+                ));
+            }
+            let root_set: HashSet<_> = roots.iter().copied().collect();
+            let mut moving = state
+                .layers
+                .values()
+                .filter(|item| {
+                    root_set.contains(&item.layer.id)
+                        || (item.layer.kind == LayerKind::Mask
+                            && item
+                                .layer
+                                .mask_owner
+                                .is_some_and(|owner| root_set.contains(&owner)))
+                })
+                .map(|item| (item.layer.order, item.layer.id))
+                .collect::<Vec<_>>();
+            moving.sort_unstable();
+            let moving_ids: HashSet<_> = moving.iter().map(|(_, id)| *id).collect();
+            let mut siblings = state
+                .layers
+                .values()
+                .filter(|item| item.layer.parent == parent && !moving_ids.contains(&item.layer.id))
+                .map(|item| (item.layer.order, item.layer.id))
+                .collect::<Vec<_>>();
+            siblings.sort_unstable();
+            let insertion = usize::try_from(*index)
+                .unwrap_or(usize::MAX)
+                .min(siblings.len());
+            siblings.splice(insertion..insertion, moving);
+            for (order, (_, id)) in siblings.into_iter().enumerate() {
+                if let Some(item) = state.layers.get_mut(&id) {
+                    item.layer.order = u32::try_from(order).unwrap_or(u32::MAX);
+                }
             }
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {

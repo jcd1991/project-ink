@@ -255,6 +255,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BrushImportStageView dco_decode_brush_import_stage_view(dynamic raw);
 
   @protected
+  BrushPreviewPoint dco_decode_brush_preview_point(dynamic raw);
+
+  @protected
   BrushSummary dco_decode_brush_summary(dynamic raw);
 
   @protected
@@ -311,6 +314,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
+  LayerPanelStateView dco_decode_layer_panel_state_view(dynamic raw);
+
+  @protected
   LayerSummary dco_decode_layer_summary(dynamic raw);
 
   @protected
@@ -330,6 +336,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BigInt> dco_decode_list_U128(dynamic raw);
+
+  @protected
+  List<BrushPreviewPoint> dco_decode_list_brush_preview_point(dynamic raw);
 
   @protected
   List<BrushSummary> dco_decode_list_brush_summary(dynamic raw);
@@ -631,6 +640,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BrushPreviewPoint sse_decode_brush_preview_point(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BrushSummary sse_decode_brush_summary(SseDeserializer deserializer);
 
   @protected
@@ -703,6 +717,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
+  LayerPanelStateView sse_decode_layer_panel_state_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LayerSummary sse_decode_layer_summary(SseDeserializer deserializer);
 
   @protected
@@ -722,6 +741,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BigInt> sse_decode_list_U128(SseDeserializer deserializer);
+
+  @protected
+  List<BrushPreviewPoint> sse_decode_list_brush_preview_point(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<BrushSummary> sse_decode_list_brush_summary(
@@ -1069,6 +1093,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_brush_preview_point(
+    BrushPreviewPoint self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_brush_summary(BrushSummary self, SseSerializer serializer);
 
   @protected
@@ -1156,6 +1186,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_layer_panel_state_view(
+    LayerPanelStateView self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_layer_summary(LayerSummary self, SseSerializer serializer);
 
   @protected
@@ -1177,6 +1213,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_U128(List<BigInt> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_brush_preview_point(
+    List<BrushPreviewPoint> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_brush_summary(

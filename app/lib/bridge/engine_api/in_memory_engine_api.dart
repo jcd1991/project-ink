@@ -1,18 +1,26 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../generated/api.dart' as rust;
 import 'engine_api_contract.dart';
 import 'engine_api_models.dart';
 import 'layer_id_projection.dart';
-import '../../tools/brush_library.dart' show BrushCurvePointView;
+import '../../tools/brush_library.dart'
+    show BrushCurvePointView, BrushPreviewPointView;
+
+const int _additionalBuiltinBrushIdBase = 4000000000000000;
 
 class InMemoryEngineApi implements EngineApi {
   InMemoryEngineApi();
 
   int _revision = 0;
+  int _nextOpacityEditId = 1;
   int _nextBrushDraft = 1;
   final Set<int> _brushDrafts = <int>{};
   Uint8List? _comicBytes;
+  LayerPanelStateView _layerPanelState = const LayerPanelStateView(
+    primaryLayerId: 1,
+  );
 
   @override
   final DocumentInfo documentInfo = const DocumentInfo(
@@ -231,6 +239,18 @@ class InMemoryEngineApi implements EngineApi {
   }
 
   @override
+  Future<Uint8List> renderBrushPreview({
+    required int brushId,
+    required int width,
+    required int height,
+    required List<BrushPreviewPointView> points,
+  }) async => Uint8List.fromList(
+    base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7HcAAAAASUVORK5CYII=',
+    ),
+  );
+
+  @override
   Future<void> exportBrush({required int brushId, required String path}) async {
     if (brushId < 0 || path.isEmpty) {
       throw ArgumentError('invalid brush export');
@@ -430,8 +450,162 @@ class InMemoryEngineApi implements EngineApi {
   }
 
   @override
+  Future<void> reorderLayers({
+    required List<int> layerIds,
+    required int index,
+  }) async {
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length ||
+        index < 0) {
+      throw ArgumentError(
+        'reorder requires unique IDs and a non-negative index',
+      );
+    }
+    _revision++;
+  }
+
+  @override
   Future<void> deleteLayer({required int layerId}) async {
     if (layerId <= 0) throw ArgumentError('invalid layer ID');
+    _revision++;
+  }
+
+  @override
+  Future<void> deleteLayers({required List<int> layerIds}) async {
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('delete requires unique layer IDs');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<String?> preflightDeleteLayers({required List<int> layerIds}) async {
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('delete requires unique positive layer IDs');
+    }
+    return null;
+  }
+
+  @override
+  Future<void> setLayersVisibility({
+    required List<int> layerIds,
+    required bool visible,
+  }) async {
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('visibility requires unique layer IDs');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<void> setLayerSolo({required int? layerId}) async {
+    if (layerId != null && layerId <= 0) {
+      throw ArgumentError('invalid solo layer ID');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<LayerPanelStateView> layerPanelState() async => _layerPanelState;
+
+  @override
+  Future<void> setLayerPanelState({
+    required int? primaryLayerId,
+    required List<int> collapsedGroupIds,
+  }) async {
+    if ((primaryLayerId != null && primaryLayerId <= 0) ||
+        collapsedGroupIds.any((id) => id <= 0) ||
+        collapsedGroupIds.toSet().length != collapsedGroupIds.length) {
+      throw ArgumentError('invalid layer-panel state');
+    }
+    final collapsed = collapsedGroupIds.toList()..sort();
+    final candidate = LayerPanelStateView(
+      primaryLayerId: primaryLayerId,
+      collapsedGroupIds: List<int>.unmodifiable(collapsed),
+    );
+    if (candidate.primaryLayerId == _layerPanelState.primaryLayerId &&
+        _sameIds(
+          candidate.collapsedGroupIds,
+          _layerPanelState.collapsedGroupIds,
+        )) {
+      return;
+    }
+    _layerPanelState = candidate;
+    _revision++;
+  }
+
+  bool _sameIds(List<int> left, List<int> right) {
+    if (left.length != right.length) return false;
+    for (var index = 0; index < left.length; index++) {
+      if (left[index] != right[index]) return false;
+    }
+    return true;
+  }
+
+  @override
+  Future<void> setLayersLocked({
+    required List<int> layerIds,
+    required bool locked,
+  }) async {
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('lock requires unique layer IDs');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<void> setLayersLabel({
+    required List<int> layerIds,
+    required int? labelRgba,
+  }) async {
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length ||
+        (labelRgba != null && (labelRgba < 0 || labelRgba > 0xffffffff))) {
+      throw ArgumentError('label requires unique layer IDs and valid color');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<void> setLayerLocked({
+    required int layerId,
+    required bool locked,
+  }) async {
+    if (layerId <= 0) throw ArgumentError.value(layerId, 'layerId');
+    _revision++;
+  }
+
+  @override
+  Future<void> setMaskEnabled({
+    required int maskId,
+    required bool enabled,
+  }) async {
+    if (maskId <= 0) throw ArgumentError.value(maskId, 'maskId');
+    _revision++;
+  }
+
+  @override
+  Future<void> setMaskInverted({
+    required int maskId,
+    required bool inverted,
+  }) async {
+    if (maskId <= 0) throw ArgumentError.value(maskId, 'maskId');
+    _revision++;
+  }
+
+  @override
+  Future<void> applyLayerMask({required int maskId}) async {
+    if (maskId <= 0) throw ArgumentError.value(maskId, 'maskId');
     _revision++;
   }
 
@@ -439,6 +613,44 @@ class InMemoryEngineApi implements EngineApi {
   Future<int> duplicateLayer({required int layerId}) async {
     if (layerId <= 0) throw ArgumentError('invalid layer ID');
     return ++_revision;
+  }
+
+  @override
+  Future<List<int>> duplicateLayers({required List<int> layerIds}) async {
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('duplicate requires at least two unique layer IDs');
+    }
+    final first = _revision + 1;
+    _revision++;
+    return List<int>.generate(layerIds.length, (index) => first + index);
+  }
+
+  @override
+  Future<int> groupLayers({required List<int> layerIds}) async {
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('group requires at least two unique layer IDs');
+    }
+    return ++_revision;
+  }
+
+  @override
+  Future<String?> preflightGroupLayers({required List<int> layerIds}) async {
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('group requires at least two unique layer IDs');
+    }
+    return null;
+  }
+
+  @override
+  Future<void> ungroupLayer({required int groupId}) async {
+    if (groupId <= 0) throw ArgumentError.value(groupId, 'groupId');
+    _revision++;
   }
 
   @override
@@ -494,6 +706,39 @@ class InMemoryEngineApi implements EngineApi {
       throw ArgumentError('invalid layer merge');
     }
     _revision++;
+  }
+
+  @override
+  Future<String?> preflightMergeLayers({
+    required int targetLayerId,
+    required int sourceLayerId,
+  }) async {
+    if (targetLayerId <= 0 ||
+        sourceLayerId <= 0 ||
+        targetLayerId == sourceLayerId) {
+      throw ArgumentError('invalid layer merge preflight');
+    }
+    final layers = await layerSummaries();
+    final source = layers.where((layer) => layer.id == sourceLayerId);
+    final target = layers.where((layer) => layer.id == targetLayerId);
+    if (source.isEmpty || target.isEmpty) {
+      return 'Merge layer no longer exists.';
+    }
+    if (source.single.kind != 'Raster' || target.single.kind != 'Raster') {
+      return 'Layer merge currently requires two raster layers.';
+    }
+    return 'Merge preview is unavailable in the in-memory engine.';
+  }
+
+  @override
+  Future<int> mergeLayersBulk({required List<int> layerIds}) async {
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('bulk merge requires unique layer IDs');
+    }
+    _revision++;
+    return layerIds.first;
   }
 
   @override
@@ -849,22 +1094,121 @@ class InMemoryEngineApi implements EngineApi {
 
   @override
   Future<List<BrushSummaryView>> builtinBrushes() async => const [
-    BrushSummaryView(id: 1, name: 'Technical Pen', tags: ['ink']),
-    BrushSummaryView(id: 2, name: 'HB Sketch Pencil', tags: ['sketch']),
-    BrushSummaryView(id: 3, name: 'Opaque Round', tags: ['paint']),
-    BrushSummaryView(id: 4, name: 'Soft Airbrush', tags: ['paint']),
-    BrushSummaryView(id: 5, name: 'Marker', tags: ['ink', 'paint']),
-    BrushSummaryView(id: 6, name: 'G-Pen', tags: ['ink']),
-    BrushSummaryView(id: 7, name: 'Dry Gouache', tags: ['paint']),
+    BrushSummaryView(
+      id: 1,
+      name: 'Technical Pen',
+      isBuiltin: true,
+      tags: ['ink'],
+    ),
+    BrushSummaryView(
+      id: 2,
+      name: 'HB Sketch Pencil',
+      isBuiltin: true,
+      tags: ['sketch'],
+    ),
+    BrushSummaryView(
+      id: 3,
+      name: 'Opaque Round',
+      isBuiltin: true,
+      tags: ['paint'],
+    ),
+    BrushSummaryView(
+      id: 4,
+      name: 'Soft Airbrush',
+      isBuiltin: true,
+      tags: ['paint'],
+    ),
+    BrushSummaryView(
+      id: 5,
+      name: 'Marker',
+      isBuiltin: true,
+      tags: ['ink', 'paint'],
+    ),
+    BrushSummaryView(id: 6, name: 'G-Pen', isBuiltin: true, tags: ['ink']),
+    BrushSummaryView(
+      id: 7,
+      name: 'Dry Gouache',
+      isBuiltin: true,
+      tags: ['paint'],
+    ),
     BrushSummaryView(
       id: 8,
       name: 'Digital Watercolor Wash',
+      isBuiltin: true,
       tags: ['watercolor'],
     ),
-    BrushSummaryView(id: 9, name: 'Watercolor Blender', tags: ['watercolor']),
-    BrushSummaryView(id: 10, name: 'Ink Spatter', tags: ['effect']),
-    BrushSummaryView(id: 11, name: 'Ribbon Chain', tags: ['effect']),
-    BrushSummaryView(id: 12, name: 'Acrylic Rake', tags: ['paint']),
+    BrushSummaryView(
+      id: 9,
+      name: 'Watercolor Blender',
+      isBuiltin: true,
+      tags: ['watercolor'],
+    ),
+    BrushSummaryView(
+      id: 10,
+      name: 'Ink Spatter',
+      isBuiltin: true,
+      tags: ['effect'],
+    ),
+    BrushSummaryView(
+      id: 11,
+      name: 'Ribbon Chain',
+      isBuiltin: true,
+      tags: ['effect'],
+    ),
+    BrushSummaryView(
+      id: 12,
+      name: 'Acrylic Rake',
+      isBuiltin: true,
+      tags: ['paint'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 1,
+      name: 'Soft Graphite',
+      isBuiltin: true,
+      tags: ['sketch', 'pencil', 'soft'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 2,
+      name: 'Charcoal',
+      isBuiltin: true,
+      tags: ['sketch', 'charcoal', 'texture'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 3,
+      name: 'Brush Pen',
+      isBuiltin: true,
+      tags: ['ink', 'pressure', 'taper'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 4,
+      name: 'Dry Ink',
+      isBuiltin: true,
+      tags: ['ink', 'texture', 'dry'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 5,
+      name: 'Flat Paint',
+      isBuiltin: true,
+      tags: ['paint', 'opaque', 'flat'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 6,
+      name: 'Soft Blender',
+      isBuiltin: true,
+      tags: ['blend', 'smudge', 'soft'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 7,
+      name: 'Hard Eraser',
+      isBuiltin: true,
+      tags: ['eraser', 'hard', 'clean'],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 8,
+      name: 'Soft Eraser',
+      isBuiltin: true,
+      tags: ['eraser', 'soft'],
+    ),
   ];
 
   @override
@@ -892,6 +1236,32 @@ class InMemoryEngineApi implements EngineApi {
     if (layerId < 0 || !opacity.isFinite || opacity < 0 || opacity > 1) {
       throw ArgumentError('invalid layer properties');
     }
+  }
+
+  @override
+  Future<int> beginLayerOpacityEdit({required int layerId}) async {
+    if (layerId <= 0) throw ArgumentError.value(layerId, 'layerId');
+    return _nextOpacityEditId++;
+  }
+
+  @override
+  Future<void> updateLayerOpacityEdit({
+    required int editId,
+    required double opacity,
+  }) async {
+    if (editId <= 0 || !opacity.isFinite || opacity < 0 || opacity > 1) {
+      throw ArgumentError('invalid opacity edit');
+    }
+  }
+
+  @override
+  Future<void> commitLayerOpacityEdit({required int editId}) async {
+    if (editId <= 0) throw ArgumentError.value(editId, 'editId');
+  }
+
+  @override
+  Future<void> cancelLayerOpacityEdit({required int editId}) async {
+    if (editId <= 0) throw ArgumentError.value(editId, 'editId');
   }
 
   @override

@@ -165,6 +165,20 @@ pub struct Layer {
     #[serde(default)]
     pub order: u32,
     pub kind: LayerKind,
+    /// Stable owner identity for an attached mask. `None` means the mask is
+    /// unattached; unlike legacy mask adjacency this link survives reordering.
+    #[serde(default)]
+    pub mask_owner: Option<LayerId>,
+    /// Whether an attached mask currently affects its owner.
+    #[serde(default = "default_mask_enabled")]
+    pub mask_enabled: bool,
+    /// Normal masks store hidden coverage sparsely (zero means reveal). Legacy
+    /// geometry masks store reveal coverage directly and set this flag.
+    #[serde(default)]
+    pub mask_stencil: bool,
+    /// Invert the effective coverage without rewriting mask pixels.
+    #[serde(default)]
+    pub mask_inverted: bool,
     pub name: String,
     pub opacity: u16,
     pub visible: bool,
@@ -176,6 +190,9 @@ pub struct Layer {
     pub group_mode: LayerGroupMode,
     #[serde(default)]
     pub alpha_lock: bool,
+    /// Full layer lock. Group locks are inherited by their descendants.
+    #[serde(default)]
+    pub locked: bool,
     #[serde(default)]
     pub clipping: bool,
     #[serde(default)]
@@ -196,6 +213,10 @@ impl Layer {
             parent: None,
             order: 0,
             kind,
+            mask_owner: None,
+            mask_enabled: true,
+            mask_stencil: false,
+            mask_inverted: false,
             name: name.into(),
             opacity: u16::MAX,
             visible: true,
@@ -206,12 +227,17 @@ impl Layer {
                 LayerGroupMode::PassThrough
             },
             alpha_lock: false,
+            locked: false,
             clipping: false,
             reference: false,
             label: None,
             adjustment: None,
         }
     }
+}
+
+fn default_mask_enabled() -> bool {
+    true
 }
 
 fn legacy_group_mode() -> LayerGroupMode {

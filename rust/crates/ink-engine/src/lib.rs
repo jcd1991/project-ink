@@ -27,8 +27,8 @@ use ink_model::{
 };
 use ink_raster::{TILE_SIZE, Tile, TileCoord, TileStore};
 use ink_storage::{
-    HistorySnapshot, ProjectSnapshot, ResourceRecord, StorageError, StoredState, TileRecord,
-    VectorRecord,
+    HistorySnapshot, LayerPanelState, ProjectSnapshot, ResourceRecord, StorageError, StoredState,
+    TileRecord, VectorRecord,
 };
 use ink_tools::{
     SelectionMask, TimeLapseRecording, TimeLapseSample, TimeLapseStroke, VectorPoint, VectorStroke,
@@ -71,6 +71,7 @@ const MAX_POST_EFFECT_PIXELS: usize = 32 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrushSummaryProjection {
     pub id: BrushId,
+    pub is_builtin: bool,
     pub name: String,
     pub tags: Vec<String>,
     pub diameter_px: f32,
@@ -89,6 +90,14 @@ pub struct BrushSummaryProjection {
     pub pressure_curve_points: Vec<f32>,
     pub tip_resource_hash: Option<Vec<u8>>,
     pub grain_resource_hash: Option<Vec<u8>>,
+}
+
+/// One normalized input point used by the disposable brush-editor preview.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrushPreviewPoint {
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
 }
 
 /// Stable projection of one editable vector stroke for the UI. The bounds are
@@ -313,6 +322,33 @@ fn validate_vector_stroke(stroke: &VectorStroke, spec: DocumentSpec) -> Result<(
 
 fn validate_layer_tree(layers: &BTreeMap<LayerId, LayerState>) -> Result<(), EngineError> {
     for state in layers.values() {
+        match (state.layer.kind, state.layer.mask_owner) {
+            (LayerKind::Mask, Some(owner_id)) => {
+                let owner = layers.get(&owner_id).ok_or_else(|| {
+                    EngineError::InvalidCommand("mask references a missing owner layer".into())
+                })?;
+                let valid_owner = match owner.layer.kind {
+                    LayerKind::Raster | LayerKind::VectorInk => {
+                        state.layer.parent == owner.layer.parent
+                    }
+                    LayerKind::Group | LayerKind::PanelGroup => {
+                        state.layer.parent == Some(owner_id)
+                    }
+                    _ => false,
+                };
+                if !valid_owner {
+                    return Err(EngineError::InvalidCommand(
+                        "mask owner must be a paint sibling or its parent group".into(),
+                    ));
+                }
+            }
+            (_, Some(_)) => {
+                return Err(EngineError::InvalidCommand(
+                    "only mask layers can have a mask owner".into(),
+                ));
+            }
+            (LayerKind::Mask | _, None) => {}
+        }
         match (state.layer.kind, state.layer.adjustment) {
             (LayerKind::Adjustment, Some(adjustment)) => {
                 adjustment
@@ -449,6 +485,96 @@ fn next_layer_id(layers: &BTreeMap<LayerId, LayerState>) -> Result<LayerId, Engi
     }
 }
 
+fn normalize_duplicate_roots(
+    layers: &BTreeMap<LayerId, LayerState>,
+    selected: Vec<LayerId>,
+) -> Result<Vec<LayerId>, EngineError> {
+    if !(2..=4_096).contains(&selected.len()) {
+        return Err(EngineError::InvalidCommand(
+            "duplicate selected requires between two and 4096 layers".into(),
+        ));
+    }
+    let mut normalized = HashSet::new();
+    for id in selected {
+        let layer = layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+        normalized.insert(layer.layer.mask_owner.unwrap_or(id));
+    }
+    let mut roots = normalized
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let mut parent = layers.get(candidate).and_then(|item| item.layer.parent);
+            let mut visited = HashSet::new();
+            while let Some(id) = parent {
+                if normalized.contains(&id) {
+                    return false;
+                }
+                if !visited.insert(id) {
+                    break;
+                }
+                parent = layers.get(&id).and_then(|item| item.layer.parent);
+            }
+            true
+        })
+        .collect::<Vec<_>>();
+    if roots.len() < 2 {
+        return Err(EngineError::InvalidCommand(
+            "duplicate selected requires at least two structural roots".into(),
+        ));
+    }
+    let parent = layers[&roots[0]].layer.parent;
+    if roots.iter().any(|id| layers[id].layer.parent != parent) {
+        return Err(EngineError::InvalidCommand(
+            "bulk duplicate requires sibling roots".into(),
+        ));
+    }
+    roots.sort_by_key(|id| (layers[id].layer.order, *id));
+    Ok(roots)
+}
+
+fn duplicate_source_mapping(
+    layers: &BTreeMap<LayerId, LayerState>,
+    roots: &[LayerId],
+) -> Result<Vec<(LayerId, LayerId)>, EngineError> {
+    let mut sources = Vec::new();
+    for root in roots {
+        let layer = &layers[root].layer;
+        if layer.kind == LayerKind::Group {
+            sources.extend(layer_subtree_ids(layers, *root)?);
+        } else if layer.kind != LayerKind::Mask {
+            sources.push(*root);
+        }
+        if layer.kind != LayerKind::Mask {
+            let mut masks = layers
+                .values()
+                .filter(|candidate| {
+                    candidate.layer.kind == LayerKind::Mask
+                        && candidate.layer.mask_owner == Some(*root)
+                })
+                .map(|candidate| (candidate.layer.order, candidate.layer.id))
+                .collect::<Vec<_>>();
+            masks.sort_unstable();
+            sources.extend(masks.into_iter().map(|(_, id)| id));
+        }
+    }
+    if sources.len() > 4_096 {
+        return Err(EngineError::InvalidCommand(
+            "bulk duplicate exceeds the layer command limit".into(),
+        ));
+    }
+    let mut next = next_layer_id(layers)?.0;
+    sources
+        .into_iter()
+        .map(|source| {
+            let duplicate = LayerId::from_u128(next);
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| EngineError::InvalidCommand("layer ID space exhausted".into()))?;
+            Ok((source, duplicate))
+        })
+        .collect()
+}
+
 fn bounded_selection_coordinate(value: f32, extent: u32) -> i32 {
     let limit = i32::try_from(extent).unwrap_or(i32::MAX);
     value.round().clamp(
@@ -520,18 +646,20 @@ fn compositor_blend_mode(mode: ink_model::LayerBlendMode) -> ink_compositor::Ble
     }
 }
 
-/// Merge one standalone raster layer into another using the same deterministic
-/// compositor used for export. The source layer is removed only after every
-/// source tile has been validated and applied. This keeps the operation
-/// atomic from the caller's perspective: validation failures cannot partially
-/// mutate the document, while the normal layer-map snapshot makes the command
-/// fully undoable and journal-replayable.
-#[allow(clippy::too_many_lines)]
-fn merge_raster_layers(
-    state: &mut EngineState,
+/// Immutable inputs validated before applying a raster merge.
+struct PreparedRasterMerge {
+    source_parent: Option<LayerId>,
+    source_opacity: u16,
+    source_tiles: HashMap<TileCoord, Tile>,
+    target_tiles: HashMap<TileCoord, Tile>,
+    coordinates: HashSet<TileCoord>,
+}
+
+fn validate_raster_merge_structure(
+    state: &EngineState,
     target: LayerId,
     source: LayerId,
-) -> Result<Vec<TileCoord>, EngineError> {
+) -> Result<(Option<LayerId>, u16), EngineError> {
     if target == source {
         return Err(EngineError::InvalidCommand(
             "a layer cannot be merged into itself".into(),
@@ -551,6 +679,37 @@ fn merge_raster_layers(
             "layer merge requires layers in the same group".into(),
         ));
     }
+    if !target_state.layer.visible || !source_state.layer.visible {
+        return Err(EngineError::InvalidCommand(
+            "show both layers before merging them".into(),
+        ));
+    }
+    if target_state.layer.blend_mode != ink_model::LayerBlendMode::Normal
+        || source_state.layer.blend_mode != ink_model::LayerBlendMode::Normal
+    {
+        return Err(EngineError::InvalidCommand(
+            "safe merge currently requires Normal blending on both layers".into(),
+        ));
+    }
+    let siblings = {
+        let mut ordered = state
+            .layers
+            .values()
+            .filter(|candidate| candidate.layer.parent == source_parent)
+            .map(|candidate| (candidate.layer.order, candidate.layer.id))
+            .collect::<Vec<_>>();
+        ordered.sort_unstable();
+        ordered
+    };
+    let source_index = siblings
+        .iter()
+        .position(|(_, id)| *id == source)
+        .ok_or(EngineError::InvalidLayer)?;
+    if source_index == 0 || siblings[source_index - 1].1 != target {
+        return Err(EngineError::InvalidCommand(
+            "merge requires contiguous siblings with the target directly below the source".into(),
+        ));
+    }
     if state.layers.values().any(|candidate| {
         candidate.layer.parent == Some(target) || candidate.layer.parent == Some(source)
     }) {
@@ -563,13 +722,34 @@ fn merge_raster_layers(
             "disable clipping before merging layers".into(),
         ));
     }
+    let has_sibling_mask = state.layers.values().any(|candidate| {
+        candidate.layer.parent == source_parent && candidate.layer.kind == LayerKind::Mask
+    });
+    if has_sibling_mask
+        || ancestor_has_mask_node(&state.layers, target_state)
+        || ancestor_has_mask_node(&state.layers, source_state)
+    {
+        return Err(EngineError::InvalidCommand(
+            "remove or apply attached masks before merging layers".into(),
+        ));
+    }
 
-    // Clone only the bounded source payload before borrowing the target
-    // mutably. TileStore::tiles() returns stable, owned bytes and therefore
-    // avoids aliasing the mutable document state during the merge.
-    let source_opacity = source_state.layer.opacity;
-    let source_mode = compositor_blend_mode(source_state.layer.blend_mode);
-    let source_visible = source_state.layer.visible;
+    if target_state.layer.opacity != u16::MAX {
+        return Err(EngineError::InvalidCommand(
+            "exact merge requires the lower target at 100% opacity".into(),
+        ));
+    }
+    Ok((source_parent, source_state.layer.opacity))
+}
+
+fn prepare_merge_raster_layers(
+    state: &EngineState,
+    target: LayerId,
+    source: LayerId,
+) -> Result<PreparedRasterMerge, EngineError> {
+    let (source_parent, source_opacity) = validate_raster_merge_structure(state, target, source)?;
+    let target_state = state.layers.get(&target).ok_or(EngineError::InvalidLayer)?;
+    let source_state = state.layers.get(&source).ok_or(EngineError::InvalidLayer)?;
     let source_tiles = source_state
         .tiles
         .tiles()
@@ -581,42 +761,127 @@ fn merge_raster_layers(
                     EngineError::InvalidCommand(format!("source tile is invalid: {error:?}"))
                 })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let target_tiles = target_state
+        .tiles
+        .tiles()
+        .into_iter()
+        .map(|(coordinate, bytes)| {
+            Tile::from_bytes(bytes)
+                .map(|tile| (coordinate, tile))
+                .map_err(|error| {
+                    EngineError::InvalidCommand(format!("target tile is invalid: {error:?}"))
+                })
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let coordinates = target_tiles
+        .keys()
+        .chain(source_tiles.keys())
+        .copied()
+        .collect::<HashSet<_>>();
+
+    // Flattening translucent layers onto a transparent target changes the
+    // group alpha semantics for unknown backdrops. Require fully covered
+    // target pixels beneath every source mark, so the merged layer remains
+    // pixel-identical for any content behind it.
+    for (coordinate, source_tile) in &source_tiles {
+        let target_tile = target_tiles.get(coordinate);
+        for local_y in 0..TILE_SIZE {
+            let document_y = i64::from(coordinate.y)
+                .saturating_mul(i64::from(TILE_SIZE))
+                .saturating_add(i64::from(local_y));
+            if document_y < 0 || document_y >= i64::from(state.height_px) {
+                continue;
+            }
+            for local_x in 0..TILE_SIZE {
+                let document_x = i64::from(coordinate.x)
+                    .saturating_mul(i64::from(TILE_SIZE))
+                    .saturating_add(i64::from(local_x));
+                if document_x < 0 || document_x >= i64::from(state.width_px) {
+                    continue;
+                }
+                let source_pixel = source_tile.pixel_rgba(local_x, local_y);
+                let target_pixel =
+                    target_tile.map_or(Rgba8::default(), |tile| tile.pixel_rgba(local_x, local_y));
+                if source_pixel.a != 0 && target_pixel.a != u8::MAX {
+                    return Err(EngineError::InvalidCommand(
+                        "exact merge requires opaque lower-layer coverage beneath source marks"
+                            .into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(PreparedRasterMerge {
+        source_parent,
+        source_opacity,
+        source_tiles,
+        target_tiles,
+        coordinates,
+    })
+}
+
+/// Merge one standalone raster layer into another using the same deterministic
+/// compositor used for export. The source layer is removed only after every
+/// source tile has been validated and applied. This keeps the operation
+/// atomic from the caller's perspective: validation failures cannot partially
+/// mutate the document, while the normal layer-map snapshot makes the command
+/// fully undoable and journal-replayable.
+#[allow(clippy::too_many_lines)]
+fn merge_raster_layers(
+    state: &mut EngineState,
+    target: LayerId,
+    source: LayerId,
+) -> Result<Vec<TileCoord>, EngineError> {
+    let PreparedRasterMerge {
+        source_parent,
+        source_opacity,
+        source_tiles,
+        target_tiles,
+        coordinates,
+    } = prepare_merge_raster_layers(state, target, source)?;
     let mut dirty = HashSet::new();
-    if source_visible && source_opacity > 0 {
-        let target_state = state
-            .layers
-            .get_mut(&target)
-            .ok_or(EngineError::InvalidLayer)?;
-        for (coordinate, tile) in source_tiles {
-            for local_y in 0..TILE_SIZE {
-                for local_x in 0..TILE_SIZE {
-                    let source_pixel = tile.pixel_rgba(local_x, local_y);
-                    if source_pixel.a == 0 {
-                        continue;
-                    }
-                    let document_x = i64::from(coordinate.x)
-                        .saturating_mul(i64::from(TILE_SIZE))
-                        .saturating_add(i64::from(local_x));
-                    let document_y = i64::from(coordinate.y)
-                        .saturating_mul(i64::from(TILE_SIZE))
-                        .saturating_add(i64::from(local_y));
-                    if document_x < 0
-                        || document_y < 0
-                        || document_x >= i64::from(state.width_px)
-                        || document_y >= i64::from(state.height_px)
-                    {
-                        continue;
-                    }
-                    let x = u32::try_from(document_x).map_err(|_| {
-                        EngineError::InvalidCommand("source tile coordinate overflow".into())
-                    })?;
-                    let y = u32::try_from(document_y).map_err(|_| {
-                        EngineError::InvalidCommand("source tile coordinate overflow".into())
-                    })?;
-                    let destination = target_state.tiles.sample_pixel(x, y);
-                    let blended = ink_compositor::blend_rgba8(
-                        [destination.r, destination.g, destination.b, destination.a],
+    let target_state = state
+        .layers
+        .get_mut(&target)
+        .ok_or(EngineError::InvalidLayer)?;
+    for coordinate in coordinates {
+        let target_tile = target_tiles.get(&coordinate);
+        let source_tile = source_tiles.get(&coordinate);
+        for local_y in 0..TILE_SIZE {
+            let document_y = i64::from(coordinate.y)
+                .saturating_mul(i64::from(TILE_SIZE))
+                .saturating_add(i64::from(local_y));
+            if document_y < 0 || document_y >= i64::from(state.height_px) {
+                continue;
+            }
+            for local_x in 0..TILE_SIZE {
+                let document_x = i64::from(coordinate.x)
+                    .saturating_mul(i64::from(TILE_SIZE))
+                    .saturating_add(i64::from(local_x));
+                if document_x < 0 || document_x >= i64::from(state.width_px) {
+                    continue;
+                }
+                let target_pixel =
+                    target_tile.map_or(Rgba8::default(), |tile| tile.pixel_rgba(local_x, local_y));
+                let source_pixel =
+                    source_tile.map_or(Rgba8::default(), |tile| tile.pixel_rgba(local_x, local_y));
+                let merged = if source_pixel.a == 0 {
+                    [
+                        target_pixel.r,
+                        target_pixel.g,
+                        target_pixel.b,
+                        target_pixel.a,
+                    ]
+                } else {
+                    ink_compositor::blend_rgba8(
+                        [
+                            target_pixel.r,
+                            target_pixel.g,
+                            target_pixel.b,
+                            target_pixel.a,
+                        ],
                         [
                             source_pixel.r,
                             source_pixel.g,
@@ -624,30 +889,31 @@ fn merge_raster_layers(
                             source_pixel.a,
                         ],
                         source_opacity,
-                        source_mode,
-                    );
-                    target_state.tiles.set_pixel(
-                        x,
-                        y,
-                        Rgba8 {
-                            r: blended[0],
-                            g: blended[1],
-                            b: blended[2],
-                            a: blended[3],
-                        },
-                    );
-                    dirty.insert(TileCoord {
-                        x: i32::try_from(x / TILE_SIZE).map_err(|_| {
-                            EngineError::InvalidCommand("target tile coordinate overflow".into())
-                        })?,
-                        y: i32::try_from(y / TILE_SIZE).map_err(|_| {
-                            EngineError::InvalidCommand("target tile coordinate overflow".into())
-                        })?,
-                    });
-                }
+                        ink_compositor::BlendMode::Normal,
+                    )
+                };
+                let x = u32::try_from(document_x).map_err(|_| {
+                    EngineError::InvalidCommand("target tile coordinate overflow".into())
+                })?;
+                let y = u32::try_from(document_y).map_err(|_| {
+                    EngineError::InvalidCommand("target tile coordinate overflow".into())
+                })?;
+                target_state.tiles.set_pixel(
+                    x,
+                    y,
+                    Rgba8 {
+                        r: merged[0],
+                        g: merged[1],
+                        b: merged[2],
+                        a: merged[3],
+                    },
+                );
             }
         }
+        dirty.insert(coordinate);
     }
+    target_state.layer.opacity = u16::MAX;
+    target_state.layer.blend_mode = ink_model::LayerBlendMode::Normal;
     state.layers.remove(&source);
     normalize_sibling_orders(&mut state.layers, source_parent);
     let mut dirty = dirty.into_iter().collect::<Vec<_>>();
@@ -655,9 +921,33 @@ fn merge_raster_layers(
     Ok(dirty)
 }
 
-/// Return the first visible mask sibling after a paint layer. Mask layers are
-/// intentionally simple in v1: their alpha acts as a nondestructive stencil
-/// for the preceding raster/vector sibling in the same parent group.
+/// Conservatively reject exact merges anywhere under a group that owns a mask
+/// node, including disabled/empty masks. A merge must not change which content
+/// an attached group mask affects.
+fn ancestor_has_mask_node(layers: &BTreeMap<LayerId, LayerState>, layer: &LayerState) -> bool {
+    let mut current = layer.layer.parent;
+    let mut visited = HashSet::new();
+    while let Some(parent_id) = current {
+        if !visited.insert(parent_id) {
+            return true;
+        }
+        let Some(parent) = layers.get(&parent_id) else {
+            return true;
+        };
+        if matches!(parent.layer.kind, LayerKind::Group | LayerKind::PanelGroup)
+            && layers.values().any(|candidate| {
+                candidate.layer.mask_owner == Some(parent_id)
+                    && candidate.layer.kind == LayerKind::Mask
+            })
+        {
+            return true;
+        }
+        current = parent.layer.parent;
+    }
+    false
+}
+
+/// Return the visible mask explicitly attached to a paint layer.
 fn mask_sibling<'a>(
     layers: &'a BTreeMap<LayerId, LayerState>,
     layer: &LayerState,
@@ -665,24 +955,12 @@ fn mask_sibling<'a>(
     if !matches!(layer.layer.kind, LayerKind::Raster | LayerKind::VectorInk) {
         return None;
     }
-    let ordered = ordered_layer_ids(layers);
-    let position = ordered.iter().position(|id| *id == layer.layer.id)?;
-    for candidate_id in ordered.into_iter().skip(position.saturating_add(1)) {
-        let candidate = layers.get(&candidate_id)?;
-        if candidate.layer.parent != layer.layer.parent {
-            continue;
-        }
-        if candidate.layer.kind == LayerKind::Mask {
-            return candidate.layer.visible.then_some(candidate);
-        }
-        if matches!(
-            candidate.layer.kind,
-            LayerKind::Raster | LayerKind::VectorInk
-        ) {
-            return None;
-        }
-    }
-    None
+    layers.values().find(|candidate| {
+        candidate.layer.kind == LayerKind::Mask
+            && candidate.layer.mask_owner == Some(layer.layer.id)
+            && candidate.layer.visible
+            && candidate.layer.mask_enabled
+    })
 }
 
 fn point_inside_polygon(x: f32, y: f32, points: &[(f32, f32)]) -> bool {
@@ -716,14 +994,16 @@ fn ancestor_group_mask<'a>(
         }
         let parent = layers.get(&parent_id)?;
         if matches!(parent.layer.kind, LayerKind::Group | LayerKind::PanelGroup) {
-            let mask_id = ordered_layer_ids(layers).into_iter().find(|id| {
-                layers.get(id).is_some_and(|candidate| {
-                    candidate.layer.parent == Some(parent_id)
+            let mask_id = layers
+                .values()
+                .find(|candidate| {
+                    candidate.layer.mask_owner == Some(parent_id)
                         && candidate.layer.kind == LayerKind::Mask
                         && candidate.layer.visible
+                        && candidate.layer.mask_enabled
                         && candidate.tiles.allocated_tiles() > 0
                 })
-            });
+                .map(|candidate| candidate.layer.id);
             if let Some(mask_id) = mask_id {
                 return layers.get(&mask_id);
             }
@@ -731,6 +1011,77 @@ fn ancestor_group_mask<'a>(
         current = parent.layer.parent;
     }
     None
+}
+
+/// Convert stored mask alpha into effective reveal coverage. Ordinary masks
+/// store hidden coverage, so absent sparse pixels reveal by default. Legacy
+/// geometry masks store reveal coverage directly.
+fn mask_coverage(alpha: u8, stencil: bool, inverted: bool) -> u32 {
+    let coverage = if stencil { alpha } else { u8::MAX - alpha };
+    u32::from(if inverted {
+        u8::MAX - coverage
+    } else {
+        coverage
+    })
+}
+
+fn sample_layer_thumbnail_pixel(
+    layer: &LayerState,
+    is_mask: bool,
+    source_size: (u64, u64),
+    content_size: (usize, usize),
+    cell: (usize, usize),
+) -> Rgba8 {
+    let (source_width, source_height) = source_size;
+    let (content_width, content_height) = content_size;
+    let (x, y) = cell;
+    let cell_start = |position: usize, source: u64, content: usize| {
+        u64::try_from(position).unwrap_or(0) * source / u64::try_from(content).unwrap_or(1)
+    };
+    let row_start = cell_start(y, source_height, content_height);
+    let row_end = cell_start(y + 1, source_height, content_height).max(row_start + 1);
+    let row_span = row_end.saturating_sub(row_start);
+    let column_start = cell_start(x, source_width, content_width);
+    let column_end = cell_start(x + 1, source_width, content_width).max(column_start + 1);
+    let column_span = column_end.saturating_sub(column_start);
+    let sample_rows = row_span.min(12);
+    let sample_columns = column_span.min(12);
+    let mut strongest = Rgba8::default();
+    let mut mask_coverage_total = 0_u32;
+    for sample_y in 0..sample_rows {
+        let source_y =
+            row_start + (sample_y * row_span / sample_rows) + (row_span / sample_rows / 2);
+        for sample_x in 0..sample_columns {
+            let source_x = column_start
+                + (sample_x * column_span / sample_columns)
+                + (column_span / sample_columns / 2);
+            let candidate = layer.tiles.sample_pixel(
+                source_x.min(source_width.saturating_sub(1)) as u32,
+                source_y.min(source_height.saturating_sub(1)) as u32,
+            );
+            if is_mask {
+                mask_coverage_total += mask_coverage(
+                    candidate.a,
+                    layer.layer.mask_stencil,
+                    layer.layer.mask_inverted,
+                );
+            } else if candidate.a > strongest.a {
+                strongest = candidate;
+            }
+        }
+    }
+    if is_mask {
+        let count = u32::try_from(sample_rows * sample_columns).unwrap_or(u32::MAX);
+        let coverage = u8::try_from(mask_coverage_total / count).unwrap_or(u8::MAX);
+        Rgba8 {
+            r: coverage,
+            g: coverage,
+            b: coverage,
+            a: u8::MAX,
+        }
+    } else {
+        strongest
+    }
 }
 
 /// Resolve ancestor visibility and opacity for a paint layer. Groups are
@@ -760,10 +1111,530 @@ fn effective_layer_presentation(
     (visible, u16::try_from(opacity).unwrap_or(u16::MAX))
 }
 
+fn apply_solo_visibility(
+    layers: &mut BTreeMap<LayerId, LayerState>,
+    selected: LayerId,
+) -> Result<(), EngineError> {
+    let selected_layer = layers.get(&selected).ok_or(EngineError::InvalidLayer)?;
+    let owner = if selected_layer.layer.kind == LayerKind::Mask {
+        selected_layer
+            .layer
+            .mask_owner
+            .ok_or_else(|| EngineError::InvalidCommand("solo requires an attached mask".into()))?
+    } else {
+        selected
+    };
+    let root = layers.get(&owner).ok_or(EngineError::InvalidLayer)?;
+    if !matches!(
+        root.layer.kind,
+        LayerKind::Raster | LayerKind::VectorInk | LayerKind::Group
+    ) {
+        return Err(EngineError::InvalidCommand(
+            "solo is supported for paint layers and ordinary groups".into(),
+        ));
+    }
+
+    let mut included = HashSet::from([owner, selected]);
+    if root.layer.kind == LayerKind::Group {
+        for candidate in layers.values() {
+            let mut parent = candidate.layer.parent;
+            let mut visited = HashSet::new();
+            while let Some(parent_id) = parent {
+                if !visited.insert(parent_id) {
+                    break;
+                }
+                if parent_id == owner {
+                    included.insert(candidate.layer.id);
+                    break;
+                }
+                parent = layers.get(&parent_id).and_then(|item| item.layer.parent);
+            }
+        }
+    }
+    let included_owners = included.clone();
+    for candidate in layers.values() {
+        if candidate
+            .layer
+            .mask_owner
+            .is_some_and(|mask_owner| included_owners.contains(&mask_owner))
+        {
+            included.insert(candidate.layer.id);
+        }
+    }
+
+    // The isolated layer and its ancestor groups must render even if their
+    // saved visibility flags are off. Descendant visibility inside a soloed
+    // group remains governed by the saved flags and is never rewritten.
+    let mut forced_visible = HashSet::from([selected, owner]);
+    let mut current = layers.get(&owner).and_then(|item| item.layer.parent);
+    let mut visited = HashSet::new();
+    while let Some(id) = current {
+        if !visited.insert(id) {
+            break;
+        }
+        forced_visible.insert(id);
+        current = layers.get(&id).and_then(|item| item.layer.parent);
+    }
+    for (id, layer) in layers {
+        layer.layer.visible =
+            included.contains(id) && (forced_visible.contains(id) || layer.layer.visible);
+    }
+    Ok(())
+}
+
+fn validate_layer_panel_state<'a>(
+    panel_state: &LayerPanelState,
+    layers: impl IntoIterator<Item = &'a Layer>,
+) -> Result<(), EngineError> {
+    let mut layer_kinds = HashMap::new();
+    for layer in layers {
+        layer_kinds.insert(layer.id, layer.kind);
+    }
+    if panel_state
+        .primary_layer
+        .is_some_and(|primary| !layer_kinds.contains_key(&primary))
+    {
+        return Err(EngineError::InvalidCommand(
+            "layer-panel primary target does not exist".into(),
+        ));
+    }
+    let mut collapsed_groups = HashSet::with_capacity(panel_state.collapsed_groups.len());
+    if panel_state.collapsed_groups.iter().any(|group| {
+        layer_kinds.get(group) != Some(&LayerKind::Group) || !collapsed_groups.insert(*group)
+    }) {
+        return Err(EngineError::InvalidCommand(
+            "collapsed layer-panel entries must be unique ordinary groups".into(),
+        ));
+    }
+    Ok(())
+}
+
 mod worker;
 use worker::RenderWorker;
 #[cfg(test)]
 use worker::WorkerControl;
+
+/// Rust-authoritative drag source and group destination availability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayerDragCapability {
+    pub layer_id: LayerId,
+    pub can_drag: bool,
+    pub drag_reason: Option<String>,
+    pub can_receive_layers: bool,
+    pub receive_reason: Option<String>,
+}
+
+/// Rust-authoritative availability for common single-layer actions.
+// Each independent action needs a direct availability bit and a reason for UI
+// rendering; keeping both in this projection avoids re-deriving Rust rules.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayerActionCapability {
+    pub layer_id: LayerId,
+    pub can_edit_properties: bool,
+    pub edit_properties_reason: Option<String>,
+    pub can_duplicate: bool,
+    pub duplicate_reason: Option<String>,
+    pub can_delete: bool,
+    pub delete_reason: Option<String>,
+    pub can_ungroup: bool,
+    pub ungroup_reason: Option<String>,
+    pub can_apply_mask: bool,
+    pub apply_mask_reason: Option<String>,
+    pub merge_down_reason: Option<String>,
+}
+
+fn comic_owned_layer_ids(comic_json: Option<&[u8]>) -> Result<HashSet<LayerId>, EngineError> {
+    let Some(bytes) = comic_json else {
+        return Ok(HashSet::new());
+    };
+    let project = ink_comic::ComicProject::from_json(bytes).map_err(|error| {
+        EngineError::InvalidCommand(format!("cannot validate comic layer ownership: {error}"))
+    })?;
+    Ok(project
+        .panel_layers
+        .iter()
+        .flat_map(|binding| {
+            [
+                binding.panel_group_id,
+                binding.mask_layer_id,
+                binding.sketch_layer_id,
+                binding.ink_layer_id,
+                binding.color_layer_id,
+                binding.tone_layer_id,
+                binding.effects_layer_id,
+            ]
+        })
+        .map(LayerId::from_u128)
+        .collect())
+}
+
+fn layer_is_comic_owned(
+    state: &EngineState,
+    comic_owned_ids: &HashSet<LayerId>,
+    layer_id: LayerId,
+) -> bool {
+    let mut cursor = Some(layer_id);
+    let mut visited = HashSet::new();
+    while let Some(current) = cursor {
+        if !visited.insert(current) {
+            return true;
+        }
+        let Some(layer) = state.layers.get(&current) else {
+            return false;
+        };
+        if layer.layer.kind == LayerKind::PanelGroup || comic_owned_ids.contains(&current) {
+            return true;
+        }
+        cursor = layer.layer.parent;
+    }
+    false
+}
+
+fn layer_lock_owner(state: &EngineState, layer_id: LayerId) -> Option<LayerId> {
+    let mut cursor = Some(layer_id);
+    let mut visited = HashSet::new();
+    while let Some(current) = cursor {
+        if !visited.insert(current) {
+            return None;
+        }
+        let layer = state.layers.get(&current)?;
+        if layer.layer.locked {
+            return Some(current);
+        }
+        cursor = layer.layer.parent;
+    }
+    None
+}
+
+fn locked_layer_action_reason(state: &EngineState, owner: LayerId, action: &str) -> String {
+    let name = state
+        .layers
+        .get(&owner)
+        .map_or("a locked layer", |entry| entry.layer.name.as_str());
+    format!("Locked by {name}; unlock it before {action}.")
+}
+
+fn duplicate_capacity_reason(existing_layers: usize, copied_layers: usize) -> Option<String> {
+    (existing_layers.saturating_add(copied_layers) > MAX_LAYERS)
+        .then(|| "Document layer limit reached; remove layers before duplicating.".into())
+}
+
+fn layer_merge_down_reason(
+    state: &EngineState,
+    comic_owned_ids: &HashSet<LayerId>,
+    source: &Layer,
+) -> Option<String> {
+    if layer_is_comic_owned(state, comic_owned_ids, source.id) {
+        return Some("Comic-owned layers must be merged in Comics.".into());
+    }
+    if source.kind != LayerKind::Raster {
+        return Some("Merge is available only between raster layers.".into());
+    }
+    let mut siblings = state
+        .layers
+        .values()
+        .filter(|candidate| candidate.layer.parent == source.parent)
+        .map(|candidate| (candidate.layer.order, candidate.layer.id))
+        .collect::<Vec<_>>();
+    siblings.sort_unstable();
+    let source_index = siblings.iter().position(|(_, id)| *id == source.id)?;
+    if source_index == 0 {
+        return Some("Choose a layer with a sibling directly below it.".into());
+    }
+    let target_id = siblings[source_index - 1].1;
+    let target = state.layers.get(&target_id)?;
+    if layer_is_comic_owned(state, comic_owned_ids, target_id) {
+        return Some("Comic-owned layers must be merged in Comics.".into());
+    }
+    if let Some(owner) = layer_lock_owner(state, source.id) {
+        return Some(locked_layer_action_reason(state, owner, "merging layers"));
+    }
+    if let Some(owner) = layer_lock_owner(state, target_id) {
+        return Some(locked_layer_action_reason(state, owner, "merging layers"));
+    }
+    if target.layer.kind != LayerKind::Raster {
+        return Some("Merge is available only between raster layers.".into());
+    }
+    if !source.visible || !target.layer.visible {
+        return Some("Show both layers before merging them.".into());
+    }
+    if source.blend_mode != ink_model::LayerBlendMode::Normal
+        || target.layer.blend_mode != ink_model::LayerBlendMode::Normal
+    {
+        return Some("Safe merge currently requires Normal blending on both layers.".into());
+    }
+    if state.layers.values().any(|candidate| {
+        candidate.layer.parent == Some(source.id) || candidate.layer.parent == Some(target_id)
+    }) {
+        return Some("Layer merge requires standalone layers without children.".into());
+    }
+    if source.clipping || target.layer.clipping {
+        return Some("Disable clipping before merging layers.".into());
+    }
+    if state.layers.values().any(|candidate| {
+        candidate.layer.parent == source.parent && candidate.layer.kind == LayerKind::Mask
+    }) || ancestor_has_mask_node(&state.layers, target)
+        || state
+            .layers
+            .get(&source.id)
+            .is_some_and(|layer| ancestor_has_mask_node(&state.layers, layer))
+    {
+        return Some("Remove or apply attached masks before merging layers.".into());
+    }
+    if target.layer.opacity != u16::MAX {
+        return Some("Exact merge requires the lower target at 100% opacity.".into());
+    }
+    None
+}
+
+fn layer_drag_capability(
+    state: &EngineState,
+    comic_owned_ids: &HashSet<LayerId>,
+    layer: &Layer,
+) -> LayerDragCapability {
+    let comic_owned = layer_is_comic_owned(state, comic_owned_ids, layer.id);
+    let locked_by = layer_lock_owner(state, layer.id);
+    let lock_reason = locked_by.map(|owner| {
+        let owner_name = state
+            .layers
+            .get(&owner)
+            .map_or("a locked layer", |item| item.layer.name.as_str());
+        owner_name.to_owned()
+    });
+    let drag_reason = if comic_owned {
+        Some("Comic-owned layers can only be rearranged in Comics.".into())
+    } else if let Some(owner_name) = &lock_reason {
+        Some(format!("Locked by {owner_name}; unlock it before moving."))
+    } else if layer.kind == LayerKind::Mask && layer.mask_owner.is_some() {
+        Some("Move the mask owner to keep its attached mask together.".into())
+    } else {
+        None
+    };
+    let receive_reason = if layer.kind != LayerKind::Group {
+        Some("Only ordinary groups can contain layers.".into())
+    } else if comic_owned {
+        Some("Comic-owned groups can only be rearranged in Comics.".into())
+    } else {
+        lock_reason.map(|owner_name| {
+            format!("Locked by {owner_name}; unlock it before moving layers inside.")
+        })
+    };
+    LayerDragCapability {
+        layer_id: layer.id,
+        can_drag: drag_reason.is_none(),
+        drag_reason,
+        can_receive_layers: receive_reason.is_none(),
+        receive_reason,
+    }
+}
+
+fn layer_action_subtree_ids(state: &EngineState, root: LayerId) -> HashSet<LayerId> {
+    let mut subtree = HashSet::from([root]);
+    let mut pending = vec![root];
+    let mut cursor = 0;
+    while let Some(parent) = pending.get(cursor).copied() {
+        cursor += 1;
+        for child in state.layers.values().filter(|candidate| {
+            candidate.layer.parent == Some(parent) || candidate.layer.mask_owner == Some(parent)
+        }) {
+            if subtree.insert(child.layer.id) {
+                pending.push(child.layer.id);
+            }
+        }
+    }
+    subtree
+}
+
+fn group_layers_reason(
+    state: &EngineState,
+    comic_owned_ids: &HashSet<LayerId>,
+    members: &[LayerId],
+) -> Option<String> {
+    if members.len() < 2 {
+        return Some("Select at least two layers to create a group.".into());
+    }
+    if members.len() > 4_096 {
+        return Some("Group selection exceeds the layer safety limit.".into());
+    }
+    if state.layers.len() >= MAX_LAYERS {
+        return Some("Document layer safety limit reached.".into());
+    }
+    if state.revision == u64::MAX || next_layer_id(&state.layers).is_err() {
+        return Some("No more layer IDs are available for a new group.".into());
+    }
+    if members.iter().copied().collect::<HashSet<_>>().len() != members.len() {
+        return Some("A layer can only appear once in a group selection.".into());
+    }
+
+    let Some(first) = state.layers.get(&members[0]) else {
+        return Some("One or more selected layers no longer exist.".into());
+    };
+    let parent = first.layer.parent;
+    for member in members {
+        let Some(layer) = state.layers.get(member) else {
+            return Some("One or more selected layers no longer exist.".into());
+        };
+        if layer.layer.parent != parent {
+            return Some("Group selected layers from the same parent.".into());
+        }
+        let subtree = layer_action_subtree_ids(state, *member);
+        if layer.layer.kind == LayerKind::PanelGroup
+            || subtree
+                .iter()
+                .any(|id| layer_is_comic_owned(state, comic_owned_ids, *id))
+        {
+            return Some("Comic-owned layers must be grouped through the comic workspace.".into());
+        }
+        if let Some(owner) = subtree.iter().find_map(|id| layer_lock_owner(state, *id)) {
+            return Some(locked_layer_action_reason(state, owner, "grouping layers"));
+        }
+    }
+
+    let mut siblings = state
+        .layers
+        .values()
+        .filter(|candidate| candidate.layer.parent == parent)
+        .map(|candidate| (candidate.layer.order, candidate.layer.id))
+        .collect::<Vec<_>>();
+    siblings.sort_unstable();
+    let selected_positions = members
+        .iter()
+        .map(|member| siblings.iter().position(|(_, id)| id == member))
+        .collect::<Option<Vec<_>>>();
+    let Some(selected_positions) = selected_positions else {
+        return Some("One or more selected layers no longer exist.".into());
+    };
+    let first_selected = *selected_positions.iter().min().unwrap_or(&0);
+    let last_selected = *selected_positions.iter().max().unwrap_or(&0);
+    let selected_members = members.iter().copied().collect::<HashSet<_>>();
+    let attached_masks = state
+        .layers
+        .values()
+        .filter(|candidate| {
+            candidate.layer.kind == LayerKind::Mask
+                && candidate.layer.parent == parent
+                && candidate
+                    .layer
+                    .mask_owner
+                    .is_some_and(|owner| selected_members.contains(&owner))
+        })
+        .map(|candidate| candidate.layer.id)
+        .collect::<HashSet<_>>();
+    let selected_range = &siblings[first_selected..=last_selected];
+    if selected_range.iter().any(|(_, id)| {
+        let layer = &state.layers[id].layer;
+        layer.kind == LayerKind::Mask && !attached_masks.contains(id)
+    }) {
+        return Some("Grouping this range could move a mask away from its owner.".into());
+    }
+    if selected_range
+        .iter()
+        .any(|(_, id)| state.layers[id].layer.clipping)
+    {
+        return Some("Grouping this range could change clipping behavior.".into());
+    }
+    None
+}
+
+fn layer_action_capability(
+    state: &EngineState,
+    comic_owned_ids: &HashSet<LayerId>,
+    layer: &Layer,
+) -> LayerActionCapability {
+    let subtree = layer_action_subtree_ids(state, layer.id);
+    let mut ordered_subtree = subtree.iter().copied().collect::<Vec<_>>();
+    ordered_subtree.sort_unstable();
+    let lock_owner = ordered_subtree
+        .iter()
+        .find_map(|id| layer_lock_owner(state, *id));
+    let lock_reason =
+        lock_owner.map(|owner| locked_layer_action_reason(state, owner, "this action"));
+    let comic_owned = ordered_subtree
+        .iter()
+        .any(|id| layer_is_comic_owned(state, comic_owned_ids, *id));
+
+    let edit_properties_reason = layer_lock_owner(state, layer.id)
+        .map(|owner| locked_layer_action_reason(state, owner, "changing properties"));
+    let duplicate_reason = if comic_owned {
+        Some("Comic-owned structures must be duplicated in Comics.".into())
+    } else {
+        lock_reason
+            .clone()
+            .or_else(|| duplicate_capacity_reason(state.layers.len(), subtree.len()))
+    };
+    let delete_reason = if comic_owned {
+        Some("Comic-owned structures must be removed in Comics.".into())
+    } else if let Some(reason) = &lock_reason {
+        Some(reason.clone())
+    } else if subtree.len() >= state.layers.len() {
+        Some("A document must keep at least one layer.".into())
+    } else {
+        None
+    };
+
+    let ungroup_reason = if layer.kind != LayerKind::Group {
+        Some("Only ordinary groups can be ungrouped here.".into())
+    } else if comic_owned {
+        Some("Comic-owned groups must be ungrouped in Comics.".into())
+    } else if let Some(reason) = &lock_reason {
+        Some(reason.clone())
+    } else if layer.group_mode != ink_model::LayerGroupMode::PassThrough
+        || layer.blend_mode != ink_model::LayerBlendMode::Normal
+        || layer.opacity != u16::MAX
+        || layer.clipping
+        || layer.reference
+    {
+        Some("Ungroup requires a pass-through, Normal, 100% group without clipping or reference state.".into())
+    } else if !state
+        .layers
+        .values()
+        .any(|candidate| candidate.layer.parent == Some(layer.id))
+    {
+        Some("Empty groups have nothing to ungroup.".into())
+    } else {
+        let parent = layer.parent;
+        let affects_relationship = state.layers.values().any(|candidate| {
+            ((subtree.contains(&candidate.layer.id) || candidate.layer.parent == parent)
+                && candidate.layer.id != layer.id)
+                && (candidate.layer.kind == LayerKind::Mask || candidate.layer.clipping)
+        });
+        affects_relationship.then(|| "Ungroup could change mask or clipping relationships.".into())
+    };
+
+    let apply_mask_reason = if layer.kind != LayerKind::Mask {
+        Some("Apply Mask is available only for mask layers.".into())
+    } else if comic_owned {
+        Some("Comic-owned masks must be applied in Comics.".into())
+    } else if let Some(reason) = &lock_reason {
+        Some(reason.clone())
+    } else {
+        match layer.mask_owner.and_then(|owner| state.layers.get(&owner)) {
+            None => Some("Attach this mask to a layer before applying it.".into()),
+            Some(owner) if owner.layer.kind != LayerKind::Raster => {
+                Some("Apply Mask is supported for raster owners only.".into())
+            }
+            Some(owner) => layer_lock_owner(state, owner.layer.id)
+                .map(|locked| locked_layer_action_reason(state, locked, "applying this mask")),
+        }
+    };
+    let merge_down_reason = layer_merge_down_reason(state, comic_owned_ids, layer);
+
+    LayerActionCapability {
+        layer_id: layer.id,
+        can_edit_properties: edit_properties_reason.is_none(),
+        edit_properties_reason,
+        can_duplicate: duplicate_reason.is_none(),
+        duplicate_reason,
+        can_delete: delete_reason.is_none(),
+        delete_reason,
+        can_ungroup: ungroup_reason.is_none(),
+        ungroup_reason,
+        can_apply_mask: apply_mask_reason.is_none(),
+        apply_mask_reason,
+        merge_down_reason,
+    }
+}
 
 /// A document handle with revisioned state and event history.
 #[derive(Debug)]
@@ -1124,10 +1995,72 @@ impl Document {
         Ok(id)
     }
 
+    /// Temporarily isolate one paint layer, its attached mask, or an ordinary
+    /// group for inspection. Passing `None` restores saved visibility. Solo
+    /// state is session-only and does not create history or alter layer flags.
+    pub fn set_layer_solo(&mut self, layer: Option<LayerId>) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        let mut state = lock_recover(&self.state);
+        if state.solo_layer == layer {
+            return Ok(state.revision);
+        }
+        if let Some(layer_id) = layer {
+            let target = state
+                .layers
+                .get(&layer_id)
+                .ok_or(EngineError::InvalidLayer)?;
+            let owner = if target.layer.kind == LayerKind::Mask {
+                target.layer.mask_owner.ok_or_else(|| {
+                    EngineError::InvalidCommand("solo requires an attached mask".into())
+                })?
+            } else {
+                layer_id
+            };
+            let owner = state.layers.get(&owner).ok_or(EngineError::InvalidLayer)?;
+            if !matches!(
+                owner.layer.kind,
+                LayerKind::Raster | LayerKind::VectorInk | LayerKind::Group
+            ) {
+                return Err(EngineError::InvalidCommand(
+                    "solo is supported for paint layers and ordinary groups".into(),
+                ));
+            }
+        }
+        state.solo_layer = layer;
+        let revision = advance_revision(&mut state)?;
+        state.events.push(EngineEvent::LayersChanged { revision });
+        Ok(revision)
+    }
+
     /// Delete one leaf layer as an undoable command. The engine rejects
     /// deletion of the final layer and groups that still contain children.
     pub fn delete_layer(&mut self, layer: LayerId) -> Result<u64, EngineError> {
         self.dispatch(EditorCommand::DeleteLayer { layer })
+    }
+
+    /// Delete selected layer roots and their descendants in one undoable
+    /// command. Descendants of a selected group are normalized away so the
+    /// same subtree is removed only once.
+    pub fn delete_layers(&mut self, layers: Vec<LayerId>) -> Result<u64, EngineError> {
+        self.dispatch(EditorCommand::DeleteLayers { layers })
+    }
+
+    /// Validate selected-layer deletion without changing content, revision,
+    /// or history. The undoable delete command repeats the same plan at commit.
+    pub fn preflight_delete_layers(
+        &self,
+        layers: &[LayerId],
+    ) -> Result<Option<String>, EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        match commands::preflight_delete_layer_roots(&state, layers) {
+            Ok(()) => Ok(None),
+            Err(EngineError::InvalidCommand(reason)) => Ok(Some(reason)),
+            Err(EngineError::InvalidLayer) => {
+                Ok(Some("One or more selected layers no longer exist.".into()))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Duplicate a layer with new stable IDs and insert it above the source.
@@ -1155,8 +2088,38 @@ impl Document {
                 }
                 (kind, mapping)
             } else {
-                let duplicate = next_layer_id(&state.layers)?;
-                (kind, vec![(source, duplicate)])
+                if kind == LayerKind::Mask
+                    && state
+                        .layers
+                        .get(&source)
+                        .is_some_and(|layer| layer.layer.mask_owner.is_some())
+                {
+                    return Err(EngineError::InvalidCommand(
+                        "duplicate the mask owner to keep its attached mask relationship".into(),
+                    ));
+                }
+                let mut next = next_layer_id(&state.layers)?.0;
+                let mut mapping = vec![(source, LayerId::from_u128(next))];
+                next = next.checked_add(1).ok_or_else(|| {
+                    EngineError::InvalidCommand("layer ID space exhausted".into())
+                })?;
+                let mut masks = state
+                    .layers
+                    .values()
+                    .filter(|layer| {
+                        layer.layer.kind == LayerKind::Mask
+                            && layer.layer.mask_owner == Some(source)
+                    })
+                    .map(|layer| (layer.layer.order, layer.layer.id))
+                    .collect::<Vec<_>>();
+                masks.sort_unstable();
+                for (_, mask) in masks {
+                    mapping.push((mask, LayerId::from_u128(next)));
+                    next = next.checked_add(1).ok_or_else(|| {
+                        EngineError::InvalidCommand("layer ID space exhausted".into())
+                    })?;
+                }
+                (kind, mapping)
             }
         };
         if kind == LayerKind::Group {
@@ -1165,9 +2128,81 @@ impl Document {
             Ok(duplicate)
         } else {
             let duplicate = duplicates[0].1;
-            self.dispatch(EditorCommand::DuplicateLayer { source, duplicate })?;
+            if duplicates.len() == 1 {
+                self.dispatch(EditorCommand::DuplicateLayer { source, duplicate })?;
+            } else {
+                self.dispatch(EditorCommand::DuplicateLayerWithMasks {
+                    source,
+                    duplicate,
+                    masks: duplicates.iter().skip(1).copied().collect(),
+                })?;
+            }
             Ok(duplicate)
         }
+    }
+
+    /// Duplicate selected sibling roots and their masks or group descendants
+    /// as one undoable transaction. Descendants of selected groups are folded
+    /// into their selected ancestor, and selecting an attached mask targets
+    /// its owner so the relationship remains stable.
+    pub fn duplicate_layers(
+        &mut self,
+        selected: Vec<LayerId>,
+    ) -> Result<Vec<LayerId>, EngineError> {
+        self.flush_input()?;
+        let (sources, duplicates) = {
+            let state = lock_recover(&self.state);
+            let sources = normalize_duplicate_roots(&state.layers, selected)?;
+            let duplicates = duplicate_source_mapping(&state.layers, &sources)?;
+            (sources, duplicates)
+        };
+        let result = sources
+            .iter()
+            .map(|source| {
+                duplicates
+                    .iter()
+                    .find(|(old, _)| old == source)
+                    .map(|(_, new)| *new)
+                    .ok_or(EngineError::InvalidLayer)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.dispatch(EditorCommand::DuplicateLayers {
+            sources,
+            duplicates,
+        })?;
+        Ok(result)
+    }
+
+    /// Group sibling layers into one pass-through group in a single undoable
+    /// transaction. The layer IDs are stable identities; their input order is
+    /// ignored in favor of the document's existing sibling order.
+    pub fn group_layers(&mut self, members: Vec<LayerId>) -> Result<LayerId, EngineError> {
+        self.flush_input()?;
+        let group = {
+            let state = lock_recover(&self.state);
+            next_layer_id(&state.layers)?
+        };
+        self.dispatch(EditorCommand::GroupLayers { group, members })?;
+        Ok(group)
+    }
+
+    /// Validate a selected sibling group without changing content, revision,
+    /// or history. The group command repeats its checks when committed.
+    pub fn preflight_group_layers(
+        &self,
+        members: &[LayerId],
+    ) -> Result<Option<String>, EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let comic_owned_ids = comic_owned_layer_ids(state.comic_json.as_deref())?;
+        Ok(group_layers_reason(&state, &comic_owned_ids, members))
+    }
+
+    /// Ungroup an ordinary pass-through group when doing so preserves its
+    /// current compositing. The operation is atomic and undoable.
+    pub fn ungroup_layer(&mut self, group: LayerId) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        self.dispatch(EditorCommand::UngroupLayer { group })
     }
 
     /// Materialize the stable layer tree owned by one comic panel. The
@@ -1212,6 +2247,60 @@ impl Document {
     /// command. The explicit IDs are stable across UI reorder operations.
     pub fn merge_layers(&mut self, target: LayerId, source: LayerId) -> Result<u64, EngineError> {
         self.dispatch(EditorCommand::MergeLayers { target, source })
+    }
+
+    /// Validate an exact raster merge without changing document content,
+    /// history, or revision. The merge command repeats this validation when
+    /// committed so a stale preview cannot bypass engine invariants.
+    pub fn preflight_merge_layers(
+        &self,
+        target: LayerId,
+        source: LayerId,
+    ) -> Result<(), EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        prepare_merge_raster_layers(&state, target, source).map(|_| ())
+    }
+
+    /// Merge contiguous selected sibling rasters into the lowest layer in one
+    /// undoable edit, retaining that layer's stable ID and name.
+    pub fn merge_layers_bulk(&mut self, layers: Vec<LayerId>) -> Result<LayerId, EngineError> {
+        self.flush_input()?;
+        if !(2..=4_096).contains(&layers.len())
+            || layers.iter().copied().collect::<HashSet<_>>().len() != layers.len()
+        {
+            return Err(EngineError::InvalidCommand(
+                "bulk merge requires at least two distinct layers".into(),
+            ));
+        }
+        let state = lock_recover(&self.state);
+        let mut ordered = layers;
+        ordered.sort_by_key(|id| {
+            state
+                .layers
+                .get(id)
+                .map_or((u32::MAX, *id), |layer| (layer.layer.order, *id))
+        });
+        let parent = state
+            .layers
+            .get(&ordered[0])
+            .ok_or(EngineError::InvalidLayer)?
+            .layer
+            .parent;
+        if ordered.iter().any(|id| {
+            state
+                .layers
+                .get(id)
+                .is_none_or(|layer| layer.layer.parent != parent)
+        }) {
+            return Err(EngineError::InvalidCommand(
+                "bulk merge requires sibling layers".into(),
+            ));
+        }
+        let target = ordered[0];
+        drop(state);
+        self.dispatch(EditorCommand::MergeLayersBulk { layers: ordered })?;
+        Ok(target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1390,8 +2479,12 @@ impl Document {
                 resources: BTreeMap::new(),
                 resource_cache: ResourceLru::new(),
                 selection: None,
+                solo_layer: None,
+                layer_panel_state: LayerPanelState::default(),
                 brush_drafts: BTreeMap::new(),
                 next_brush_draft: 1,
+                opacity_edit: None,
+                next_opacity_edit: 1,
                 live_dabs: Arc::new(Mutex::new(
                     ink_live_render::LiveDabQueue::new(LIVE_DAB_QUEUE_CAPACITY).map_err(|_| {
                         EngineError::WorkerUnavailable("live dab queue unavailable".into())
@@ -1471,6 +2564,7 @@ impl Document {
             history,
             brushes,
             resources,
+            layer_panel_state,
             comic,
         } = snapshot;
         let history_sidecar_truncated = history.truncated_on_load;
@@ -1502,6 +2596,7 @@ impl Document {
                 EngineError::InvalidCommand(format!("invalid persisted comic structure: {error}"))
             })?;
         }
+        validate_layer_panel_state(&layer_panel_state, &layers)?;
         let layers = stored_to_map(
             StoredState {
                 layers,
@@ -1588,8 +2683,12 @@ impl Document {
                 resources: resource_map,
                 resource_cache: ResourceLru::new(),
                 selection: None,
+                solo_layer: None,
+                layer_panel_state,
                 brush_drafts: BTreeMap::new(),
                 next_brush_draft: 1,
+                opacity_edit: None,
+                next_opacity_edit: 1,
                 live_dabs: Arc::new(Mutex::new(
                     ink_live_render::LiveDabQueue::new(LIVE_DAB_QUEUE_CAPACITY).map_err(|_| {
                         EngineError::WorkerUnavailable("live dab queue unavailable".into())
@@ -1631,7 +2730,39 @@ impl Document {
             return Err(error);
         }
         let mut state = lock_recover(&self.state);
-        dispatch_state(&mut state, command)
+        if state.opacity_edit.is_some() {
+            commands::commit_pending_opacity_edit(&mut state, None)?;
+        }
+        let revision = dispatch_state(&mut state, command)?;
+        let valid_layers = state.layers.keys().copied().collect::<HashSet<_>>();
+        let valid_groups = state
+            .layers
+            .values()
+            .filter(|layer| layer.layer.kind == LayerKind::Group)
+            .map(|layer| layer.layer.id)
+            .collect::<HashSet<_>>();
+        if state
+            .layer_panel_state
+            .primary_layer
+            .is_some_and(|layer_id| !valid_layers.contains(&layer_id))
+        {
+            state.layer_panel_state.primary_layer = None;
+        }
+        state
+            .layer_panel_state
+            .collapsed_groups
+            .retain(|group| valid_groups.contains(group));
+        if state
+            .solo_layer
+            .is_some_and(|layer_id| !state.layers.contains_key(&layer_id))
+        {
+            // Structural edits can remove a solo target (or turn a group into
+            // ordinary children). Clear the session override with the same
+            // command revision so the next composite and panel projection
+            // both return to the saved visibility state.
+            state.solo_layer = None;
+        }
+        Ok(revision)
     }
 }
 
@@ -1750,18 +2881,31 @@ fn history_kind(command: &EditorCommand) -> &'static str {
         | EditorCommand::CancelStroke { .. } => "stroke",
         EditorCommand::AddLayer { .. }
         | EditorCommand::DeleteLayer { .. }
+        | EditorCommand::DeleteLayers { .. }
         | EditorCommand::DuplicateLayer { .. }
+        | EditorCommand::DuplicateLayerWithMasks { .. }
         | EditorCommand::DuplicateLayerSubtree { .. }
+        | EditorCommand::DuplicateLayers { .. }
+        | EditorCommand::GroupLayers { .. }
+        | EditorCommand::UngroupLayer { .. }
         | EditorCommand::CreatePanelLayerTree { .. } => "layer",
-        EditorCommand::MergeLayers { .. } => "merge",
-        EditorCommand::MoveLayer { .. } => "reorder",
+        EditorCommand::MergeLayers { .. } | EditorCommand::MergeLayersBulk { .. } => "merge",
+        EditorCommand::MoveLayer { .. } | EditorCommand::ReorderLayers { .. } => "reorder",
         EditorCommand::SetLayerName { .. } => "rename",
         EditorCommand::SetLayerAdjustment { .. } => "adjustment",
-        EditorCommand::SetLayerVisibility { .. } => "visibility",
+        EditorCommand::SetLayerVisibility { .. } | EditorCommand::SetLayersVisibility { .. } => {
+            "visibility"
+        }
+        EditorCommand::SetMaskEnabled { .. }
+        | EditorCommand::SetMaskInverted { .. }
+        | EditorCommand::ApplyLayerMask { .. } => "mask",
         EditorCommand::SetLayerOpacity { .. } => "opacity",
         EditorCommand::SetLayerBlendMode { .. } => "blend_mode",
         EditorCommand::SetLayerGroupMode { .. } => "group_mode",
-        EditorCommand::SetLayerAlphaLock { .. }
+        EditorCommand::SetLayersLocked { .. }
+        | EditorCommand::SetLayersLabel { .. }
+        | EditorCommand::SetLayerAlphaLock { .. }
+        | EditorCommand::SetLayerLocked { .. }
         | EditorCommand::SetLayerClipping { .. }
         | EditorCommand::SetLayerReference { .. }
         | EditorCommand::SetLayerLabel { .. } => "layer_property",
@@ -1785,10 +2929,23 @@ fn history_label(command: &EditorCommand) -> String {
         EditorCommand::BeginStroke { .. } => "Brush stroke".into(),
         EditorCommand::AddLayer { kind, .. } => format!("Add {kind:?} layer"),
         EditorCommand::DeleteLayer { .. } => "Delete layer".into(),
+        EditorCommand::DeleteLayers { .. } => "Delete selected layers".into(),
+        EditorCommand::SetLayersVisibility { .. } => "Change selected visibility".into(),
+        EditorCommand::SetMaskEnabled { .. } => "Toggle mask".into(),
+        EditorCommand::SetMaskInverted { .. } => "Invert mask".into(),
+        EditorCommand::ApplyLayerMask { .. } => "Apply mask".into(),
+        EditorCommand::SetLayersLocked { .. } => "Change selected layer locks".into(),
+        EditorCommand::SetLayersLabel { .. } => "Label selected layers".into(),
         EditorCommand::DuplicateLayer { .. } => "Duplicate layer".into(),
+        EditorCommand::DuplicateLayerWithMasks { .. } => "Duplicate layer and masks".into(),
         EditorCommand::DuplicateLayerSubtree { .. } => "Duplicate group".into(),
+        EditorCommand::DuplicateLayers { .. } => "Duplicate selected layers".into(),
+        EditorCommand::GroupLayers { .. } => "Group layers".into(),
+        EditorCommand::UngroupLayer { .. } => "Ungroup layers".into(),
         EditorCommand::MergeLayers { .. } => "Merge layers".into(),
+        EditorCommand::MergeLayersBulk { .. } => "Merge selected layers".into(),
         EditorCommand::MoveLayer { .. } => "Reorder layer".into(),
+        EditorCommand::ReorderLayers { .. } => "Reorder selected layers".into(),
         EditorCommand::CreatePanelLayerTree { .. } => "Create panel layers".into(),
         EditorCommand::SetPanelMaskGeometry { .. } => "Edit panel geometry".into(),
         EditorCommand::SetLayerOpacity { .. } => "Change layer opacity".into(),
@@ -1796,6 +2953,7 @@ fn history_label(command: &EditorCommand) -> String {
         EditorCommand::SetLayerBlendMode { .. } => "Change blend mode".into(),
         EditorCommand::SetLayerGroupMode { .. } => "Change group compositing".into(),
         EditorCommand::SetLayerAlphaLock { .. } => "Change alpha lock".into(),
+        EditorCommand::SetLayerLocked { .. } => "Change layer lock".into(),
         EditorCommand::SetLayerClipping { .. } => "Change clipping".into(),
         EditorCommand::SetLayerReference { .. } => "Change reference layer".into(),
         EditorCommand::SetLayerLabel { .. } => "Change layer label".into(),
@@ -1981,6 +3139,7 @@ fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
         .map(|grain| grain.resource_hash.to_vec());
     BrushSummaryProjection {
         id: preset.id,
+        is_builtin: builtin_library().iter().any(|item| item.id == preset.id),
         name: preset.metadata.name.clone(),
         tags: preset.metadata.tags.clone(),
         diameter_px,
@@ -2187,11 +3346,16 @@ impl Document {
         let mut bytes = layer_state.tiles.read(coordinate).bytes().to_vec();
         if let Some(mask) = mask_sibling(&state.layers, layer_state)
             .or_else(|| ancestor_group_mask(&state.layers, layer_state))
+            && mask.layer.mask_enabled
         {
             let mask_tile = mask.tiles.read(coordinate);
             let mask_bytes = mask_tile.bytes();
             for offset in (0..bytes.len()).step_by(4) {
-                let alpha = u32::from(mask_bytes[offset + 3]);
+                let alpha = mask_coverage(
+                    mask_bytes[offset + 3],
+                    mask.layer.mask_stencil,
+                    mask.layer.mask_inverted,
+                );
                 for channel in 0..4 {
                     bytes[offset + channel] =
                         (u32::from(bytes[offset + channel]) * alpha / 255) as u8;
@@ -2265,8 +3429,12 @@ impl Document {
     /// bounded to one 256x256 tile and never allocates a canvas-sized buffer.
     pub fn read_composite_tile(&self, coordinate: TileCoord) -> Result<Vec<u8>, EngineError> {
         self.flush_input()?;
-        let state = lock_recover(&self.state);
-        self.composite_tile_locked(&state, coordinate)
+        let snapshot = self.capture_composite_tile_snapshot(&[coordinate]);
+        snapshot
+            .read_tiles(&[coordinate])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| EngineError::InvalidCommand("composite tile is unavailable".into()))
     }
 
     /// Capture several composite tiles and the document revision under one
@@ -2291,7 +3459,7 @@ impl Document {
         coordinates: &[TileCoord],
     ) -> CompositeTileReadSnapshot {
         let state = lock_recover(&self.state);
-        let layers = state
+        let mut layers = state
             .layers
             .iter()
             .map(|(id, layer)| {
@@ -2307,6 +3475,9 @@ impl Document {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        if let Some(solo_layer) = state.solo_layer {
+            let _ = apply_solo_visibility(&mut layers, solo_layer);
+        }
         CompositeTileReadSnapshot {
             revision: state.revision,
             width_px: state.width_px,
@@ -2314,20 +3485,6 @@ impl Document {
             background: self.spec.background,
             layers,
         }
-    }
-
-    fn composite_tile_locked(
-        &self,
-        state: &EngineState,
-        coordinate: TileCoord,
-    ) -> Result<Vec<u8>, EngineError> {
-        Self::composite_tile_from_layers(
-            self.spec.width_px,
-            self.spec.height_px,
-            self.spec.background,
-            &state.layers,
-            coordinate,
-        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2413,7 +3570,13 @@ impl Document {
                     if is_paint {
                         mask_sibling(layers, candidate)
                             .or_else(|| ancestor_group_mask(layers, candidate))
-                            .map(|mask| mask.tiles.read(coordinate))
+                            .map(|mask| {
+                                (
+                                    mask.tiles.read(coordinate),
+                                    mask.layer.mask_stencil,
+                                    mask.layer.mask_inverted,
+                                )
+                            })
                     } else {
                         None
                     },
@@ -2584,9 +3747,9 @@ impl Document {
                     }
                     let offset = index * 4;
                     let mut alpha = layer_tile.bytes()[offset + 3];
-                    if let Some(mask) = mask_tile {
-                        alpha = ((u32::from(alpha) * u32::from(mask.bytes()[offset + 3]) + 127)
-                            / 255) as u8;
+                    if let Some((mask, stencil, inverted)) = mask_tile {
+                        let coverage = mask_coverage(mask.bytes()[offset + 3], *stencil, *inverted);
+                        alpha = ((u32::from(alpha) * coverage + 127) / 255) as u8;
                     }
                     let mut effective_alpha = ((u32::from(alpha) * u32::from(*inherited_opacity)
                         + 32_767)
@@ -2706,16 +3869,47 @@ impl Document {
             .layers
             .get(&layer_id)
             .ok_or(EngineError::InvalidLayer)?;
+        let is_mask = layer.layer.kind == LayerKind::Mask;
         let thumb_side = usize::from(size);
         let mut output = vec![0_u8; thumb_side.saturating_mul(thumb_side).saturating_mul(4)];
-        for y in 0..thumb_side {
-            let source_y = (u64::try_from(y).unwrap_or(0) * u64::from(state.height_px)
-                / u64::from(size)) as u32;
-            for x in 0..thumb_side {
-                let source_x = (u64::try_from(x).unwrap_or(0) * u64::from(state.width_px)
-                    / u64::from(size)) as u32;
-                let pixel = layer.tiles.sample_pixel(source_x, source_y);
-                let offset = (y * thumb_side + x) * 4;
+        let source_width = u64::from(state.width_px);
+        let source_height = u64::from(state.height_px);
+        let size_u64 = u64::from(size);
+        let (content_width, content_height) = if source_width >= source_height {
+            (
+                thumb_side,
+                usize::try_from(
+                    ((source_height * size_u64 + source_width / 2) / source_width)
+                        .clamp(1, size_u64),
+                )
+                .unwrap_or(thumb_side),
+            )
+        } else {
+            (
+                usize::try_from(
+                    ((source_width * size_u64 + source_height / 2) / source_height)
+                        .clamp(1, size_u64),
+                )
+                .unwrap_or(thumb_side),
+                thumb_side,
+            )
+        };
+        let offset_x = (thumb_side - content_width) / 2;
+        let offset_y = (thumb_side - content_height) / 2;
+        for y in 0..content_height {
+            for x in 0..content_width {
+                // Sparse marks can be much thinner than one thumbnail pixel.
+                // Sample a bounded grid within each source cell and retain the
+                // strongest covered pixel so artwork does not disappear from
+                // the layer list at common canvas-to-thumbnail ratios.
+                let pixel = sample_layer_thumbnail_pixel(
+                    layer,
+                    is_mask,
+                    (source_width, source_height),
+                    (content_width, content_height),
+                    (x, y),
+                );
+                let offset = ((y + offset_y) * thumb_side + x + offset_x) * 4;
                 output[offset..offset + 4].copy_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
             }
         }
@@ -2820,7 +4014,12 @@ impl Document {
     }
 
     fn snapshot_unflushed(&self) -> ProjectSnapshot {
-        let state = lock_recover(&self.state);
+        let mut state = lock_recover(&self.state);
+        if state.opacity_edit.is_some()
+            && commands::commit_pending_opacity_edit(&mut state, None).is_err()
+        {
+            let _ = commands::cancel_pending_opacity_edit(&mut state, None);
+        }
         let current = map_to_stored_state(&state.layers);
         ProjectSnapshot {
             id: self.id,
@@ -2853,6 +4052,7 @@ impl Document {
                     bytes: resource.rgba8.clone(),
                 })
                 .collect(),
+            layer_panel_state: state.layer_panel_state.clone(),
             comic: state.comic_json.clone(),
         }
     }
@@ -2979,6 +4179,65 @@ impl Document {
             .values()
             .map(|state| state.layer.clone())
             .collect()
+    }
+
+    /// Return drag-source and group-destination rules from the authoritative
+    /// layer tree. Pair-specific cycle checks remain the caller's job.
+    pub fn layer_drag_capabilities(&self) -> Result<Vec<LayerDragCapability>, EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let comic_owned_ids = comic_owned_layer_ids(state.comic_json.as_deref())?;
+        Ok(state
+            .layers
+            .values()
+            .map(|layer| layer_drag_capability(&state, &comic_owned_ids, &layer.layer))
+            .collect())
+    }
+
+    /// Return Rust-validated availability and explanations for common
+    /// single-layer actions in the authoritative layer tree.
+    pub fn layer_action_capabilities(&self) -> Result<Vec<LayerActionCapability>, EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let comic_owned_ids = comic_owned_layer_ids(state.comic_json.as_deref())?;
+        let capabilities = state
+            .layers
+            .values()
+            .map(|layer| layer_action_capability(&state, &comic_owned_ids, &layer.layer))
+            .collect();
+        Ok(capabilities)
+    }
+
+    /// Read the durable layer-panel state for this document/page.
+    #[must_use]
+    pub fn layer_panel_state(&self) -> LayerPanelState {
+        lock_recover(&self.state).layer_panel_state.clone()
+    }
+
+    /// Persist the primary layer target and collapsed ordinary groups without
+    /// adding a content-history entry. Unknown IDs and non-group disclosures
+    /// are rejected as one atomic update.
+    pub fn set_layer_panel_state(
+        &mut self,
+        primary_layer: Option<LayerId>,
+        mut collapsed_groups: Vec<LayerId>,
+    ) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        collapsed_groups.sort_unstable();
+        let candidate = LayerPanelState {
+            primary_layer,
+            collapsed_groups,
+        };
+        let mut state = lock_recover(&self.state);
+        validate_layer_panel_state(&candidate, state.layers.values().map(|layer| &layer.layer))?;
+        if state.layer_panel_state == candidate {
+            return Ok(state.revision);
+        }
+        advance_revision(&mut state)?;
+        let revision = state.revision;
+        state.layer_panel_state = candidate;
+        state.events.push(EngineEvent::DocumentChanged { revision });
+        Ok(revision)
     }
 
     /// First visible raster layer suitable for the Phase 1 canvas, falling

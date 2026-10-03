@@ -1,4 +1,4 @@
-# `.inkproj` storage format (root v2)
+# `.inkproj` storage format (root v6)
 
 The native document is a directory/archive containing `manifest.json`,
 `document.sqlite`, compressed raster tiles under `tiles/<layer>/<x>_<y>.tile.zst`,
@@ -11,7 +11,15 @@ multi-page writer/loader. A studio project stores each page beneath
 `pages/<page_id>/` using the same SQLite, tile, vector, history, and recovery
 schema as a standalone document. The bridge exposes one
 `StudioProjectHandle`, which owns the comic metadata and all page workers.
-Standalone v1/v2 documents remain supported for illustration workflows.
+Standalone v1/v2/v3/v4/v5 documents remain readable; saves write v6. Readers reject
+newer format versions instead of dropping fields they do not understand.
+
+V6 adds bounded `layer_panel_state` metadata to each page manifest. It stores
+the primary layer ID and the IDs of collapsed ordinary groups; this affects
+panel presentation only and is excluded from content history and command
+journals. Older manifests default to no stored primary target or collapsed
+groups. V6 readers validate every ID against the saved layer tree before
+opening, and older readers reject V6 rather than silently discarding it.
 
 `document.sqlite` contains the layer tree, sparse tile index, checkpoint
 revision, and append-only v1 command journal. Journal payloads are versioned
@@ -28,6 +36,68 @@ and the loader reconstructs the ranks from row sequence, preserving documents
 written before the explicit in-memory order field existed. Moving a layer is an
 undoable `MoveLayer` command with a bounded destination index; object IDs are
 never used as visual ordering.
+Command-journal tag `36` groups two or more same-parent layer IDs in one
+undoable pass-through group. Member order is taken from the existing sibling
+stack; the group is inserted at the highest selected sibling position. Older
+readers reject this unknown tag instead of discarding the grouping operation.
+Command-journal tag `37` deletes one or more selected structural roots and
+their descendants atomically in one undoable edit. When a selected group and
+one of its descendants both appear in the request, the descendant is
+normalized away. An edit that would remove every layer or touch comic-owned
+content is rejected before mutation.
+Command-journal tag `38` ungroups one ordinary pass-through group, replacing
+it in its parent stack with its children in their existing order. It is
+rejected unless the group is Normal at 100% opacity and the operation can
+preserve mask/clipping relationships; comic-owned groups remain routed through
+the comic workspace. The operation is undoable as one layer snapshot.
+Command-journal tag `39` duplicates a paint leaf and its attached masks as one
+undoable operation. The payload carries the source owner, duplicate owner, and
+ordered source-mask/duplicate-mask ID pairs; the copies retain their relative
+mask ownership after undo, redo, save, and reopen. Earlier readers reject the
+unknown tag rather than dropping the masks.
+Command-journal tag `40` sets visibility for a non-empty list of distinct
+layer IDs with one history entry. The engine validates the complete list
+before mutation, so missing or repeated IDs cannot partially change the stack.
+Earlier readers reject the unknown tag rather than replaying only part of the
+bulk operation.
+Command-journal tag `41` sets the explicit full-lock flag on one layer. The
+flag is separate from alpha lock, survives undo/redo and save/reopen, and a
+locked ordinary group protects its descendants. Visibility and unlocking
+remain available. Earlier readers reject this unknown command.
+Command-journal tag `42` sets full-lock state for a non-empty list of distinct
+layer IDs in one history entry. The engine validates every target before
+changing any lock; a locked ancestor prevents bulk changes to descendants.
+Earlier readers reject the unknown command rather than applying a partial
+selection.
+Command-journal tag `43` reorders a non-empty set of distinct structural roots
+within one sibling stack as a stable block. Attached masks move with their
+owners, selected descendants normalize under selected ancestors, and undo
+restores the prior stack order in one history step. Earlier readers reject
+the unknown command.
+Command-journal tag `44` sets or clears a color label on a non-empty list of
+distinct layer IDs in one history entry. The engine validates every target
+before mutation, and undo restores all labels together. Earlier readers reject
+the unknown command rather than applying only part of the selection.
+Command-journal tag `45` duplicates at least two sibling structural roots and
+their ordinary group descendants or owner-attached masks in one history entry.
+The command stores deterministic source-to-new-ID mappings, requires each new
+ID to be the next available ID, and rejects locked, comic-owned, malformed, or
+cross-stack selections before mutation. Selected descendants normalize under
+their selected ancestor, attached masks remain linked to the copied owner, and
+undo removes the complete duplicate block atomically. Earlier readers reject
+the unknown command rather than duplicating only part of the selection.
+Command-journal tag `46` merges at least two contiguous visible standalone
+raster siblings into the lowest selected layer in one undoable transaction.
+All selected layers must use Normal blending; clipping, masks, invalid tile
+payloads, and a lowest target below 100% opacity reject the operation before
+mutation. Source opacity is baked into the retained target. Earlier readers
+reject the unknown command rather than applying a partial merge.
+Command-journal tags `47` and `48` enable/disable and invert an attached mask.
+Both operations alter only mask properties, leave sparse pixels untouched,
+and create one undo entry. The engine rejects non-mask or locked targets.
+Command-journal tag `49` applies an attached mask to its raster owner, baking
+effective coverage into the owner's pixels and removing the mask in one undoable
+transaction. Unsupported owners and locked targets are rejected without change.
 
 Layer kind value `6` is a nondestructive `Adjustment` node. The nullable SQLite
 `layers.adjustment` column stores a bounded JSON `LayerAdjustment` payload;
@@ -49,12 +119,27 @@ exports use the same authoritative composite tiles. Spatially editable filter
 masks, additional filter kinds, and isolated/pass-through group blend modes
 remain unsupported.
 
-Mask layers are raster alpha stencils. A visible mask sibling after a raster
-or vector layer in the same parent group multiplies that layer's premultiplied
-RGBA during tile reads and export; the mask itself is not painted as a visible
-color layer. Group visibility and opacity are presentation ancestors and are
-multiplied through the parent chain. Parent cycles and dangling references are
-rejected before any content is opened.
+Mask layers are raster alpha stencils. V3 persists a nullable `mask_owner`
+layer ID. A mask attached to raster/vector content must share the owner's
+parent; a group mask is a child of its owner group. Rendering and export
+resolve masks by stable owner ID, so sibling reorder does not retarget them.
+On v1/v2 load, legacy adjacency is converted in memory to this relation.
+Opening a legacy source never rewrites it. V5 adds `mask_enabled`,
+`mask_stencil`, and `mask_inverted`. Ordinary masks store sparse hidden
+coverage: zero alpha reveals the owner, so a new empty mask starts reveal-all
+without allocating canvas-sized tiles. `mask_stencil` preserves direct reveal
+coverage for comic geometry masks and migrated v1-v4 masks. `mask_inverted`
+switches effective coverage without rewriting pixels, and disabled masks are
+bypassed by preview and export. The mask itself is not painted as a visible
+color layer. Group visibility and opacity remain presentation ancestors and
+are multiplied through the parent chain. Parent
+cycles, dangling references, invalid mask owners, and mismatched mask/owner
+hierarchies are rejected before content is opened.
+
+V4 adds `layers.locked`, a validated zero-or-one integer that defaults to
+zero when reading v1/v2/v3 packages. V5 retains this field and adds mask
+semantics. V6 adds layer-panel presentation metadata. Older readers reject
+v4/v5/v6 rather than dropping newer layer state.
 
 Command tag `22` is `AddVectorStroke`: `layer_id:u128`, `stroke_id:u128`,
 `closed:u8`, `point_count:u16`, then bounded little-endian point tuples
@@ -85,11 +170,18 @@ supports reference-layer sampling, selection intersection, Paint Inside
 are rejected by the journal decoder.
 
 Command tag `29` is `MergeLayers`: `target_layer_id:u128` followed by
-`source_layer_id:u128`. The engine accepts only standalone raster layers in
-the same parent group, composites the source with its visibility, opacity, and
-blend mode, then removes the source. The command is atomic, undoable, and
-replayable; vector, grouped, clipped, mismatched-parent, and child-bearing
-layers are rejected without changing the document.
+`source_layer_id:u128`. The engine accepts only adjacent, visible standalone
+raster siblings in the same parent group, with the target directly below the
+source, Normal blending, no clipping, and no sibling or ancestor mask. The
+lower target must be at 100% opacity, and every source mark must sit over a
+fully opaque target pixel. The engine preflights this coverage before mutation,
+then bakes the source opacity into the target pixels and removes the source in
+one atomic, undoable, replayable operation. These conservative conditions
+preserve composited pixels exactly for any backdrop. Vector, grouped, clipped,
+masked, non-adjacent, mismatched-parent, child-bearing, and unsafe-coverage
+layers are rejected without changing the document. Safe merge remains
+unavailable for masks and dependent effects; command tag 29 retains its
+existing wire layout.
 
 Command tag `30` is `CreatePanelLayerTree`: eight little-endian `u128` values
 (`panel_id`, `panel_group_id`, `mask_id`, `sketch_id`, `ink_id`, `color_id`,
@@ -171,6 +263,19 @@ termination after the old destination is moved leaves the `.bak` sibling
 recoverable into a new project; a termination after publication leaves the new
 validated project readable. Temporary siblings are never treated as the user’s
 source document.
+
+## Reader memory budget
+
+Standalone `.inkproj` readers and the pages of a studio project use one
+aggregate budget. Accounted project data is capped at 768 MiB across decoded
+tiles, parsed sidecars, journal payloads, resources, and comic metadata. Zstd
+sidecars are decoded only up to the remaining budget, reserving space for the
+encoded member, parsed structures, and temporary buffer growth; the projected
+load working set is capped at 900 MiB. Studio pages share one budget with their
+outer comic structure, rather than receiving an independent allowance per page.
+The writer applies the same accounted-data cap so it does not publish a project
+that the reader would reject. These are conservative estimates, not substitutes
+for minimum-device peak-memory measurements.
 
 ## Client autosave contract
 

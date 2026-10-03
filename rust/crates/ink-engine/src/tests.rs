@@ -4,6 +4,222 @@ use ink_live_render::{GpuLiveSurface, LiveSurfaceConfig};
 use ink_model::{ColorSpace, DocumentSpec, Rgba8};
 
 #[test]
+fn brush_projection_marks_factory_origin_without_relying_on_numeric_cutoffs() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document =
+        Document::new(DocumentId::from_u128(0x0042_5255_5348), spec).expect("valid document");
+    let custom_id = document
+        .duplicate_brush(BrushId::from_u128(1))
+        .expect("duplicate factory brush");
+    let summaries = document.brush_summaries();
+    assert!(
+        summaries
+            .iter()
+            .find(|brush| brush.id.0 == 1)
+            .expect("factory projection")
+            .is_builtin
+    );
+    assert!(
+        !summaries
+            .iter()
+            .find(|brush| brush.id == custom_id)
+            .expect("custom projection")
+            .is_builtin
+    );
+}
+
+#[test]
+fn brush_editor_preview_uses_rust_renderer_without_document_mutation() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let document =
+        Document::new(DocumentId::from_u128(0x0050_5245_5649_4557), spec).expect("document");
+    let brush_id = document.brush_summaries()[0].id;
+    let revision = document.revision();
+    let points = [
+        BrushPreviewPoint {
+            x: 8.0,
+            y: 24.0,
+            pressure: 0.2,
+        },
+        BrushPreviewPoint {
+            x: 28.0,
+            y: 32.0,
+            pressure: 0.6,
+        },
+        BrushPreviewPoint {
+            x: 54.0,
+            y: 24.0,
+            pressure: 1.0,
+        },
+    ];
+
+    let preview = document
+        .render_brush_preview_rgba8(brush_id, 64, 64, &points)
+        .expect("rendered preview");
+
+    let samples = points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| PointerSample {
+            pointer_id: 1,
+            flags: flags::ACTUAL,
+            device_kind: DeviceKind::Stylus,
+            phase: if index == 0 {
+                Phase::Down
+            } else if index + 1 == points.len() {
+                Phase::Up
+            } else {
+                Phase::Move
+            },
+            canvas_x: point.x,
+            canvas_y: point.y,
+            pressure: (point.pressure * f32::from(u16::MAX)).round() as u16,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            azimuth: 0.0,
+            twist: 0.0,
+            timestamp_ns: index as u64 * 1_000_000,
+            sequence: index as u32,
+        })
+        .collect::<Vec<_>>();
+    let preset = builtin_library()
+        .into_iter()
+        .find(|preset| preset.id == brush_id)
+        .expect("built-in brush");
+    let dabs = preset
+        .compile()
+        .expect("compile brush")
+        .render(&samples)
+        .expect("render dabs");
+    let mut committed_raster = TileStore::default();
+    render_brush_dabs(
+        &mut committed_raster,
+        &dabs,
+        &BTreeMap::new(),
+        None,
+        false,
+        false,
+        false,
+        64,
+        64,
+    );
+    let committed_pixels = (0..64)
+        .flat_map(|y| (0..64).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let pixel = committed_raster.sample_pixel(x, y);
+            [pixel.r, pixel.g, pixel.b, pixel.a]
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(preview.len(), 64 * 64 * 4);
+    assert_eq!(preview, committed_pixels);
+    assert!(preview.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
+    assert!(
+        preview
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| (1..u8::MAX).contains(&pixel[3]))
+    );
+    assert_eq!(document.revision(), revision);
+}
+
+#[test]
+fn brush_editor_draft_preview_changes_and_cancel_restores_original() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document =
+        Document::new(DocumentId::from_u128(0x0044_5241_4654), spec).expect("document");
+    let brush_id = document.brush_summaries()[0].id;
+    let revision = document.revision();
+    let points = [
+        BrushPreviewPoint {
+            x: 8.0,
+            y: 24.0,
+            pressure: 0.2,
+        },
+        BrushPreviewPoint {
+            x: 28.0,
+            y: 32.0,
+            pressure: 0.6,
+        },
+        BrushPreviewPoint {
+            x: 54.0,
+            y: 24.0,
+            pressure: 1.0,
+        },
+    ];
+    let preview = document
+        .render_brush_preview_rgba8(brush_id, 64, 64, &points)
+        .expect("render preview");
+    let draft_id = document.begin_brush_draft(brush_id).expect("begin draft");
+    document
+        .update_brush_draft(
+            draft_id,
+            28.0,
+            0.65,
+            0.2,
+            0.0,
+            1.0,
+            0.0,
+            0.5,
+            0.9,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            &[0.0, 0.0, 1.0, 1.0],
+        )
+        .expect("update draft");
+    let edited_preview = document
+        .render_brush_preview_rgba8(brush_id, 64, 64, &points)
+        .expect("render updated draft");
+    assert_ne!(edited_preview, preview);
+    document
+        .cancel_brush_draft(draft_id)
+        .expect("discard draft");
+    assert_eq!(
+        document
+            .render_brush_preview_rgba8(brush_id, 64, 64, &points)
+            .expect("render restored preview"),
+        preview,
+    );
+    assert_eq!(document.revision(), revision);
+    assert!(
+        document
+            .render_brush_preview_rgba8(
+                brush_id,
+                64,
+                64,
+                &[BrushPreviewPoint {
+                    x: f32::NAN,
+                    y: 1.0,
+                    pressure: 0.5,
+                }],
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn available_tile_event_poll_skips_a_busy_document_state_lock() {
     let spec = DocumentSpec {
         width_px: 64,
@@ -625,6 +841,12 @@ fn group_adjustment_only_affects_accumulated_group_content() {
         .expect("group mask");
     {
         let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&group_mask)
+            .expect("group mask")
+            .layer
+            .mask_stencil = true;
         let base_tiles = &mut state.layers.get_mut(&base).expect("base").tiles;
         for (x, y) in [(10, 10), (20, 20), (30, 30)] {
             base_tiles.set_pixel(
@@ -1143,6 +1365,636 @@ fn composite_applies_group_visibility_and_opacity_to_children() {
         .expect("hidden group composite");
     assert_eq!(&hidden[painted_offset..painted_offset + 4], &[0, 0, 0, 0]);
     assert_ne!(base, child);
+}
+
+#[test]
+fn bulk_visibility_is_atomic_and_undoable_as_one_operation() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_903), spec).expect("valid doc");
+    let base = doc.layers()[0].id;
+    let group = doc.add_layer(LayerKind::Group).expect("group");
+    doc.dispatch(EditorCommand::SetLayersVisibility {
+        layers: vec![base, group],
+        visible: false,
+    })
+    .expect("hide selection");
+    let hidden = doc.layers();
+    assert!(
+        !hidden
+            .iter()
+            .find(|layer| layer.id == base)
+            .expect("base layer")
+            .visible
+    );
+    assert!(
+        !hidden
+            .iter()
+            .find(|layer| layer.id == group)
+            .expect("group layer")
+            .visible
+    );
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo bulk visibility");
+    let restored = doc.layers();
+    assert!(
+        restored
+            .iter()
+            .find(|layer| layer.id == base)
+            .expect("base layer")
+            .visible
+    );
+    assert!(
+        restored
+            .iter()
+            .find(|layer| layer.id == group)
+            .expect("group layer")
+            .visible
+    );
+    doc.dispatch(EditorCommand::Redo)
+        .expect("redo bulk visibility");
+    let hidden_again = doc.layers();
+    assert!(
+        !hidden_again
+            .iter()
+            .find(|layer| layer.id == base)
+            .expect("base layer")
+            .visible
+    );
+    assert!(
+        !hidden_again
+            .iter()
+            .find(|layer| layer.id == group)
+            .expect("group layer")
+            .visible
+    );
+}
+
+#[test]
+fn solo_visibility_is_temporary_and_does_not_change_history_or_saved_flags() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_904), spec).expect("valid doc");
+    let base = doc.layers()[0].id;
+    let upper = doc.add_layer(LayerKind::Raster).expect("upper paint layer");
+    {
+        let mut state = lock_recover(&doc.state);
+        state.layers.get_mut(&base).expect("base").tiles.set_pixel(
+            8,
+            8,
+            Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+        state
+            .layers
+            .get_mut(&upper)
+            .expect("upper")
+            .tiles
+            .set_pixel(
+                24,
+                24,
+                Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 255,
+                    a: 255,
+                },
+            );
+    }
+    let before = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("baseline composite");
+    let history_before = doc.history_snapshot(32).expect("history before solo");
+    let saved_visibility = doc
+        .layers()
+        .into_iter()
+        .map(|layer| (layer.id, layer.visible))
+        .collect::<Vec<_>>();
+
+    doc.set_layer_solo(Some(upper)).expect("enter solo");
+    let isolated = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("solo composite");
+    assert_eq!(isolated[((8 * 256 + 8) * 4 + 3) as usize], 0);
+    assert_eq!(isolated[((24 * 256 + 24) * 4 + 3) as usize], 255);
+    assert_eq!(
+        doc.layers()
+            .into_iter()
+            .map(|layer| (layer.id, layer.visible))
+            .collect::<Vec<_>>(),
+        saved_visibility,
+        "Solo must not rewrite saved layer visibility"
+    );
+
+    doc.set_layer_solo(None).expect("exit solo");
+    let restored = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("restored composite");
+    assert_eq!(restored, before);
+    let history_after = doc.history_snapshot(32).expect("history after solo");
+    assert_eq!(history_after.cursor, history_before.cursor);
+    assert_eq!(history_after.entries, history_before.entries);
+}
+
+#[test]
+fn deleting_the_solo_target_clears_the_temporary_visibility_override() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_905), spec).expect("valid doc");
+    let solo_target = doc.add_layer(LayerKind::Raster).expect("solo target");
+    let before = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("baseline composite");
+    doc.set_layer_solo(Some(solo_target))
+        .expect("solo target layer");
+    doc.delete_layer(solo_target).expect("delete solo target");
+    assert_eq!(lock_recover(&doc.state).solo_layer, None);
+
+    let composite = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("composite after deleting solo target");
+    assert_eq!(composite, before);
+}
+
+#[test]
+fn bulk_lock_is_atomic_and_undoable_as_one_operation() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_904), spec).expect("valid doc");
+    let base = doc.layers()[0].id;
+    let extra = doc.add_layer(LayerKind::Raster).expect("extra layer");
+    doc.dispatch(EditorCommand::SetLayersLocked {
+        layers: vec![base, extra],
+        locked: true,
+    })
+    .expect("lock selection");
+    assert!(
+        doc.layers()
+            .iter()
+            .filter(|layer| [base, extra].contains(&layer.id))
+            .all(|layer| layer.locked)
+    );
+    let revision = doc.revision();
+    assert!(
+        doc.dispatch(EditorCommand::SetLayersLocked {
+            layers: vec![base, ink_model::LayerId::from_u128(0xDEAD)],
+            locked: false,
+        })
+        .is_err()
+    );
+    assert_eq!(
+        doc.revision(),
+        revision,
+        "failed bulk lock must not partially commit"
+    );
+    doc.dispatch(EditorCommand::Undo).expect("undo bulk lock");
+    assert!(
+        doc.layers()
+            .iter()
+            .filter(|layer| [base, extra].contains(&layer.id))
+            .all(|layer| !layer.locked)
+    );
+}
+
+#[test]
+fn bulk_duplicate_preserves_sibling_order_and_commits_one_undo_step() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_906), spec).expect("valid doc");
+    let bottom = doc.layers()[0].id;
+    let middle = doc.add_layer(LayerKind::Raster).expect("middle layer");
+    let top = doc.add_layer(LayerKind::Raster).expect("top layer");
+    let mut before_layers = doc.layers();
+    before_layers.sort_by_key(|layer| layer.order);
+    let before = before_layers
+        .into_iter()
+        .map(|layer| layer.id)
+        .collect::<Vec<_>>();
+    let duplicates = doc
+        .duplicate_layers(vec![bottom, top])
+        .expect("duplicate two sibling roots");
+    assert_eq!(duplicates.len(), 2);
+    let mut after_layers = doc.layers();
+    after_layers.sort_by_key(|layer| layer.order);
+    let after = after_layers
+        .into_iter()
+        .map(|layer| layer.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after,
+        vec![bottom, duplicates[0], middle, top, duplicates[1]]
+    );
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo bulk duplicate");
+    assert_eq!(
+        {
+            let mut layers = doc.layers();
+            layers.sort_by_key(|layer| layer.order);
+            layers.into_iter().map(|layer| layer.id).collect::<Vec<_>>()
+        },
+        before
+    );
+    doc.dispatch(EditorCommand::Redo)
+        .expect("redo bulk duplicate");
+    assert_eq!(
+        {
+            let mut layers = doc.layers();
+            layers.sort_by_key(|layer| layer.order);
+            layers.into_iter().map(|layer| layer.id).collect::<Vec<_>>()
+        },
+        after
+    );
+}
+
+#[test]
+fn bulk_duplicate_remaps_attached_mask_ownership() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_907), spec).expect("valid doc");
+    let first = doc.layers()[0].id;
+    let second = doc.add_layer(LayerKind::Raster).expect("second layer");
+    let mask = doc.add_layer(LayerKind::Mask).expect("mask layer");
+    lock_recover(&doc.state)
+        .layers
+        .get_mut(&mask)
+        .expect("mask state")
+        .layer
+        .mask_owner = Some(first);
+
+    let copies = doc
+        .duplicate_layers(vec![first, second])
+        .expect("duplicate owner and sibling");
+    let layers = doc.layers();
+    let copied_mask = layers
+        .iter()
+        .find(|layer| layer.kind == LayerKind::Mask && layer.mask_owner == Some(copies[0]))
+        .expect("mask points to copied owner");
+    assert_ne!(copied_mask.id, mask);
+    assert!(layers.iter().any(|layer| layer.mask_owner == Some(first)));
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo owner and mask duplication");
+    let restored = doc.layers();
+    assert!(
+        copies
+            .iter()
+            .all(|id| restored.iter().all(|layer| layer.id != *id))
+    );
+    assert!(
+        restored
+            .iter()
+            .any(|layer| layer.id == mask && layer.mask_owner == Some(first))
+    );
+}
+
+#[test]
+fn bulk_merge_is_atomic_and_one_undoable_operation() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_908), spec).expect("valid doc");
+    let bottom = doc.layers()[0].id;
+    let middle = doc.add_layer(LayerKind::Raster).expect("middle layer");
+    let top = doc.add_layer(LayerKind::Raster).expect("top layer");
+    let target = doc
+        .merge_layers_bulk(vec![top, bottom, middle])
+        .expect("merge contiguous selected rasters");
+    assert_eq!(target, bottom);
+    assert_eq!(doc.layers().len(), 1);
+    doc.dispatch(EditorCommand::Undo).expect("undo bulk merge");
+    assert_eq!(doc.layers().len(), 3);
+
+    let revision = doc.revision();
+    assert!(doc.merge_layers_bulk(vec![bottom, top]).is_err());
+    assert_eq!(doc.revision(), revision);
+    assert_eq!(doc.layers().len(), 3);
+}
+
+#[test]
+fn selected_sibling_reorder_preserves_block_order_and_undoes_atomically() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_905), spec).expect("valid doc");
+    let bottom = doc.layers()[0].id;
+    let middle = doc.add_layer(LayerKind::Raster).expect("middle layer");
+    let top = doc.add_layer(LayerKind::Raster).expect("top layer");
+
+    doc.dispatch(EditorCommand::ReorderLayers {
+        layers: vec![bottom, top],
+        index: 1,
+    })
+    .expect("move selected siblings together");
+    let mut reordered = doc.layers();
+    reordered.sort_by_key(|layer| layer.order);
+    assert_eq!(
+        reordered.iter().map(|layer| layer.id).collect::<Vec<_>>(),
+        [middle, bottom, top]
+    );
+    let revision = doc.revision();
+    assert!(
+        doc.dispatch(EditorCommand::ReorderLayers {
+            layers: vec![bottom, ink_model::LayerId::from_u128(0xBAD)],
+            index: 0,
+        })
+        .is_err()
+    );
+    assert_eq!(
+        doc.revision(),
+        revision,
+        "invalid bulk reorder must not commit"
+    );
+
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo selected reorder");
+    let mut restored = doc.layers();
+    restored.sort_by_key(|layer| layer.order);
+    assert_eq!(
+        restored.iter().map(|layer| layer.id).collect::<Vec<_>>(),
+        [bottom, middle, top]
+    );
+}
+
+#[test]
+fn selected_layer_labels_change_atomically_and_undo_together() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_906), spec).expect("valid doc");
+    let first = doc.layers()[0].id;
+    let second = doc.add_layer(LayerKind::Raster).expect("second layer");
+    let label = Rgba8 {
+        r: 220,
+        g: 40,
+        b: 50,
+        a: 255,
+    };
+    doc.dispatch(EditorCommand::SetLayersLabel {
+        layers: vec![first, second],
+        label: Some(label),
+    })
+    .expect("label both layers");
+    assert!(
+        doc.layers()
+            .iter()
+            .filter(|layer| [first, second].contains(&layer.id))
+            .all(|layer| layer.label == Some(label))
+    );
+
+    let revision = doc.revision();
+    assert!(
+        doc.dispatch(EditorCommand::SetLayersLabel {
+            layers: vec![first, ink_model::LayerId::from_u128(0xBAD)],
+            label: None,
+        })
+        .is_err()
+    );
+    assert_eq!(
+        doc.revision(),
+        revision,
+        "invalid bulk label must not partially commit"
+    );
+
+    doc.dispatch(EditorCommand::Undo).expect("undo bulk label");
+    assert!(
+        doc.layers()
+            .iter()
+            .filter(|layer| [first, second].contains(&layer.id))
+            .all(|layer| layer.label.is_none())
+    );
+}
+
+#[test]
+fn full_group_lock_blocks_descendant_edits_but_allows_visibility_and_unlock() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_904), spec).expect("valid doc");
+    let group = doc.add_layer(LayerKind::Group).expect("group");
+    let child = doc
+        .add_layer_with_parent(LayerKind::Raster, Some(group))
+        .expect("child");
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: true,
+    })
+    .expect("lock group");
+    let error = doc
+        .dispatch(EditorCommand::SetLayerOpacity {
+            layer: child,
+            opacity: 12,
+        })
+        .expect_err("locked descendant cannot change properties");
+    assert!(error.to_string().contains(&group.to_string()));
+    doc.dispatch(EditorCommand::SetLayerVisibility {
+        layer: child,
+        visible: false,
+    })
+    .expect("visibility remains available on locked layer");
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: false,
+    })
+    .expect("unlock group");
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: child,
+        opacity: 12,
+    })
+    .expect("unlocked descendant can be edited");
+}
+
+#[test]
+fn layer_drag_capabilities_explain_inherited_locks_and_group_targets() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ink_model::ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(90_306), spec).expect("valid doc");
+    let group = doc.add_layer(LayerKind::Group).expect("group");
+    let child = doc
+        .add_layer_with_parent(LayerKind::Raster, Some(group))
+        .expect("child");
+
+    let initial = doc.layer_drag_capabilities().expect("capabilities");
+    let group_capability = initial
+        .iter()
+        .find(|capability| capability.layer_id == group)
+        .expect("group capability");
+    assert!(group_capability.can_drag);
+    assert!(group_capability.can_receive_layers);
+    let raster = initial
+        .iter()
+        .find(|capability| capability.layer_id == child)
+        .expect("child capability");
+    assert!(!raster.can_receive_layers);
+    assert_eq!(
+        raster.receive_reason.as_deref(),
+        Some("Only ordinary groups can contain layers.")
+    );
+
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: true,
+    })
+    .expect("lock group");
+    let locked = doc.layer_drag_capabilities().expect("locked capabilities");
+    let child_capability = locked
+        .iter()
+        .find(|capability| capability.layer_id == child)
+        .expect("locked child capability");
+    assert!(!child_capability.can_drag);
+    assert_eq!(
+        child_capability.drag_reason.as_deref(),
+        Some("Locked by Layer 2; unlock it before moving.")
+    );
+    let group_capability = locked
+        .iter()
+        .find(|capability| capability.layer_id == group)
+        .expect("locked group capability");
+    assert!(!group_capability.can_receive_layers);
+    assert!(
+        group_capability
+            .receive_reason
+            .as_deref()
+            .is_some_and(|reason| { reason.contains("unlock it before moving layers inside") })
+    );
+}
+
+#[test]
+fn layer_action_capabilities_explain_lock_delete_ungroup_and_mask_rules() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ink_model::ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(90_307), spec).expect("valid doc");
+    let base = doc.layers()[0].id;
+    let other = doc.add_layer(LayerKind::Raster).expect("second layer");
+    let group = doc.group_layers(vec![base, other]).expect("group siblings");
+
+    let actions = doc
+        .layer_action_capabilities()
+        .expect("action capabilities");
+    let group_actions = actions
+        .iter()
+        .find(|capability| capability.layer_id == group)
+        .expect("group actions");
+    assert!(group_actions.can_ungroup);
+    assert!(group_actions.can_duplicate);
+    assert_eq!(
+        group_actions.merge_down_reason.as_deref(),
+        Some("Merge is available only between raster layers.")
+    );
+    assert!(!group_actions.can_delete);
+    assert_eq!(
+        group_actions.delete_reason.as_deref(),
+        Some("A document must keep at least one layer.")
+    );
+
+    let mask = doc.add_layer(LayerKind::Mask).expect("unattached mask");
+    let mask_actions = doc
+        .layer_action_capabilities()
+        .expect("mask action capabilities")
+        .into_iter()
+        .find(|capability| capability.layer_id == mask)
+        .expect("mask actions");
+    assert!(!mask_actions.can_apply_mask);
+    assert_eq!(
+        mask_actions.apply_mask_reason.as_deref(),
+        Some("Attach this mask to a layer before applying it.")
+    );
+
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: group,
+        opacity: 32_768,
+    })
+    .expect("set group opacity");
+    let modified = doc.layer_action_capabilities().expect("updated actions");
+    let group_actions = modified
+        .iter()
+        .find(|capability| capability.layer_id == group)
+        .expect("updated group actions");
+    assert!(!group_actions.can_ungroup);
+    assert!(
+        group_actions
+            .ungroup_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("pass-through, Normal, 100%"))
+    );
+
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: true,
+    })
+    .expect("lock group");
+    let locked = doc.layer_action_capabilities().expect("locked actions");
+    let group_actions = locked
+        .iter()
+        .find(|capability| capability.layer_id == group)
+        .expect("locked group actions");
+    assert!(!group_actions.can_edit_properties);
+    assert!(!group_actions.can_duplicate);
+    assert!(!group_actions.can_delete);
+    assert!(
+        group_actions
+            .edit_properties_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unlock it before changing properties"))
+    );
 }
 
 #[test]
@@ -1975,6 +2827,7 @@ fn duplicate_leaf_layer_copies_pixels_preserves_order_and_survives_undo_reopen()
         .expect("source layer")
         .tiles
         .set_pixel(12, 18, color);
+    let source_mask = doc.add_layer(LayerKind::Mask).expect("attached mask");
 
     let duplicate = doc.duplicate_layer(source).expect("duplicate");
     let layers = doc.layers();
@@ -1988,6 +2841,16 @@ fn duplicate_leaf_layer_copies_pixels_preserves_order_and_survives_undo_reopen()
         .expect("duplicate layer");
     assert_eq!(duplicate_view.name, "Ink Copy");
     assert_eq!(duplicate_view.parent, source_view.parent);
+    let duplicate_mask = layers
+        .iter()
+        .find(|layer| layer.mask_owner == Some(duplicate))
+        .expect("copied mask attached to duplicate")
+        .id;
+    assert!(
+        layers
+            .iter()
+            .any(|layer| { layer.id == source_mask && layer.mask_owner == Some(source) })
+    );
     assert_eq!(
         duplicate_view.order,
         source_view.order + 1,
@@ -2001,9 +2864,22 @@ fn duplicate_leaf_layer_copies_pixels_preserves_order_and_survives_undo_reopen()
     );
 
     doc.dispatch(EditorCommand::Undo).expect("undo duplicate");
-    assert!(!doc.layers().iter().any(|layer| layer.id == duplicate));
+    assert!(
+        !doc.layers()
+            .iter()
+            .any(|layer| layer.id == duplicate || layer.id == duplicate_mask)
+    );
     doc.dispatch(EditorCommand::Redo).expect("redo duplicate");
-    assert!(doc.layers().iter().any(|layer| layer.id == duplicate));
+    assert!(
+        doc.layers()
+            .iter()
+            .any(|layer| layer.id == duplicate && layer.kind == LayerKind::Raster)
+    );
+    assert!(
+        doc.layers()
+            .iter()
+            .any(|layer| layer.id == duplicate_mask && layer.mask_owner == Some(duplicate))
+    );
     doc.replay_journal().expect("replay duplicate command");
 
     let path = std::env::temp_dir().join(format!(
@@ -2015,6 +2891,12 @@ fn duplicate_leaf_layer_copies_pixels_preserves_order_and_survives_undo_reopen()
     doc.close();
     let mut reopened = Document::open(&path).expect("reopen duplicate layer");
     assert!(reopened.layers().iter().any(|layer| layer.id == duplicate));
+    assert!(
+        reopened
+            .layers()
+            .iter()
+            .any(|layer| layer.id == duplicate_mask && layer.mask_owner == Some(duplicate))
+    );
     assert_eq!(
         reopened
             .read_tile(duplicate, TileCoord { x: 0, y: 0 })
@@ -2231,6 +3113,186 @@ fn raster_layer_merge_is_atomic_undoable_and_replayable() {
 }
 
 #[test]
+fn safe_raster_merge_bakes_source_opacity_without_changing_composite_pixels() {
+    let spec = DocumentSpec {
+        width_px: 256,
+        height_px: 256,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(7_301), spec).expect("valid doc");
+    let target = doc.layers()[0].id;
+    let source = doc.add_layer(LayerKind::Raster).expect("source layer");
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&target)
+            .expect("target")
+            .tiles
+            .set_pixel(
+                30,
+                40,
+                Rgba8 {
+                    r: 230,
+                    g: 30,
+                    b: 50,
+                    a: 255,
+                },
+            );
+        state
+            .layers
+            .get_mut(&source)
+            .expect("source")
+            .tiles
+            .set_pixel(
+                30,
+                40,
+                Rgba8 {
+                    r: 20,
+                    g: 100,
+                    b: 240,
+                    a: 190,
+                },
+            );
+    }
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: target,
+        opacity: u16::MAX,
+    })
+    .expect("target opacity");
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: source,
+        opacity: 42_000,
+    })
+    .expect("source opacity");
+    let before = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("composite before merge");
+    let revision_before_preflight = doc.revision();
+    let history_before_preflight = doc.history_snapshot(32).expect("history before preflight");
+    doc.preflight_merge_layers(target, source)
+        .expect("safe merge preflight");
+    assert_eq!(doc.revision(), revision_before_preflight);
+    let history_after_preflight = doc.history_snapshot(32).expect("history after preflight");
+    assert_eq!(
+        history_after_preflight.cursor,
+        history_before_preflight.cursor
+    );
+    assert_eq!(
+        history_after_preflight.entries,
+        history_before_preflight.entries
+    );
+
+    doc.merge_layers(target, source).expect("safe merge");
+
+    let after = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("composite after merge");
+    let pixel_offset = (40 * 256 + 30) * 4;
+    assert_eq!(
+        &after[pixel_offset..pixel_offset + 4],
+        &before[pixel_offset..pixel_offset + 4],
+    );
+    let merged = doc.layers().into_iter().next().expect("merged layer");
+    assert_eq!(merged.id, target);
+    assert_eq!(merged.opacity, u16::MAX);
+}
+
+#[test]
+fn unsafe_coverage_merge_is_rejected_without_mutation() {
+    let spec = DocumentSpec {
+        width_px: 256,
+        height_px: 256,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(7_302), spec).expect("valid doc");
+    let target = doc.layers()[0].id;
+    let source = doc.add_layer(LayerKind::Raster).expect("source layer");
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&source)
+            .expect("source")
+            .tiles
+            .set_pixel(
+                30,
+                40,
+                Rgba8 {
+                    r: 20,
+                    g: 100,
+                    b: 240,
+                    a: 190,
+                },
+            );
+    }
+    let target_before = doc
+        .read_tile(target, TileCoord { x: 0, y: 0 })
+        .expect("target before merge");
+    let source_before = doc
+        .read_tile(source, TileCoord { x: 0, y: 0 })
+        .expect("source before merge");
+    let revision_before = doc.revision();
+
+    assert!(matches!(
+        doc.preflight_merge_layers(target, source),
+        Err(EngineError::InvalidCommand(message))
+            if message.contains("opaque lower-layer coverage")
+    ));
+    assert_eq!(doc.revision(), revision_before);
+    assert!(matches!(
+        doc.merge_layers(target, source),
+        Err(EngineError::InvalidCommand(message))
+            if message.contains("opaque lower-layer coverage")
+    ));
+    assert_eq!(doc.revision(), revision_before);
+    assert_eq!(doc.layers().len(), 2);
+    assert_eq!(
+        doc.read_tile(target, TileCoord { x: 0, y: 0 })
+            .expect("target unchanged"),
+        target_before
+    );
+    assert_eq!(
+        doc.read_tile(source, TileCoord { x: 0, y: 0 })
+            .expect("source unchanged"),
+        source_before
+    );
+}
+
+#[test]
+fn hidden_mask_sibling_still_blocks_merge_and_cannot_be_retargeted() {
+    let spec = DocumentSpec {
+        width_px: 256,
+        height_px: 256,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(7_303), spec).expect("valid doc");
+    let target = doc.layers()[0].id;
+    let source = doc.add_layer(LayerKind::Raster).expect("source layer");
+    let mask = doc.add_layer(LayerKind::Mask).expect("mask layer");
+    doc.dispatch(EditorCommand::SetLayerVisibility {
+        layer: mask,
+        visible: false,
+    })
+    .expect("hide mask");
+    let layers_before = doc.layers();
+    let revision_before = doc.revision();
+
+    assert!(matches!(
+        doc.merge_layers(target, source),
+        Err(EngineError::InvalidCommand(message)) if message.contains("masks")
+    ));
+    assert_eq!(doc.revision(), revision_before);
+    assert_eq!(doc.layers(), layers_before);
+}
+
+#[test]
 fn moving_layers_updates_parent_and_rejects_cycles() {
     let spec = DocumentSpec {
         width_px: 256,
@@ -2240,6 +3302,7 @@ fn moving_layers_updates_parent_and_rejects_cycles() {
         background: Rgba8::default(),
     };
     let mut doc = Document::new(DocumentId::from_u128(41), spec).expect("valid doc");
+    let non_group = doc.layers()[0].id;
     doc.dispatch(EditorCommand::AddLayer {
         parent: None,
         kind: LayerKind::Group,
@@ -2287,6 +3350,29 @@ fn moving_layers_updates_parent_and_rejects_cycles() {
         Err(EngineError::InvalidCommand(message))
             if message.contains("descendants")
     ));
+    assert!(matches!(
+        doc.dispatch(EditorCommand::MoveLayer {
+            layer: first,
+            parent: Some(child),
+            index: 0,
+        }),
+        Err(EngineError::InvalidCommand(message)) if message.contains("group")
+    ));
+    assert!(matches!(
+        doc.dispatch(EditorCommand::MoveLayer {
+            layer: child,
+            parent: Some(non_group),
+            index: 0,
+        }),
+        Err(EngineError::InvalidCommand(message)) if message.contains("group")
+    ));
+    assert_eq!(
+        doc.layers()
+            .iter()
+            .find(|layer| layer.id == child)
+            .map(|layer| layer.parent),
+        Some(Some(second))
+    );
     doc.dispatch(EditorCommand::MoveLayer {
         layer: child,
         parent: None,
@@ -2302,6 +3388,433 @@ fn moving_layers_updates_parent_and_rejects_cycles() {
         0
     );
     assert_eq!(doc.layers()[3].parent, None);
+}
+
+#[test]
+fn grouping_sibling_layers_is_atomic_ordered_pass_through_and_undoable() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(42), spec).expect("valid doc");
+    let bottom = doc.add_layer(LayerKind::Raster).expect("bottom layer");
+    let middle = doc.add_layer(LayerKind::Raster).expect("middle layer");
+    let top = doc.add_layer(LayerKind::Raster).expect("top layer");
+    let before = doc.layers();
+
+    let group = doc
+        .group_layers(vec![top, bottom])
+        .expect("group non-contiguous siblings");
+    let layers = doc.layers();
+    let group_layer = layers
+        .iter()
+        .find(|layer| layer.id == group)
+        .expect("group projection");
+    assert_eq!(group_layer.parent, None);
+    assert_eq!(group_layer.kind, LayerKind::Group);
+    assert_eq!(
+        group_layer.group_mode,
+        ink_model::LayerGroupMode::PassThrough
+    );
+    assert_eq!(
+        layers
+            .iter()
+            .filter(|layer| layer.parent == Some(group))
+            .map(|layer| layer.id)
+            .collect::<Vec<_>>(),
+        vec![bottom, top]
+    );
+    assert_eq!(
+        layers
+            .iter()
+            .find(|layer| layer.id == middle)
+            .map(|layer| layer.order),
+        Some(1)
+    );
+    let grouped_state = doc.layers();
+    let grouped_revision = doc.revision();
+    assert!(matches!(
+        doc.group_layers(vec![middle, bottom]),
+        Err(EngineError::InvalidCommand(message)) if message.contains("same parent")
+    ));
+    assert_eq!(doc.layers(), grouped_state);
+    assert_eq!(doc.revision(), grouped_revision);
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo grouped layers");
+    assert_eq!(doc.layers(), before);
+    doc.dispatch(EditorCommand::Redo)
+        .expect("redo grouped layers");
+    assert!(doc.layers().iter().any(|layer| layer.id == group));
+}
+
+#[test]
+fn group_preflight_reports_selection_reasons_without_mutating_document() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(421), spec).expect("valid doc");
+    let unrelated_owner = doc.layers()[0].id;
+    let lower = doc.add_layer(LayerKind::Raster).expect("lower layer");
+    let mask = doc.add_layer(LayerKind::Mask).expect("mask layer");
+    let upper = doc.add_layer(LayerKind::Raster).expect("upper layer");
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&mask)
+            .expect("mask state")
+            .layer
+            .mask_owner = Some(unrelated_owner);
+    }
+    let original_layers = doc.layers();
+    let original_revision = doc.revision();
+
+    assert_eq!(
+        doc.preflight_group_layers(&[lower])
+            .expect("single-layer preflight"),
+        Some("Select at least two layers to create a group.".into())
+    );
+    assert_eq!(
+        doc.preflight_group_layers(&[lower, upper])
+            .expect("range preflight"),
+        Some("Grouping this range could move a mask away from its owner.".into())
+    );
+    assert_eq!(
+        doc.preflight_group_layers(&[lower, lower])
+            .expect("duplicate-layer preflight"),
+        Some("A layer can only appear once in a group selection.".into())
+    );
+    assert_eq!(
+        doc.preflight_group_layers(&[lower, mask])
+            .expect("mask-range preflight"),
+        Some("Grouping this range could move a mask away from its owner.".into())
+    );
+    assert_eq!(doc.layers(), original_layers);
+    assert_eq!(doc.revision(), original_revision);
+
+    assert_eq!(
+        doc.preflight_group_layers(&[lower, upper])
+            .expect("repeat range preflight"),
+        Some("Grouping this range could move a mask away from its owner.".into())
+    );
+
+    let mut valid_doc = Document::new(
+        DocumentId::from_u128(422),
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("valid document");
+    let first = valid_doc.add_layer(LayerKind::Raster).expect("first layer");
+    let second = valid_doc
+        .add_layer(LayerKind::Raster)
+        .expect("second layer");
+    let before_preflight = valid_doc.layers();
+    let revision_before_preflight = valid_doc.revision();
+    assert_eq!(
+        valid_doc
+            .preflight_group_layers(&[first, second])
+            .expect("valid group preflight"),
+        None
+    );
+    assert_eq!(valid_doc.layers(), before_preflight);
+    assert_eq!(valid_doc.revision(), revision_before_preflight);
+    valid_doc
+        .group_layers(vec![first, second])
+        .expect("preflighted group commits");
+}
+
+#[test]
+fn group_preflight_explains_clipping_boundary_without_mutation() {
+    let mut doc = Document::new(
+        DocumentId::from_u128(424),
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("valid document");
+    let first = doc.layers()[0].id;
+    let second = doc.add_layer(LayerKind::Raster).expect("second layer");
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&second)
+            .expect("second layer state")
+            .layer
+            .clipping = true;
+    }
+    let before = doc.layers();
+    let revision = doc.revision();
+
+    assert_eq!(
+        doc.preflight_group_layers(&[first, second])
+            .expect("clipping preflight"),
+        Some("Grouping this range could change clipping behavior.".into())
+    );
+    assert_eq!(doc.layers(), before);
+    assert_eq!(doc.revision(), revision);
+}
+
+#[test]
+fn grouping_an_owner_carries_its_attached_mask_into_the_group() {
+    let mut doc = Document::new(
+        DocumentId::from_u128(423),
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("valid document");
+    let owner = doc.layers()[0].id;
+    let mask = doc.add_layer(LayerKind::Mask).expect("attached mask");
+    let other = doc.add_layer(LayerKind::Raster).expect("sibling layer");
+    assert_eq!(
+        doc.preflight_group_layers(&[owner, other])
+            .expect("attached-mask preflight"),
+        None
+    );
+    let before = doc.layers();
+
+    let group = doc
+        .group_layers(vec![owner, other])
+        .expect("group carries its attached mask");
+    let layers = doc.layers();
+    assert_eq!(
+        layers
+            .iter()
+            .find(|layer| layer.id == owner)
+            .and_then(|layer| layer.parent),
+        Some(group)
+    );
+    let mask_layer = layers
+        .iter()
+        .find(|layer| layer.id == mask)
+        .expect("mask remains in the layer tree");
+    assert_eq!(mask_layer.mask_owner, Some(owner));
+    assert_eq!(mask_layer.parent, Some(group));
+
+    doc.dispatch(EditorCommand::Undo).expect("undo grouping");
+    assert_eq!(doc.layers(), before);
+    doc.dispatch(EditorCommand::Redo).expect("redo grouping");
+    assert_eq!(
+        doc.layers()
+            .iter()
+            .find(|layer| layer.id == mask)
+            .and_then(|layer| layer.parent),
+        Some(group)
+    );
+}
+
+#[test]
+fn ungroup_preserves_sibling_position_and_is_one_undoable_edit() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(420), spec).expect("valid doc");
+    let lower = doc.add_layer(LayerKind::Raster).expect("lower");
+    let first = doc.add_layer(LayerKind::Raster).expect("first");
+    let second = doc.add_layer(LayerKind::Raster).expect("second");
+    let upper = doc.add_layer(LayerKind::Raster).expect("upper");
+    let group = doc.group_layers(vec![first, second]).expect("group");
+    let before_ungroup = doc.layers();
+    doc.ungroup_layer(group).expect("safe ungroup");
+    let layers = doc.layers();
+    assert!(!layers.iter().any(|layer| layer.id == group));
+    assert_eq!(
+        layers
+            .iter()
+            .filter(|layer| layer.parent.is_none())
+            .map(|layer| layer.id)
+            .collect::<Vec<_>>(),
+        vec![LayerId::from_u128(1), lower, first, second, upper]
+    );
+    doc.dispatch(EditorCommand::Undo).expect("undo");
+    assert_eq!(doc.layers(), before_ungroup);
+    doc.dispatch(EditorCommand::Redo).expect("redo");
+    assert!(!doc.layers().iter().any(|layer| layer.id == group));
+    let path = std::env::temp_dir().join(format!(
+        "project-ink-ungroup-{}.inkproj",
+        std::process::id()
+    ));
+    doc.save_as(&path).expect("persist ungroup");
+    let mut reopened = Document::open(&path).expect("reopen persisted project");
+    reopened
+        .dispatch(EditorCommand::Undo)
+        .expect("undo after reopen");
+    assert!(reopened.layers().iter().any(|layer| layer.id == group));
+    assert!(
+        reopened
+            .layers()
+            .iter()
+            .filter(|layer| layer.id == first || layer.id == second)
+            .all(|layer| layer.parent == Some(group))
+    );
+    std::fs::remove_dir_all(path).expect("remove test project");
+}
+
+#[test]
+fn ungroup_rejects_group_properties_and_masks_without_partial_changes() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(421), spec).expect("valid doc");
+    let first = doc.add_layer(LayerKind::Raster).expect("first");
+    let second = doc.add_layer(LayerKind::Raster).expect("second");
+    let group = doc.group_layers(vec![first, second]).expect("group");
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: group,
+        opacity: u16::MAX - 1,
+    })
+    .expect("set non-default opacity");
+    let state = doc.layers();
+    let revision = doc.revision();
+    assert!(
+        matches!(doc.ungroup_layer(group), Err(EngineError::InvalidCommand(message)) if message.contains("100%"))
+    );
+    assert_eq!(doc.layers(), state);
+    assert_eq!(doc.revision(), revision);
+
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: group,
+        opacity: u16::MAX,
+    })
+    .expect("restore opacity");
+    let mask = doc
+        .add_layer_with_parent(LayerKind::Mask, Some(group))
+        .expect("child mask");
+    let state = doc.layers();
+    let revision = doc.revision();
+    assert!(
+        matches!(doc.ungroup_layer(group), Err(EngineError::InvalidCommand(message)) if message.contains("mask or clipping"))
+    );
+    assert!(state.iter().any(|layer| layer.id == mask));
+    assert_eq!(doc.layers(), state);
+    assert_eq!(doc.revision(), revision);
+}
+
+#[test]
+fn deleting_selected_roots_is_atomic_normalized_and_undoable() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(43), spec).expect("valid doc");
+    let preserved = doc.layers()[0].id;
+    let group = doc.add_layer(LayerKind::Group).expect("ordinary group");
+    let child = doc
+        .add_layer_with_parent(LayerKind::Raster, Some(group))
+        .expect("group child");
+    let leaf = doc
+        .add_layer(LayerKind::Raster)
+        .expect("another selected layer");
+    let before = doc.layers();
+
+    doc.delete_layers(vec![group, child, leaf])
+        .expect("delete structural roots once");
+    let deleted = doc.layers();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].id, preserved);
+
+    let revision = doc.revision();
+    assert!(
+        doc.delete_layers(vec![group, LayerId::from_u128(u128::MAX)])
+            .is_err()
+    );
+    assert_eq!(doc.layers(), deleted);
+    assert_eq!(doc.revision(), revision);
+
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo bulk deletion");
+    assert_eq!(doc.layers(), before);
+    doc.dispatch(EditorCommand::Redo)
+        .expect("redo bulk deletion");
+    assert_eq!(doc.layers(), deleted);
+}
+
+#[test]
+fn delete_preflight_is_read_only_and_matches_lock_and_last_layer_guards() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(44), spec).expect("valid doc");
+    let only = doc.layers()[0].id;
+    let initial_revision = doc.revision();
+    assert_eq!(
+        doc.preflight_delete_layers(&[only])
+            .expect("last-layer preflight"),
+        Some("a document must keep at least one layer".into())
+    );
+    assert_eq!(doc.revision(), initial_revision);
+    assert_eq!(doc.layers().len(), 1);
+
+    let group = doc.add_layer(LayerKind::Group).expect("ordinary group");
+    let child = doc
+        .add_layer_with_parent(LayerKind::Raster, Some(group))
+        .expect("group child");
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: true,
+    })
+    .expect("lock group");
+    let locked_revision = doc.revision();
+    let locked_layers = doc.layers();
+    assert_eq!(
+        doc.preflight_delete_layers(&[group])
+            .expect("locked preflight"),
+        Some(format!(
+            "layer {group} is locked by layer {group}; unlock the owning layer or group first"
+        ))
+    );
+    assert_eq!(doc.revision(), locked_revision);
+    assert_eq!(doc.layers(), locked_layers);
+
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: false,
+    })
+    .expect("unlock group");
+    let unlocked_revision = doc.revision();
+    assert_eq!(
+        doc.preflight_delete_layers(&[group, child])
+            .expect("valid group subtree preflight"),
+        None
+    );
+    assert_eq!(doc.revision(), unlocked_revision);
+    assert!(doc.layers().iter().any(|layer| layer.id == group));
 }
 
 #[test]
@@ -2342,6 +3855,7 @@ fn reopening_rejects_a_cyclic_layer_tree() {
         history: HistorySnapshot::default(),
         brushes: Vec::new(),
         resources: Vec::new(),
+        layer_panel_state: ink_storage::LayerPanelState::default(),
         comic: None,
     });
     assert!(matches!(
@@ -2380,6 +3894,7 @@ fn reopening_rejects_a_dangling_layer_parent() {
         history: HistorySnapshot::default(),
         brushes: Vec::new(),
         resources: Vec::new(),
+        layer_panel_state: ink_storage::LayerPanelState::default(),
         comic: None,
     });
     assert!(matches!(
@@ -2410,6 +3925,7 @@ fn reopening_rejects_duplicate_layer_ids() {
         history: HistorySnapshot::default(),
         brushes: Vec::new(),
         resources: Vec::new(),
+        layer_panel_state: ink_storage::LayerPanelState::default(),
         comic: None,
     });
     assert!(matches!(
@@ -3177,7 +4693,7 @@ fn alpha_locked_raster_strokes_cannot_create_new_pixels() {
             .expect("tile"),
     )
     .expect("valid tile");
-    assert_ne!(tile.pixel_rgba(8, 8).a, 0);
+    assert_eq!(tile.pixel_rgba(8, 8).a, 255);
     assert_eq!(tile.pixel_rgba(48, 48).a, 0);
 }
 
@@ -3235,7 +4751,7 @@ fn clipping_layer_tile_reads_are_masked_by_preceding_paint_layer() {
 }
 
 #[test]
-fn mask_layer_alpha_stencils_preceding_paint_layer() {
+fn mask_owner_survives_sibling_reorder_and_owner_reparenting() {
     let spec = DocumentSpec {
         width_px: 64,
         height_px: 64,
@@ -3260,6 +4776,7 @@ fn mask_layer_alpha_stencils_preceding_paint_layer() {
     )
     .expect("fill base");
     let mask = doc.add_layer(LayerKind::Mask).expect("mask layer");
+    let unrelated = doc.add_layer(LayerKind::Raster).expect("unrelated layer");
     let stroke = ink_model::StrokeId::from_u128(504);
     doc.dispatch(EditorCommand::BeginStroke {
         stroke,
@@ -3271,19 +4788,381 @@ fn mask_layer_alpha_stencils_preceding_paint_layer() {
         .expect("mask sample");
     doc.dispatch(EditorCommand::EndStroke { stroke })
         .expect("end mask stroke");
+    assert_eq!(
+        doc.layers()
+            .iter()
+            .find(|layer| layer.id == mask)
+            .and_then(|layer| layer.mask_owner),
+        Some(base)
+    );
+    doc.dispatch(EditorCommand::MoveLayer {
+        layer: mask,
+        parent: None,
+        index: 2,
+    })
+    .expect("reorder attached mask");
+    let group = doc.add_layer(LayerKind::Group).expect("group");
+    assert!(
+        doc.dispatch(EditorCommand::MoveLayer {
+            layer: mask,
+            parent: Some(group),
+            index: 0,
+        })
+        .is_err()
+    );
+    doc.dispatch(EditorCommand::MoveLayer {
+        layer: base,
+        parent: Some(group),
+        index: 0,
+    })
+    .expect("move masked owner and mask into group");
+    let layers = doc.layers();
+    assert_eq!(
+        layers
+            .iter()
+            .find(|layer| layer.id == mask)
+            .and_then(|layer| layer.mask_owner),
+        Some(base)
+    );
+    assert_eq!(
+        layers
+            .iter()
+            .find(|layer| layer.id == mask)
+            .and_then(|layer| layer.parent),
+        Some(group)
+    );
+    assert!(layers.iter().any(|layer| layer.id == unrelated));
     let tile = Tile::from_bytes(
         doc.read_tile(base, TileCoord { x: 0, y: 0 })
             .expect("masked base tile"),
     )
     .expect("valid masked base tile");
-    assert_ne!(tile.pixel_rgba(8, 8).a, 0);
-    assert_eq!(tile.pixel_rgba(48, 48).a, 0);
+    assert!(
+        tile.pixel_rgba(8, 8).a < 255,
+        "black mask paint should reduce owner coverage"
+    );
+    assert_ne!(
+        tile.pixel_rgba(48, 48).a,
+        0,
+        "untouched sparse mask pixels should reveal by default"
+    );
     let mask_tile = Tile::from_bytes(
         doc.read_tile(mask, TileCoord { x: 0, y: 0 })
             .expect("mask tile"),
     )
     .expect("valid mask tile");
     assert_ne!(mask_tile.pixel_rgba(8, 8).a, 0);
+}
+
+#[test]
+fn new_sparse_mask_reveals_by_default_and_inverts_coverage_without_tile_expansion() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(0x5a51), spec).expect("document");
+    let owner = doc.layers()[0].id;
+    let color = Rgba8 {
+        r: 70,
+        g: 80,
+        b: 90,
+        a: 255,
+    };
+    doc.fill_region(owner, 0, 0, color, 0, 0)
+        .expect("fill owner");
+    let mask = doc.add_layer(LayerKind::Mask).expect("new attached mask");
+    let default_reveal = doc
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("default reveal");
+    assert_eq!(default_reveal[(5 * 256 + 4) * 4 + 3], 255);
+
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&mask)
+            .expect("mask state")
+            .tiles
+            .set_pixel(
+                4,
+                5,
+                Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+            );
+    }
+    let masked = doc
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("hidden pixel");
+    assert_eq!(&masked[((5 * 256 + 4) * 4) as usize..][..4], &[0, 0, 0, 0]);
+    assert_eq!(
+        masked,
+        doc.read_composite_tile(TileCoord { x: 0, y: 0 })
+            .expect("masked export composite")
+    );
+    assert_ne!(
+        &masked[..4],
+        &[0, 0, 0, 0],
+        "sparse default remains revealed"
+    );
+
+    doc.dispatch(EditorCommand::SetMaskInverted {
+        mask,
+        inverted: true,
+    })
+    .expect("invert mask");
+    let inverted = doc
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("inverted mask");
+    assert_ne!(
+        &inverted[((5 * 256 + 4) * 4) as usize..][..4],
+        &[0, 0, 0, 0]
+    );
+    assert_eq!(&inverted[..4], &[0, 0, 0, 0]);
+    assert_eq!(
+        inverted,
+        doc.read_composite_tile(TileCoord { x: 0, y: 0 })
+            .expect("inverted export composite")
+    );
+
+    doc.dispatch(EditorCommand::Undo).expect("undo inversion");
+    let restored = doc
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("undo inversion tile");
+    assert_ne!(&restored[..4], &[0, 0, 0, 0]);
+    assert_eq!(
+        &restored[((5 * 256 + 4) * 4) as usize..][..4],
+        &[0, 0, 0, 0]
+    );
+    doc.dispatch(EditorCommand::SetMaskEnabled {
+        mask,
+        enabled: false,
+    })
+    .expect("disable mask");
+    assert_ne!(
+        &doc.read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("disabled mask tile")[..4],
+        &[0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn white_mask_brush_reveals_pixels_hidden_by_black_brush() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(0x5a52), spec).expect("document");
+    let owner = doc.layers()[0].id;
+    doc.fill_region(
+        owner,
+        0,
+        0,
+        Rgba8 {
+            r: 70,
+            g: 80,
+            b: 90,
+            a: 255,
+        },
+        0,
+        0,
+    )
+    .expect("fill owner");
+    let mask = doc.add_layer(LayerKind::Mask).expect("new mask");
+    let brush = BrushPreset::starters()[0].id;
+    doc.update_brush_color(
+        brush,
+        Rgba8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        },
+    )
+    .expect("choose black mask color");
+    let paint = |doc: &mut Document, stroke_id: u128| {
+        let stroke = ink_model::StrokeId::from_u128(stroke_id);
+        doc.dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer: mask,
+            brush,
+        })
+        .expect("begin mask stroke");
+        doc.push_pointer_packet(&ink_test_support::one_sample(16.0, 16.0, 1.0))
+            .expect("mask dab");
+        doc.dispatch(EditorCommand::EndStroke { stroke })
+            .expect("commit mask stroke");
+    };
+    paint(&mut doc, 0x5a53);
+    let hidden = Tile::from_bytes(
+        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("black mask composite"),
+    )
+    .expect("valid hidden tile")
+    .pixel_rgba(16, 16)
+    .a;
+    assert!(
+        hidden < 255,
+        "black mask brush should hide part of the owner"
+    );
+
+    doc.update_brush_color(
+        brush,
+        Rgba8 {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
+    )
+    .expect("choose white mask color");
+    paint(&mut doc, 0x5a54);
+    let revealed = Tile::from_bytes(
+        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("white mask composite"),
+    )
+    .expect("valid revealed tile")
+    .pixel_rgba(16, 16)
+    .a;
+    assert!(
+        revealed > hidden,
+        "white mask brush should reveal prior coverage"
+    );
+}
+
+#[test]
+fn applying_raster_mask_bakes_coverage_and_undo_restores_attachment() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(0x5a55), spec).expect("document");
+    let owner = doc.layers()[0].id;
+    doc.fill_region(
+        owner,
+        0,
+        0,
+        Rgba8 {
+            r: 70,
+            g: 80,
+            b: 90,
+            a: 255,
+        },
+        0,
+        0,
+    )
+    .expect("fill owner");
+    let mask = doc.add_layer(LayerKind::Mask).expect("new mask");
+    lock_recover(&doc.state)
+        .layers
+        .get_mut(&mask)
+        .expect("mask state")
+        .tiles
+        .set_pixel(
+            4,
+            5,
+            Rgba8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+    let before_apply = doc
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("masked owner");
+    let history_before = doc.history_snapshot(50).expect("history").cursor;
+    doc.dispatch(EditorCommand::ApplyLayerMask { mask })
+        .expect("apply mask");
+    assert_eq!(
+        doc.history_snapshot(50).expect("applied history").cursor,
+        history_before + 1
+    );
+    assert!(!doc.layers().iter().any(|layer| layer.id == mask));
+    assert_eq!(
+        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("baked owner"),
+        before_apply,
+        "apply preserves the rendered pixels"
+    );
+    doc.dispatch(EditorCommand::Undo).expect("undo apply");
+    assert!(doc.layers().iter().any(|layer| layer.id == mask));
+    assert_eq!(
+        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("restored source"),
+        before_apply,
+        "undo restores the attached mask and its visual effect"
+    );
+}
+
+#[test]
+fn applying_disabled_mask_removes_it_without_changing_owner_pixels() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(0x5a56), spec).expect("document");
+    let owner = doc.layers()[0].id;
+    doc.fill_region(
+        owner,
+        0,
+        0,
+        Rgba8 {
+            r: 70,
+            g: 80,
+            b: 90,
+            a: 255,
+        },
+        0,
+        0,
+    )
+    .expect("fill owner");
+    let original_owner = doc
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("unmasked owner");
+    let mask = doc.add_layer(LayerKind::Mask).expect("new mask");
+    lock_recover(&doc.state)
+        .layers
+        .get_mut(&mask)
+        .expect("mask state")
+        .tiles
+        .set_pixel(
+            4,
+            5,
+            Rgba8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+    doc.dispatch(EditorCommand::SetMaskEnabled {
+        mask,
+        enabled: false,
+    })
+    .expect("disable mask");
+    doc.dispatch(EditorCommand::ApplyLayerMask { mask })
+        .expect("apply disabled mask");
+    assert_eq!(
+        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("owner after applying disabled mask"),
+        original_owner
+    );
 }
 
 #[test]
@@ -3334,6 +5213,85 @@ fn ephemeral_selection_constrains_confirmed_and_predicted_dabs() {
     assert!(inside_tile.iter().any(|byte| *byte != 0));
 
     doc.clear_selection().expect("clear selection");
+}
+
+#[test]
+fn layer_opacity_preview_commits_once_and_cancel_restores_pixels_state() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(0x5a57), spec).expect("document");
+    let layer = doc.layers()[0].id;
+    let original = doc.layers()[0].opacity;
+    let cursor_before = doc.history_snapshot(50).expect("history before").cursor;
+    let edit = doc
+        .begin_layer_opacity_edit(layer)
+        .expect("begin opacity edit");
+    doc.update_layer_opacity_edit(edit, u16::MAX / 2)
+        .expect("preview opacity");
+    doc.update_layer_opacity_edit(edit, u16::MAX / 3)
+        .expect("update opacity preview");
+    assert_eq!(doc.layers()[0].opacity, u16::MAX / 3);
+    assert_eq!(
+        doc.history_snapshot(50).expect("preview history").cursor,
+        cursor_before,
+        "preview frames do not create undo entries"
+    );
+
+    doc.commit_layer_opacity_edit(edit)
+        .expect("commit opacity edit");
+    assert_eq!(
+        doc.history_snapshot(50).expect("committed history").cursor,
+        cursor_before + 1
+    );
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo opacity edit");
+    assert_eq!(doc.layers()[0].opacity, original);
+    doc.dispatch(EditorCommand::Redo)
+        .expect("redo opacity edit");
+    assert_eq!(doc.layers()[0].opacity, u16::MAX / 3);
+
+    let cursor_before_cancel = doc.history_snapshot(50).expect("history").cursor;
+    let canceled = doc
+        .begin_layer_opacity_edit(layer)
+        .expect("begin second opacity edit");
+    doc.update_layer_opacity_edit(canceled, 0)
+        .expect("preview zero opacity");
+    doc.cancel_layer_opacity_edit(canceled)
+        .expect("cancel opacity edit");
+    assert_eq!(doc.layers()[0].opacity, u16::MAX / 3);
+    assert_eq!(
+        doc.history_snapshot(50).expect("canceled history").cursor,
+        cursor_before_cancel,
+        "canceled preview does not alter history"
+    );
+
+    let cursor_before_save = doc.history_snapshot(50).expect("history").cursor;
+    let save_edit = doc
+        .begin_layer_opacity_edit(layer)
+        .expect("begin saved opacity edit");
+    doc.update_layer_opacity_edit(save_edit, u16::MAX / 4)
+        .expect("preview saved opacity");
+    let snapshot = doc.snapshot();
+    assert_eq!(
+        snapshot
+            .layers
+            .iter()
+            .find(|candidate| candidate.id == layer)
+            .expect("saved layer")
+            .opacity,
+        u16::MAX / 4,
+        "snapshot closes the temporary edit with its final value"
+    );
+    assert_eq!(
+        doc.history_snapshot(50).expect("saved history").cursor,
+        cursor_before_save + 1,
+        "saving during an active preview commits one undo step"
+    );
 }
 
 #[test]
@@ -4394,6 +6352,109 @@ fn save_and_reopen_preserves_revision_layers_and_pixels() {
 }
 
 #[test]
+fn layer_panel_state_is_validated_not_undoable_and_persisted_per_page() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_906), spec).expect("valid doc");
+    let paint = doc.layers()[0].id;
+    let group = doc.add_layer(LayerKind::Group).expect("group");
+    let history_before = doc
+        .history_snapshot(32)
+        .expect("history before panel state");
+    let revision_before = doc.revision();
+
+    assert!(
+        doc.set_layer_panel_state(Some(LayerId::from_u128(999)), vec![])
+            .is_err()
+    );
+    assert!(doc.set_layer_panel_state(Some(paint), vec![paint]).is_err());
+    assert_eq!(doc.revision(), revision_before);
+    assert_eq!(doc.layer_panel_state(), LayerPanelState::default());
+
+    doc.set_layer_panel_state(Some(paint), vec![group])
+        .expect("persist valid panel state");
+    let expected = LayerPanelState {
+        primary_layer: Some(paint),
+        collapsed_groups: vec![group],
+    };
+    assert_eq!(doc.layer_panel_state(), expected);
+    let history_after = doc.history_snapshot(32).expect("history after panel state");
+    assert_eq!(history_after.cursor, history_before.cursor);
+    assert_eq!(history_after.entries, history_before.entries);
+
+    let path = std::env::temp_dir().join(format!(
+        "project-ink-layer-panel-state-{}.inkproj",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    doc.save_as(&path).expect("save panel state");
+    let reopened = Document::open(&path).expect("reopen panel state");
+    assert_eq!(reopened.layer_panel_state(), expected);
+    std::fs::remove_dir_all(path).expect("cleanup");
+}
+
+#[test]
+fn raster_merge_down_capability_reports_engine_structural_restrictions() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ink_model::ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(90_310), spec).expect("valid doc");
+    let target = doc.layers()[0].id;
+    let source = doc.add_layer(LayerKind::Raster).expect("source raster");
+    let capability_for_source = |doc: &Document| {
+        doc.layer_action_capabilities()
+            .expect("action capabilities")
+            .into_iter()
+            .find(|capability| capability.layer_id == source)
+            .expect("source actions")
+    };
+    assert_eq!(capability_for_source(&doc).merge_down_reason, None);
+
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: target,
+        opacity: u16::MAX / 2,
+    })
+    .expect("set target opacity");
+    assert_eq!(
+        capability_for_source(&doc).merge_down_reason.as_deref(),
+        Some("Exact merge requires the lower target at 100% opacity.")
+    );
+    doc.dispatch(EditorCommand::SetLayerOpacity {
+        layer: target,
+        opacity: u16::MAX,
+    })
+    .expect("restore target opacity");
+
+    doc.add_layer(LayerKind::Mask).expect("attached mask");
+    assert_eq!(
+        capability_for_source(&doc).merge_down_reason.as_deref(),
+        Some("Remove or apply attached masks before merging layers.")
+    );
+}
+
+#[test]
+fn layer_duplicate_capacity_reason_matches_engine_limit() {
+    assert_eq!(
+        duplicate_capacity_reason(MAX_LAYERS - 1, 1),
+        None,
+        "a duplicate that reaches the limit is allowed"
+    );
+    assert_eq!(
+        duplicate_capacity_reason(MAX_LAYERS - 1, 2).as_deref(),
+        Some("Document layer limit reached; remove layers before duplicating.")
+    );
+}
+
+#[test]
 fn stroke_undo_and_redo_restore_pixels() {
     let spec = DocumentSpec {
         width_px: 256,
@@ -4960,13 +7021,46 @@ fn single_point_vector_stroke_rasterizes_and_resource_cache_evicts_lru() {
 fn layer_thumbnail_is_bounded_and_matches_rgba_shape() {
     let spec = DocumentSpec {
         width_px: 256,
-        height_px: 256,
+        height_px: 128,
         dpi: 144.0,
         color_space: ColorSpace::Srgb,
         background: Rgba8::default(),
     };
     let mut doc = Document::new(DocumentId::from_u128(80), spec).expect("valid doc");
     let layer = doc.layers()[0].id;
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&layer)
+            .expect("thumbnail layer")
+            .tiles
+            .set_pixel(
+                128,
+                64,
+                Rgba8 {
+                    r: 12,
+                    g: 34,
+                    b: 56,
+                    a: 255,
+                },
+            );
+        state
+            .layers
+            .get_mut(&layer)
+            .expect("thumbnail layer")
+            .tiles
+            .set_pixel(
+                167,
+                65,
+                Rgba8 {
+                    r: 240,
+                    g: 10,
+                    b: 20,
+                    a: 255,
+                },
+            );
+    }
     let stroke = ink_model::StrokeId::from_u128(81);
     doc.dispatch(EditorCommand::BeginStroke {
         stroke,
@@ -4978,13 +7072,71 @@ fn layer_thumbnail_is_bounded_and_matches_rgba_shape() {
         .expect("sample");
     doc.dispatch(EditorCommand::EndStroke { stroke })
         .expect("end");
+    let thumbnail = doc.read_layer_thumbnail(layer, 32).expect("thumbnail");
+    assert_eq!(thumbnail.len(), 32 * 32 * 4);
+    let sampled_center = (16 * 32 + 16) * 4;
     assert_eq!(
-        doc.read_layer_thumbnail(layer, 32)
-            .expect("thumbnail")
-            .len(),
-        32 * 32 * 4
+        &thumbnail[sampled_center..sampled_center + 4],
+        &[12, 34, 56, 255]
+    );
+    let sparse_mark = (16 * 32 + 20) * 4;
+    assert_eq!(
+        &thumbnail[sparse_mark..sparse_mark + 4],
+        &[240, 10, 20, 255],
+        "a sparse mark between thumbnail pixel centers remains visible"
+    );
+    let padded_top_center = (2 * 32 + 16) * 4;
+    assert_eq!(
+        &thumbnail[padded_top_center..padded_top_center + 4],
+        &[0; 4]
     );
     assert!(doc.read_layer_thumbnail(layer, 8).is_err());
+}
+
+#[test]
+fn sparse_mask_thumbnail_shows_effective_coverage_and_reveal_all_default() {
+    let spec = DocumentSpec {
+        width_px: 256,
+        height_px: 128,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(81), spec).expect("document");
+    let owner = doc.layers()[0].id;
+    let mask = doc.add_layer(LayerKind::Mask).expect("mask layer");
+    {
+        let mut state = lock_recover(&doc.state);
+        let mask_state = state.layers.get_mut(&mask).expect("mask");
+        mask_state.layer.mask_owner = Some(owner);
+        mask_state.layer.mask_stencil = false;
+    }
+
+    let thumbnail = doc.read_layer_thumbnail(mask, 32).expect("default preview");
+    let center = (16 * 32 + 16) * 4;
+    assert_eq!(&thumbnail[center..center + 4], &[255; 4]);
+
+    {
+        let mut state = lock_recover(&doc.state);
+        state.layers.get_mut(&mask).expect("mask").tiles.set_pixel(
+            128,
+            64,
+            Rgba8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+    }
+    let thumbnail = doc.read_layer_thumbnail(mask, 32).expect("edited preview");
+    let edited = &thumbnail[center..center + 4];
+    assert!(
+        edited[0] < 255,
+        "hidden coverage should darken the mask preview"
+    );
+    assert_eq!(&edited[..3], &[edited[0]; 3]);
+    assert_eq!(edited[3], 255);
 }
 
 #[test]

@@ -3,6 +3,7 @@ use super::{
     CompiledBrushState, Dab, EngineEvent, History, Layer, LayerId, Mutex, SelectionMask, TileStore,
     TimeLapseRecording, VecDeque, VectorStroke,
 };
+use ink_storage::LayerPanelState;
 
 #[derive(Clone, Debug)]
 pub(super) struct LayerState {
@@ -202,8 +203,17 @@ pub(super) struct EngineState {
     /// Ephemeral selection mask. It is intentionally not persisted in v1
     /// projects; it constrains rasterization until the user clears it.
     pub(super) selection: Option<SelectionMask>,
+    /// Temporary layer isolation used by the Solo visibility gesture. This is
+    /// session-only and never enters snapshots, history, or command journals.
+    pub(super) solo_layer: Option<LayerId>,
+    /// Durable panel presentation state, independent of undoable layer edits.
+    pub(super) layer_panel_state: LayerPanelState,
     pub(super) brush_drafts: BTreeMap<u64, (BrushId, BrushDraftSettings)>,
     pub(super) next_brush_draft: u64,
+    /// In-flight layer opacity preview. Its value is session-only; commit adds
+    /// one ordinary command to history and cancel restores the original value.
+    pub(super) opacity_edit: Option<LayerOpacityEdit>,
+    pub(super) next_opacity_edit: u64,
     /// Rust-generated ephemeral dabs shared with an optional GPU preview.
     /// If the optional preview queue is saturated, the CPU document continues
     /// without interruption and this counter records that the preview should
@@ -216,4 +226,11 @@ pub(super) struct EngineState {
     /// Optional validated Phase 3 comic structure persisted with the native
     /// document. Pixels and comic metadata remain separate authorities.
     pub(super) comic_json: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LayerOpacityEdit {
+    pub(super) id: u64,
+    pub(super) layer: LayerId,
+    pub(super) original: u16,
 }

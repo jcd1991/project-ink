@@ -4,6 +4,7 @@ class BrushSummaryView {
   const BrushSummaryView({
     required this.id,
     required this.name,
+    this.isBuiltin = false,
     this.tags = const [],
     this.diameterPx = 12,
     this.opacity = 1,
@@ -24,6 +25,7 @@ class BrushSummaryView {
   });
   final int id;
   final String name;
+  final bool isBuiltin;
   final List<String> tags;
   final double diameterPx;
   final double opacity;
@@ -108,19 +110,42 @@ class LayerSummaryView {
     required this.kind,
     this.order = 0,
     this.parent,
+    this.maskOwner,
+    this.maskEnabled = true,
+    this.maskInverted = false,
     this.opacity = 1,
     this.visible = true,
     this.blendMode = 'Normal',
     this.groupMode = 'Pass-through',
     this.alphaLock = false,
+    this.locked = false,
     this.clipping = false,
     this.reference = false,
     this.labelRgba,
     this.adjustmentBrightness = 0,
     this.adjustmentContrast = 0,
+    this.canDrag = true,
+    this.dragReason,
+    this.canReceiveLayers = true,
+    this.receiveReason,
+    this.canEditProperties = true,
+    this.editPropertiesReason,
+    this.canDuplicate = true,
+    this.duplicateReason,
+    this.canDelete = true,
+    this.deleteReason,
+    this.canUngroup = true,
+    this.ungroupReason,
+    this.canApplyMask = true,
+    this.applyMaskReason,
+    this.hasMergeDownCapability = false,
+    this.mergeDownReason,
   });
   final int id;
   final int? parent;
+  final int? maskOwner;
+  final bool maskEnabled;
+  final bool maskInverted;
   final String name;
   final String kind;
   final int order;
@@ -129,11 +154,39 @@ class LayerSummaryView {
   final String blendMode;
   final String groupMode;
   final bool alphaLock;
+  final bool locked;
   final bool clipping;
   final bool reference;
   final int? labelRgba;
   final int adjustmentBrightness;
   final int adjustmentContrast;
+  final bool canDrag;
+  final String? dragReason;
+  final bool canReceiveLayers;
+  final String? receiveReason;
+  final bool canEditProperties;
+  final String? editPropertiesReason;
+  final bool canDuplicate;
+  final String? duplicateReason;
+  final bool canDelete;
+  final String? deleteReason;
+  final bool canUngroup;
+  final String? ungroupReason;
+  final bool canApplyMask;
+  final String? applyMaskReason;
+  final bool hasMergeDownCapability;
+  final String? mergeDownReason;
+}
+
+/// Durable layer-panel selection and disclosure state for one document page.
+class LayerPanelStateView {
+  const LayerPanelStateView({
+    this.primaryLayerId,
+    this.collapsedGroupIds = const <int>[],
+  });
+
+  final int? primaryLayerId;
+  final List<int> collapsedGroupIds;
 }
 
 class VectorStrokeSummaryView {

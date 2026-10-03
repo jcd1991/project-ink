@@ -634,6 +634,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         /// Return the Metal device used by wgpu so the Apple texture adapter
         /// can create its IOSurface-backed texture on the same device.
         #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[allow(unsafe_code)]
         pub fn native_metal_device_handle(&self) -> Result<u64, LiveRenderError> {
             let handle = unsafe {
                 self.device.as_hal::<wgpu_hal::api::Metal, _, _>(|device| {
@@ -668,6 +669,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         /// sample, and render-target plus shader-read usage. The pointer is
         /// transferred to this method and must not be released by the caller.
         #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[allow(unsafe_code)]
         pub unsafe fn attach_metal_texture(
             &self,
             texture_handle: u64,

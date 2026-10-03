@@ -1,7 +1,8 @@
 import 'dart:typed_data';
 
 import '../generated/api.dart' as rust;
-import '../../tools/brush_library.dart' show BrushCurvePointView;
+import '../../tools/brush_library.dart'
+    show BrushCurvePointView, BrushPreviewPointView;
 import 'engine_api_models.dart';
 
 /// Safe, user-facing failure raised when a selected project cannot be opened.
@@ -71,6 +72,12 @@ abstract interface class EngineApi {
   });
   Future<void> commitBrushDraft(int draftId);
   Future<void> cancelBrushDraft(int draftId);
+  Future<Uint8List> renderBrushPreview({
+    required int brushId,
+    required int width,
+    required int height,
+    required List<BrushPreviewPointView> points,
+  });
   Future<void> endStroke();
   Future<void> cancelStroke();
   Future<void> pushPointerPacket(Uint8List packet);
@@ -81,12 +88,47 @@ abstract interface class EngineApi {
   Future<int> addLayer({required String kind});
   Future<int> addLayerToParent({required String kind, required int parentId});
   Future<void> deleteLayer({required int layerId});
+  Future<void> deleteLayers({required List<int> layerIds});
+
+  /// Return an engine-authored reason when selected layer roots cannot be
+  /// deleted. The query does not modify the document.
+  Future<String?> preflightDeleteLayers({required List<int> layerIds});
+  Future<void> setLayersVisibility({
+    required List<int> layerIds,
+    required bool visible,
+  });
+  Future<void> setLayerSolo({required int? layerId});
+  Future<LayerPanelStateView> layerPanelState();
+  Future<void> setLayerPanelState({
+    required int? primaryLayerId,
+    required List<int> collapsedGroupIds,
+  });
+  Future<void> setLayersLocked({
+    required List<int> layerIds,
+    required bool locked,
+  });
+  Future<void> setLayersLabel({
+    required List<int> layerIds,
+    required int? labelRgba,
+  });
+  Future<void> setLayerLocked({required int layerId, required bool locked});
+  Future<void> setMaskEnabled({required int maskId, required bool enabled});
+  Future<void> setMaskInverted({required int maskId, required bool inverted});
+  Future<void> applyLayerMask({required int maskId});
   Future<int> duplicateLayer({required int layerId});
+  Future<List<int>> duplicateLayers({required List<int> layerIds});
+
+  /// Return a Rust-authoritative explanation when the selected sibling roots
+  /// cannot be grouped. This check does not mutate the document.
+  Future<String?> preflightGroupLayers({required List<int> layerIds});
+  Future<int> groupLayers({required List<int> layerIds});
+  Future<void> ungroupLayer({required int groupId});
   Future<void> moveLayer({
     required int layerId,
     required int? parentId,
     required int index,
   });
+  Future<void> reorderLayers({required List<int> layerIds, required int index});
   Future<void> createPanelLayerTree({
     required int panelId,
     required int panelGroupId,
@@ -107,6 +149,13 @@ abstract interface class EngineApi {
     required int targetLayerId,
     required int sourceLayerId,
   });
+
+  /// Returns an actionable reason when the merge cannot be performed.
+  Future<String?> preflightMergeLayers({
+    required int targetLayerId,
+    required int sourceLayerId,
+  });
+  Future<int> mergeLayersBulk({required List<int> layerIds});
   Future<void> selectRectangle({
     required double x0,
     required double y0,
@@ -289,6 +338,13 @@ abstract interface class EngineApi {
     required bool clipping,
     required bool reference,
   });
+  Future<int> beginLayerOpacityEdit({required int layerId});
+  Future<void> updateLayerOpacityEdit({
+    required int editId,
+    required double opacity,
+  });
+  Future<void> commitLayerOpacityEdit({required int editId});
+  Future<void> cancelLayerOpacityEdit({required int editId});
   Future<void> updateLayerPresentation({
     required int layerId,
     required String name,

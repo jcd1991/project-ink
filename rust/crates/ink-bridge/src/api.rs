@@ -7,6 +7,7 @@ use ink_comic::{
     ProjectTemplate, Rect, TextOrientation, TextStyle, ToneLayer,
 };
 pub use ink_command::EditorCommand;
+use ink_engine::BrushPreviewPoint as EngineBrushPreviewPoint;
 use ink_engine::{CompositeTileReadSnapshot, Document};
 pub use ink_engine::{EngineError, EngineEvent};
 use ink_model::{BrushId, DocumentId, StrokeId};
@@ -36,6 +37,21 @@ pub struct HistoryEntryView {
     pub kind: String,
     pub detail: Option<String>,
     pub applied: bool,
+}
+
+/// Persisted layer-panel selection and group disclosure for one document page.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LayerPanelStateView {
+    pub primary_layer_id: Option<u128>,
+    pub collapsed_group_ids: Vec<String>,
+}
+
+/// Normalized scratchpad sample sent to the bounded Rust preview renderer.
+#[derive(Clone, Copy, Debug)]
+pub struct BrushPreviewPoint {
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
 }
 
 /// Immutable pixels and revision captured for a bounded composite-tile read.
@@ -3400,6 +3416,7 @@ pub struct DocumentInfo {
 #[allow(dead_code)]
 pub struct BrushSummary {
     pub id: u128,
+    pub is_builtin: bool,
     pub name: String,
     pub tags: Vec<String>,
     pub diameter_px: f32,
@@ -3530,6 +3547,9 @@ fn report_view(value: &ink_brush::BrushImportReport, brush_count: u32) -> BrushI
 pub struct LayerSummary {
     pub id: u128,
     pub parent: Option<u128>,
+    pub mask_owner: Option<u128>,
+    pub mask_enabled: bool,
+    pub mask_inverted: bool,
     pub order: u32,
     pub kind: String,
     pub name: String,
@@ -3538,11 +3558,27 @@ pub struct LayerSummary {
     pub blend_mode: String,
     pub group_mode: String,
     pub alpha_lock: bool,
+    pub locked: bool,
     pub clipping: bool,
     pub reference: bool,
     pub label_rgba: Option<u32>,
     pub adjustment_brightness: i16,
     pub adjustment_contrast: i16,
+    pub can_drag: bool,
+    pub drag_reason: Option<String>,
+    pub can_receive_layers: bool,
+    pub receive_reason: Option<String>,
+    pub can_edit_properties: bool,
+    pub edit_properties_reason: Option<String>,
+    pub can_duplicate: bool,
+    pub duplicate_reason: Option<String>,
+    pub can_delete: bool,
+    pub delete_reason: Option<String>,
+    pub can_ungroup: bool,
+    pub ungroup_reason: Option<String>,
+    pub can_apply_mask: bool,
+    pub apply_mask_reason: Option<String>,
+    pub merge_down_reason: Option<String>,
 }
 
 /// Bounded editable vector-stroke projection used by the vector inspector.
@@ -3696,6 +3732,20 @@ pub fn open_document(path: String) -> Result<DocumentHandle, EngineError> {
                 "PSD exceeds the 512 MiB import limit".into(),
             ));
         }
+        // Check the aggregate source + decoded image + initial raster-layer
+        // footprint from the fixed-size header before allocating the source
+        // buffer. The decoder repeats this validation before allocating RGBA.
+        let mut header = [0_u8; 26];
+        std::fs::File::open(&path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
+        if &header[..4] == b"8BPS" {
+            let width = u32::from_be_bytes([header[18], header[19], header[20], header[21]]);
+            let height = u32::from_be_bytes([header[14], header[15], header[16], header[17]]);
+            ink_export::validate_psd_import_budget(metadata.len(), width, height).map_err(
+                |error| EngineError::InvalidCommand(format!("PSD import failed: {error}")),
+            )?;
+        }
         let file = std::fs::File::open(&path)
             .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
         let mut bytes = Vec::new();
@@ -3831,11 +3881,330 @@ pub fn delete_layer(handle: &mut DocumentHandle, layer: u128) -> Result<u64, Eng
     document_mut(handle)?.delete_layer(ink_model::LayerId::from_u128(layer))
 }
 
+/// Delete several selected layer roots and descendants as one undoable edit.
+pub fn delete_layers(handle: &mut DocumentHandle, layers: Vec<u128>) -> Result<u64, EngineError> {
+    document_mut(handle)?.delete_layers(
+        layers
+            .into_iter()
+            .map(ink_model::LayerId::from_u128)
+            .collect(),
+    )
+}
+
+/// Return an engine-authored reason when selected page layers cannot be
+/// deleted. The query does not change revision, content, or history.
+pub fn preflight_delete_layers(
+    handle: &DocumentHandle,
+    layers: Vec<u128>,
+) -> Result<Option<String>, EngineError> {
+    document(handle)?.preflight_delete_layers(
+        &layers
+            .into_iter()
+            .map(ink_model::LayerId::from_u128)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Preflight page deletion while preserving project-owned comic layers.
+pub fn preflight_delete_project_layers(
+    handle: &StudioProjectHandle,
+    layer_ids: Vec<u128>,
+) -> Result<Option<String>, EngineError> {
+    let project = studio_project(handle)?;
+    let bound = project
+        .panel_layers
+        .iter()
+        .flat_map(|binding| {
+            [
+                binding.panel_group_id,
+                binding.mask_layer_id,
+                binding.sketch_layer_id,
+                binding.ink_layer_id,
+                binding.color_layer_id,
+                binding.tone_layer_id,
+                binding.effects_layer_id,
+            ]
+        })
+        .collect::<HashSet<_>>();
+    let active_document = studio_active_document(handle)?;
+    let layer_views = layers(active_document)?;
+    let mut removed = HashSet::new();
+    for id in &layer_ids {
+        let root = ink_model::LayerId::from_u128(*id);
+        let mut subtree = vec![root];
+        let mut cursor = 0;
+        while cursor < subtree.len() {
+            let parent = subtree[cursor];
+            for child in layer_views.iter().filter(|candidate| {
+                candidate.parent == Some(parent) || candidate.mask_owner == Some(parent)
+            }) {
+                if !subtree.contains(&child.id) {
+                    subtree.push(child.id);
+                }
+            }
+            cursor += 1;
+        }
+        removed.extend(subtree.into_iter().map(|layer| layer.0));
+    }
+    if removed.iter().any(|id| bound.contains(id)) {
+        return Ok(Some(
+            "Comic-owned layers must be removed through the Comics workspace.".into(),
+        ));
+    }
+    document(active_document)?.preflight_delete_layers(
+        &layer_ids
+            .into_iter()
+            .map(ink_model::LayerId::from_u128)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Set visibility on distinct layers as one undoable operation.
+pub fn set_layers_visibility(
+    handle: &mut DocumentHandle,
+    layers: Vec<u128>,
+    visible: bool,
+) -> Result<u64, EngineError> {
+    dispatch(
+        handle,
+        EditorCommand::SetLayersVisibility {
+            layers: layers
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+            visible,
+        },
+    )
+}
+
+/// Set or clear the session-only Solo presentation override for one layer.
+pub fn set_layer_solo(
+    handle: &mut DocumentHandle,
+    layer: Option<u128>,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.set_layer_solo(layer.map(ink_model::LayerId::from_u128))
+}
+
+/// Set or clear a layer's full content and property lock.
+pub fn set_layer_locked(
+    handle: &mut DocumentHandle,
+    layer: u128,
+    locked: bool,
+) -> Result<u64, EngineError> {
+    let layer_id = ink_model::LayerId::from_u128(layer);
+    if document(handle)?
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == layer_id)
+        .ok_or(EngineError::InvalidLayer)?
+        .locked
+        == locked
+    {
+        return revision(handle);
+    }
+    dispatch(
+        handle,
+        EditorCommand::SetLayerLocked {
+            layer: layer_id,
+            locked,
+        },
+    )
+}
+
+/// Enable or disable an attached mask with one undoable property change.
+pub fn set_mask_enabled(
+    handle: &mut DocumentHandle,
+    mask: u128,
+    enabled: bool,
+) -> Result<u64, EngineError> {
+    let mask_id = ink_model::LayerId::from_u128(mask);
+    let current = document(handle)?
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == mask_id)
+        .ok_or(EngineError::InvalidLayer)?;
+    if current.kind != LayerKind::Mask {
+        return Err(EngineError::InvalidCommand(
+            "mask operation requires a mask layer".into(),
+        ));
+    }
+    if current.mask_enabled == enabled {
+        return revision(handle);
+    }
+    dispatch(
+        handle,
+        EditorCommand::SetMaskEnabled {
+            mask: mask_id,
+            enabled,
+        },
+    )
+}
+
+/// Invert an attached mask without rewriting pixels.
+pub fn set_mask_inverted(
+    handle: &mut DocumentHandle,
+    mask: u128,
+    inverted: bool,
+) -> Result<u64, EngineError> {
+    let mask_id = ink_model::LayerId::from_u128(mask);
+    let current = document(handle)?
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == mask_id)
+        .ok_or(EngineError::InvalidLayer)?;
+    if current.kind != LayerKind::Mask {
+        return Err(EngineError::InvalidCommand(
+            "mask operation requires a mask layer".into(),
+        ));
+    }
+    if current.mask_inverted == inverted {
+        return revision(handle);
+    }
+    dispatch(
+        handle,
+        EditorCommand::SetMaskInverted {
+            mask: mask_id,
+            inverted,
+        },
+    )
+}
+
+/// Bake an attached mask into its raster owner and remove the mask in one edit.
+pub fn apply_layer_mask(handle: &mut DocumentHandle, mask: u128) -> Result<u64, EngineError> {
+    dispatch(
+        handle,
+        EditorCommand::ApplyLayerMask {
+            mask: ink_model::LayerId::from_u128(mask),
+        },
+    )
+}
+
+/// Set or clear full locks on distinct selected layers in one undoable edit.
+pub fn set_layers_locked(
+    handle: &mut DocumentHandle,
+    layers: Vec<u128>,
+    locked: bool,
+) -> Result<u64, EngineError> {
+    let layers: Vec<_> = layers
+        .into_iter()
+        .map(ink_model::LayerId::from_u128)
+        .collect();
+    if layers.is_empty()
+        || layers
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != layers.len()
+    {
+        return Err(EngineError::InvalidCommand(
+            "bulk lock requires distinct layer IDs".into(),
+        ));
+    }
+    let current = document(handle)?.layers();
+    if layers.iter().all(|id| {
+        current
+            .iter()
+            .any(|layer| layer.id == *id && layer.locked == locked)
+    }) {
+        return revision(handle);
+    }
+    dispatch(handle, EditorCommand::SetLayersLocked { layers, locked })
+}
+
+/// Set or clear color labels on distinct selected layers in one undoable edit.
+/// `label_rgba` is packed as `0xRRGGBBAA`; `None` clears the labels.
+pub fn set_layers_label(
+    handle: &mut DocumentHandle,
+    layers: Vec<u128>,
+    label_rgba: Option<u32>,
+) -> Result<u64, EngineError> {
+    let layers: Vec<_> = layers
+        .into_iter()
+        .map(ink_model::LayerId::from_u128)
+        .collect();
+    if layers.is_empty() || layers.iter().copied().collect::<HashSet<_>>().len() != layers.len() {
+        return Err(EngineError::InvalidCommand(
+            "bulk label requires distinct layer IDs".into(),
+        ));
+    }
+    let label = label_rgba.map(|packed| Rgba8 {
+        r: (packed >> 24) as u8,
+        g: (packed >> 16) as u8,
+        b: (packed >> 8) as u8,
+        a: packed as u8,
+    });
+    dispatch(handle, EditorCommand::SetLayersLabel { layers, label })
+}
+
+/// Reorder selected sibling roots as one undoable stack operation.
+pub fn reorder_layers(
+    handle: &mut DocumentHandle,
+    layers: Vec<u128>,
+    index: u32,
+) -> Result<u64, EngineError> {
+    dispatch(
+        handle,
+        EditorCommand::ReorderLayers {
+            layers: layers
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+            index,
+        },
+    )
+}
+
 /// Duplicate a leaf layer within the active page document.
 pub fn duplicate_layer(handle: &mut DocumentHandle, source: u128) -> Result<u128, EngineError> {
     document_mut(handle)?
         .duplicate_layer(ink_model::LayerId::from_u128(source))
         .map(|id| id.0)
+}
+
+/// Duplicate multiple sibling layer roots and their owned hierarchy atomically.
+pub fn duplicate_layers(
+    handle: &mut DocumentHandle,
+    sources: Vec<u128>,
+) -> Result<Vec<u128>, EngineError> {
+    document_mut(handle)?
+        .duplicate_layers(
+            sources
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+        )
+        .map(|ids| ids.into_iter().map(|id| id.0).collect())
+}
+
+/// Group selected sibling layers in a single undoable pass-through group.
+pub fn group_layers(handle: &mut DocumentHandle, members: Vec<u128>) -> Result<u128, EngineError> {
+    document_mut(handle)?
+        .group_layers(
+            members
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+        )
+        .map(|id| id.0)
+}
+
+/// Return an actionable reason when selected layers cannot be grouped.
+pub fn preflight_group_layers(
+    handle: &DocumentHandle,
+    members: Vec<u128>,
+) -> Result<Option<String>, EngineError> {
+    document(handle)?.preflight_group_layers(
+        &members
+            .into_iter()
+            .map(ink_model::LayerId::from_u128)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Ungroup a compositing-safe ordinary layer group as one undoable edit.
+pub fn ungroup_layer(handle: &mut DocumentHandle, group: u128) -> Result<u64, EngineError> {
+    document_mut(handle)?.ungroup_layer(ink_model::LayerId::from_u128(group))
 }
 
 /// Duplicate a page layer through the active studio project document handle.
@@ -3846,6 +4215,21 @@ pub fn duplicate_project_layer(
     document_mut(studio_active_document_mut(handle)?)?
         .duplicate_layer(ink_model::LayerId::from_u128(source))
         .map(|id| id.0)
+}
+
+/// Duplicate multiple sibling roots in the active unified-project page.
+pub fn duplicate_project_layers(
+    handle: &mut StudioProjectHandle,
+    sources: Vec<u128>,
+) -> Result<Vec<u128>, EngineError> {
+    document_mut(studio_active_document_mut(handle)?)?
+        .duplicate_layers(
+            sources
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+        )
+        .map(|ids| ids.into_iter().map(|id| id.0).collect())
 }
 
 /// Delete a page layer while preserving the unified comic project's panel
@@ -3892,6 +4276,58 @@ pub fn delete_project_layer(
     }
     document_mut(studio_active_document_mut(handle)?)?
         .delete_layer(ink_model::LayerId::from_u128(layer))
+}
+
+/// Atomically delete selected page layers while preserving comic ownership.
+pub fn delete_project_layers(
+    handle: &mut StudioProjectHandle,
+    layer_ids: Vec<u128>,
+) -> Result<u64, EngineError> {
+    let bound = studio_project(handle)?
+        .panel_layers
+        .iter()
+        .flat_map(|binding| {
+            [
+                binding.panel_group_id,
+                binding.mask_layer_id,
+                binding.sketch_layer_id,
+                binding.ink_layer_id,
+                binding.color_layer_id,
+                binding.tone_layer_id,
+                binding.effects_layer_id,
+            ]
+        })
+        .collect::<HashSet<_>>();
+    let layer_views = layers(studio_active_document(handle)?)?;
+    let mut removed = HashSet::new();
+    for id in &layer_ids {
+        let mut subtree = vec![*id];
+        let mut cursor = 0;
+        while cursor < subtree.len() {
+            let parent = ink_model::LayerId::from_u128(subtree[cursor]);
+            for child in layer_views
+                .iter()
+                .filter(|candidate| candidate.parent == Some(parent))
+            {
+                if !subtree.contains(&child.id.0) {
+                    subtree.push(child.id.0);
+                }
+            }
+            cursor += 1;
+        }
+        removed.extend(subtree);
+    }
+    if removed.iter().any(|id| bound.contains(id)) {
+        return Err(EngineError::InvalidCommand(
+            "comic-owned layers must be removed through the comic workspace".into(),
+        ));
+    }
+    document_mut(studio_active_document_mut(handle)?)?.delete_layers(
+        layer_ids
+            .into_iter()
+            .map(ink_model::LayerId::from_u128)
+            .collect(),
+    )
 }
 
 /// Move a layer within the validated sibling list. The index is a position
@@ -3979,6 +4415,53 @@ pub fn merge_layers(
         ink_model::LayerId::from_u128(target_layer),
         ink_model::LayerId::from_u128(source_layer),
     )
+}
+
+/// Validate a two-layer merge without mutating the active document.
+pub fn preflight_merge_layers(
+    handle: &DocumentHandle,
+    target_layer: u128,
+    source_layer: u128,
+) -> String {
+    match document(handle).and_then(|document| {
+        document.preflight_merge_layers(
+            ink_model::LayerId::from_u128(target_layer),
+            ink_model::LayerId::from_u128(source_layer),
+        )
+    }) {
+        Ok(()) => String::new(),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// Merge contiguous selected sibling rasters in the active document.
+pub fn merge_layers_bulk(
+    handle: &mut DocumentHandle,
+    layers: Vec<u128>,
+) -> Result<u128, EngineError> {
+    document_mut(handle)?
+        .merge_layers_bulk(
+            layers
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+        )
+        .map(|id| id.0)
+}
+
+/// Merge contiguous selected sibling rasters on the active unified-project page.
+pub fn merge_project_layers_bulk(
+    handle: &mut StudioProjectHandle,
+    layers: Vec<u128>,
+) -> Result<u128, EngineError> {
+    document_mut(studio_active_document_mut(handle)?)?
+        .merge_layers_bulk(
+            layers
+                .into_iter()
+                .map(ink_model::LayerId::from_u128)
+                .collect(),
+        )
+        .map(|id| id.0)
 }
 
 /// Begin the built-in technical-pen stroke on the active raster layer.
@@ -4174,6 +4657,32 @@ pub fn cancel_brush_draft(handle: &mut DocumentHandle, draft_id: u64) -> Result<
     document_mut(handle)?.cancel_brush_draft(draft_id)
 }
 
+/// Render a bounded brush-editor scratch stroke as a transparent PNG.
+pub fn render_brush_preview_png(
+    handle: &mut DocumentHandle,
+    brush_id: u128,
+    width: u16,
+    height: u16,
+    points: Vec<BrushPreviewPoint>,
+) -> Result<Vec<u8>, EngineError> {
+    let engine_points = points
+        .into_iter()
+        .map(|point| EngineBrushPreviewPoint {
+            x: point.x,
+            y: point.y,
+            pressure: point.pressure,
+        })
+        .collect::<Vec<_>>();
+    let pixels = document_mut(handle)?.render_brush_preview_rgba8(
+        BrushId::from_u128(brush_id),
+        width,
+        height,
+        &engine_points,
+    )?;
+    ink_export::encode_png(u32::from(width), u32::from(height), &pixels)
+        .map_err(|error| EngineError::InvalidCommand(format!("brush preview PNG failed: {error}")))
+}
+
 /// Apply the common editable layer flags through shared command IDs.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)]
@@ -4227,6 +4736,39 @@ pub fn update_layer_properties(
         )?;
     }
     Ok(latest_revision)
+}
+
+/// Begin an opacity-slider preview for one stable layer ID.
+pub fn begin_layer_opacity_edit(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.begin_layer_opacity_edit(ink_model::LayerId::from_u128(layer_id))
+}
+
+/// Update the temporary opacity preview without creating history entries.
+pub fn update_layer_opacity_edit(
+    handle: &mut DocumentHandle,
+    edit_id: u64,
+    opacity: u16,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.update_layer_opacity_edit(edit_id, opacity)
+}
+
+/// Commit a slider preview as one undoable command.
+pub fn commit_layer_opacity_edit(
+    handle: &mut DocumentHandle,
+    edit_id: u64,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.commit_layer_opacity_edit(edit_id)
+}
+
+/// Cancel a slider preview and restore its gesture-start opacity.
+pub fn cancel_layer_opacity_edit(
+    handle: &mut DocumentHandle,
+    edit_id: u64,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.cancel_layer_opacity_edit(edit_id)
 }
 
 /// Apply the non-destructive layer presentation fields through journaled
@@ -4862,6 +5404,7 @@ pub fn builtin_brushes() -> Vec<BrushSummary> {
         .into_iter()
         .map(|brush| BrushSummary {
             id: brush.id.0,
+            is_builtin: true,
             name: brush.metadata.name,
             tags: brush.metadata.tags,
             diameter_px: 12.0,
@@ -4891,6 +5434,7 @@ pub fn brushes(handle: &DocumentHandle) -> Result<Vec<BrushSummary>, EngineError
         .into_iter()
         .map(|summary| BrushSummary {
             id: summary.id.0,
+            is_builtin: summary.is_builtin,
             name: summary.name,
             tags: summary.tags,
             diameter_px: summary.diameter_px,
@@ -5384,40 +5928,107 @@ pub fn layers(handle: &DocumentHandle) -> Result<Vec<Layer>, EngineError> {
     Ok(document(handle)?.layers())
 }
 
+/// Read the durable layer-panel state for the active document/page.
+pub fn layer_panel_state(handle: &DocumentHandle) -> Result<LayerPanelStateView, EngineError> {
+    let state = document(handle)?.layer_panel_state();
+    Ok(LayerPanelStateView {
+        primary_layer_id: state.primary_layer.map(|layer| layer.0),
+        collapsed_group_ids: state
+            .collapsed_groups
+            .into_iter()
+            .map(|group| group.0.to_string())
+            .collect(),
+    })
+}
+
+/// Persist the primary target and collapsed groups without creating a content
+/// history entry. Validation and project revision ownership stay in Rust.
+pub fn set_layer_panel_state(
+    handle: &mut DocumentHandle,
+    primary_layer_id: Option<u128>,
+    collapsed_group_ids: Vec<u128>,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.set_layer_panel_state(
+        primary_layer_id.map(ink_model::LayerId::from_u128),
+        collapsed_group_ids
+            .into_iter()
+            .map(ink_model::LayerId::from_u128)
+            .collect(),
+    )
+}
+
 /// Return immutable layer projections without leaking the engine's layer map.
 pub fn layer_summaries(handle: &DocumentHandle) -> Result<Vec<LayerSummary>, EngineError> {
-    Ok(document(handle)?
+    let document = document(handle)?;
+    let capabilities = document
+        .layer_drag_capabilities()?
+        .into_iter()
+        .map(|capability| (capability.layer_id, capability))
+        .collect::<std::collections::HashMap<_, _>>();
+    let action_capabilities = document
+        .layer_action_capabilities()?
+        .into_iter()
+        .map(|capability| (capability.layer_id, capability))
+        .collect::<std::collections::HashMap<_, _>>();
+    document
         .layers()
         .into_iter()
-        .map(|layer| LayerSummary {
-            id: layer.id.0,
-            parent: layer.parent.map(|id| id.0),
-            order: layer.order,
-            kind: layer_kind_name(layer.kind).to_owned(),
-            name: layer.name,
-            opacity: layer.opacity,
-            visible: layer.visible,
-            blend_mode: blend_mode_name(layer.blend_mode).to_owned(),
-            group_mode: group_mode_name(layer.group_mode).to_owned(),
-            alpha_lock: layer.alpha_lock,
-            clipping: layer.clipping,
-            reference: layer.reference,
-            label_rgba: layer.label.map(|value| {
-                (u32::from(value.r) << 24)
-                    | (u32::from(value.g) << 16)
-                    | (u32::from(value.b) << 8)
-                    | u32::from(value.a)
-            }),
-            adjustment_brightness: match layer.adjustment {
-                Some(LayerAdjustment::BrightnessContrast { brightness, .. }) => brightness,
-                None => 0,
-            },
-            adjustment_contrast: match layer.adjustment {
-                Some(LayerAdjustment::BrightnessContrast { contrast, .. }) => contrast,
-                None => 0,
-            },
+        .map(|layer| {
+            let capability = capabilities
+                .get(&layer.id)
+                .ok_or(EngineError::InvalidLayer)?;
+            let actions = action_capabilities
+                .get(&layer.id)
+                .ok_or(EngineError::InvalidLayer)?;
+            Ok(LayerSummary {
+                id: layer.id.0,
+                parent: layer.parent.map(|id| id.0),
+                mask_owner: layer.mask_owner.map(|id| id.0),
+                mask_enabled: layer.mask_enabled,
+                mask_inverted: layer.mask_inverted,
+                order: layer.order,
+                kind: layer_kind_name(layer.kind).to_owned(),
+                name: layer.name,
+                opacity: layer.opacity,
+                visible: layer.visible,
+                blend_mode: blend_mode_name(layer.blend_mode).to_owned(),
+                group_mode: group_mode_name(layer.group_mode).to_owned(),
+                alpha_lock: layer.alpha_lock,
+                locked: layer.locked,
+                clipping: layer.clipping,
+                reference: layer.reference,
+                label_rgba: layer.label.map(|value| {
+                    (u32::from(value.r) << 24)
+                        | (u32::from(value.g) << 16)
+                        | (u32::from(value.b) << 8)
+                        | u32::from(value.a)
+                }),
+                adjustment_brightness: match layer.adjustment {
+                    Some(LayerAdjustment::BrightnessContrast { brightness, .. }) => brightness,
+                    None => 0,
+                },
+                adjustment_contrast: match layer.adjustment {
+                    Some(LayerAdjustment::BrightnessContrast { contrast, .. }) => contrast,
+                    None => 0,
+                },
+                can_drag: capability.can_drag,
+                drag_reason: capability.drag_reason.clone(),
+                can_receive_layers: capability.can_receive_layers,
+                receive_reason: capability.receive_reason.clone(),
+                can_edit_properties: actions.can_edit_properties,
+                edit_properties_reason: actions.edit_properties_reason.clone(),
+                can_duplicate: actions.can_duplicate,
+                duplicate_reason: actions.duplicate_reason.clone(),
+                can_delete: actions.can_delete,
+                delete_reason: actions.delete_reason.clone(),
+                can_ungroup: actions.can_ungroup,
+                ungroup_reason: actions.ungroup_reason.clone(),
+                can_apply_mask: actions.can_apply_mask,
+                apply_mask_reason: actions.apply_mask_reason.clone(),
+                merge_down_reason: actions.merge_down_reason.clone(),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Return editable vector-stroke metadata for one vector layer.

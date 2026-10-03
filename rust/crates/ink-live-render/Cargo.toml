@@ -17,10 +17,9 @@ metal = "0.28.0"
 wgpu-hal = { version = "0.21.1", features = ["metal"] }
 
 [lints.rust]
-# The Apple IOSurface adapter imports a texture owned by the Flutter texture
-# registry. Its unsafe boundary is confined to the Metal import methods and
-# validates dimensions/format before handing ownership to wgpu.
-unsafe_code = "allow"
+# Unsafe is denied throughout the crate; only the documented Metal handle
+# boundary opts in at the individual function level.
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [[example]]

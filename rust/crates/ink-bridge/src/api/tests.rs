@@ -174,7 +174,6 @@ fn composite_tile_snapshot_has_one_revision_for_all_pixels() {
     assert_eq!(u32::from_le_bytes(snapshot[12..16].try_into().unwrap()), 2);
     assert_eq!(i32::from_le_bytes(snapshot[16..20].try_into().unwrap()), 0);
     assert_eq!(i32::from_le_bytes(snapshot[20..24].try_into().unwrap()), 0);
-    let first_tile = &snapshot[24..24 + COMPOSITE_SNAPSHOT_TILE_BYTES];
     let second_record = COMPOSITE_SNAPSHOT_HEADER_BYTES + COMPOSITE_SNAPSHOT_RECORD_BYTES;
     assert_eq!(
         i32::from_le_bytes(
@@ -192,19 +191,24 @@ fn composite_tile_snapshot_has_one_revision_for_all_pixels() {
         ),
         0
     );
-    assert_eq!(
-        snapshot_revision,
-        document(&handle).expect("document").revision()
-    );
+    // A worker may commit the confirmed stroke after the immutable snapshot
+    // was captured. The snapshot must report a revision no newer than the
+    // document, but equality would make this check race with that commit.
+    assert!(snapshot_revision <= document(&handle).expect("document").revision());
+    end_stroke(&mut handle).expect("close stroke");
+    let committed = capture_composite_tiles_snapshot(&handle, &[0, 0, 0, 0])
+        .expect("capture committed snapshot");
+    let committed =
+        compose_composite_tiles_snapshot(&committed).expect("compose committed snapshot");
+    let committed_tile = &committed[24..24 + COMPOSITE_SNAPSHOT_TILE_BYTES];
     assert!(
-        first_tile
+        committed_tile
             .as_chunks::<4>()
             .0
             .iter()
-            .any(|pixel| pixel[3] != 0)
+            .any(|pixel| pixel[3] != 0),
+        "ending the stroke must publish its pixels before the final snapshot"
     );
-
-    end_stroke(&mut handle).expect("close stroke");
     close_document(&mut handle).expect("close document");
 }
 
@@ -344,6 +348,86 @@ fn engine_health_marker_is_stable() {
 }
 
 #[test]
+fn layer_summary_projects_rust_drag_reasons_for_locked_groups() {
+    let mut handle = create_default_document(0xD30A, 64, 64, 144.0).expect("default document");
+    let group = add_layer(&mut handle, 2).expect("ordinary group");
+    let child = add_layer_to_parent(&mut handle, 0, group).expect("group child");
+    set_layer_locked(&mut handle, group, true).expect("lock group");
+
+    let summaries = layer_summaries(&handle).expect("layer summaries");
+    let group_summary = summaries
+        .iter()
+        .find(|layer| layer.id == group)
+        .expect("group summary");
+    assert!(!group_summary.can_receive_layers);
+    assert!(
+        group_summary
+            .receive_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unlock it before moving layers inside"))
+    );
+    let child_summary = summaries
+        .iter()
+        .find(|layer| layer.id == child)
+        .expect("child summary");
+    assert!(!child_summary.can_drag);
+    assert!(
+        child_summary
+            .drag_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Locked by Layer 2"))
+    );
+    assert!(!child_summary.can_edit_properties);
+    assert!(
+        child_summary
+            .edit_properties_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unlock it before changing properties"))
+    );
+    assert!(!child_summary.can_duplicate);
+    assert!(
+        child_summary
+            .duplicate_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Locked by Layer 2"))
+    );
+    assert!(!group_summary.can_delete);
+
+    let mask_owner_group = add_layer(&mut handle, 2).expect("mask owner group");
+    let mask =
+        add_layer_to_parent(&mut handle, 3, mask_owner_group).expect("mask attached to group");
+    let mask_summary = layer_summaries(&handle)
+        .expect("mask summary")
+        .into_iter()
+        .find(|layer| layer.id == mask)
+        .expect("mask layer summary");
+    assert!(!mask_summary.can_apply_mask);
+    assert_eq!(
+        mask_summary.apply_mask_reason.as_deref(),
+        Some("Apply Mask is supported for raster owners only.")
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn merge_preflight_reports_engine_rules_without_mutating_the_layer_tree() {
+    let mut handle = create_default_document(0xD312, 64, 64, 144.0).expect("default document");
+    let target = layer_summaries(&handle)
+        .expect("initial layer")
+        .into_iter()
+        .next()
+        .expect("paint layer")
+        .id;
+    let group = add_layer(&mut handle, 2).expect("group layer");
+    assert!(preflight_merge_layers(&handle, target, group).contains("two raster layers"));
+    let summaries = layer_summaries(&handle).expect("layers remain intact");
+    assert_eq!(summaries.len(), 2);
+    assert!(summaries.iter().any(|layer| layer.id == target));
+    assert!(summaries.iter().any(|layer| layer.id == group));
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
 fn deleting_a_leaf_layer_uses_undoable_bridge_command() {
     let mut handle = create_default_document(0xD311, 256, 256, 144.0).expect("default document");
     let added = add_layer(&mut handle, 0).expect("added raster layer");
@@ -372,28 +456,581 @@ fn deleting_a_leaf_layer_uses_undoable_bridge_command() {
 }
 
 #[test]
+fn attached_mask_owner_is_exposed_in_layer_projection() {
+    let mut handle = create_default_document(0xD318, 256, 256, 144.0).expect("default document");
+    let owner = layer_summaries(&handle)
+        .expect("base layer projection")
+        .into_iter()
+        .find(|layer| layer.kind == "Raster")
+        .expect("base paint layer")
+        .id;
+    let mask = add_layer(&mut handle, 3).expect("attached mask");
+    let summary = layer_summaries(&handle)
+        .expect("mask projection")
+        .into_iter()
+        .find(|layer| layer.id == mask)
+        .expect("mask row");
+    assert_eq!(summary.kind, "Mask");
+    assert_eq!(summary.mask_owner, Some(owner));
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn applying_attached_mask_is_undoable_through_bridge() {
+    let mut handle = create_default_document(0xD319, 64, 64, 144.0).expect("default document");
+    let mask = add_layer(&mut handle, 3).expect("attached mask");
+    let before = revision(&handle).expect("revision before apply");
+    let applied = apply_layer_mask(&mut handle, mask).expect("apply attached mask");
+    assert_eq!(applied, before + 1);
+    assert!(
+        layer_summaries(&handle)
+            .expect("layers after apply")
+            .iter()
+            .all(|layer| layer.id != mask)
+    );
+    undo(&mut handle).expect("undo applied mask");
+    assert!(
+        layer_summaries(&handle)
+            .expect("layers after undo")
+            .iter()
+            .any(|layer| layer.id == mask)
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn layer_opacity_preview_and_cancel_use_stable_bridge_edit_ids() {
+    let mut handle = create_default_document(0xD320, 64, 64, 144.0).expect("default document");
+    let layer = layer_summaries(&handle)
+        .expect("layer summaries")
+        .into_iter()
+        .find(|candidate| candidate.kind == "Raster")
+        .expect("paint layer")
+        .id;
+    let original = layer_summaries(&handle)
+        .expect("layer summaries")
+        .into_iter()
+        .find(|candidate| candidate.id == layer)
+        .expect("paint layer")
+        .opacity;
+    let before = history_snapshot(&mut handle, 50)
+        .expect("history before edit")
+        .cursor;
+    let edit = begin_layer_opacity_edit(&mut handle, layer).expect("begin preview");
+    update_layer_opacity_edit(&mut handle, edit, u16::MAX / 2).expect("preview");
+    assert_eq!(
+        layer_summaries(&handle)
+            .expect("preview layer summaries")
+            .into_iter()
+            .find(|candidate| candidate.id == layer)
+            .expect("preview paint layer")
+            .opacity,
+        u16::MAX / 2
+    );
+    assert_eq!(
+        history_snapshot(&mut handle, 50)
+            .expect("preview history")
+            .cursor,
+        before
+    );
+    commit_layer_opacity_edit(&mut handle, edit).expect("commit preview");
+    assert_eq!(
+        history_snapshot(&mut handle, 50)
+            .expect("committed history")
+            .cursor,
+        before + 1
+    );
+    undo(&mut handle).expect("undo preview");
+    assert_eq!(
+        layer_summaries(&handle)
+            .expect("undo summaries")
+            .into_iter()
+            .find(|candidate| candidate.id == layer)
+            .expect("undo paint layer")
+            .opacity,
+        original
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn deleting_selected_layers_is_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD317, 256, 256, 144.0).expect("default document");
+    let first = add_layer(&mut handle, 0).expect("first raster layer");
+    let second = add_layer(&mut handle, 0).expect("second raster layer");
+    delete_layers(&mut handle, vec![first, second]).expect("bulk delete through bridge");
+    let deleted = layer_summaries(&handle).expect("projection after deletion");
+    assert!(
+        deleted
+            .iter()
+            .all(|layer| layer.id != first && layer.id != second)
+    );
+
+    undo(&mut handle).expect("undo bulk deletion");
+    let restored = layer_summaries(&handle).expect("projection after undo");
+    assert!(restored.iter().any(|layer| layer.id == first));
+    assert!(restored.iter().any(|layer| layer.id == second));
+    redo(&mut handle).expect("redo bulk deletion");
+    assert!(
+        layer_summaries(&handle)
+            .expect("projection after redo")
+            .iter()
+            .all(|layer| layer.id != first && layer.id != second)
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn delete_preflight_projects_lock_and_final_layer_reasons_without_mutation() {
+    let mut handle = create_default_document(0xD31A, 64, 64, 144.0).expect("default document");
+    let primary = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let second = add_layer(&mut handle, 0).expect("second raster");
+    let revision_before = revision(&handle).expect("revision before preflight");
+    assert_eq!(
+        preflight_delete_layers(&handle, vec![second]).expect("valid preflight"),
+        None
+    );
+    assert_eq!(
+        revision(&handle).expect("revision after preflight"),
+        revision_before
+    );
+
+    set_layer_locked(&mut handle, second, true).expect("lock selected layer");
+    let locked_revision = revision(&handle).expect("locked revision");
+    let locked_reason = preflight_delete_layers(&handle, vec![second])
+        .expect("locked preflight")
+        .expect("locked layer is unavailable");
+    assert!(locked_reason.contains("unlock the owning layer or group first"));
+    assert_eq!(
+        revision(&handle).expect("revision after locked preflight"),
+        locked_revision
+    );
+
+    set_layer_locked(&mut handle, second, false).expect("unlock selected layer");
+    let unlocked_revision = revision(&handle).expect("unlocked revision");
+    assert_eq!(
+        preflight_delete_layers(&handle, vec![primary, second]).expect("final-layer preflight"),
+        Some("a document must keep at least one layer".into())
+    );
+    assert_eq!(
+        revision(&handle).expect("revision after final-layer preflight"),
+        unlocked_revision
+    );
+    assert_eq!(layer_summaries(&handle).expect("unchanged layers").len(), 2);
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn duplicating_selected_layers_is_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD318, 256, 256, 144.0).expect("default document");
+    let first = add_layer(&mut handle, 0).expect("first raster layer");
+    let second = add_layer(&mut handle, 0).expect("second raster layer");
+    let duplicates =
+        duplicate_layers(&mut handle, vec![first, second]).expect("bulk duplicate through bridge");
+    assert_eq!(duplicates.len(), 2);
+    let copied = layer_summaries(&handle).expect("duplicate projection");
+    assert!(
+        duplicates
+            .iter()
+            .all(|id| copied.iter().any(|layer| layer.id == *id))
+    );
+    undo(&mut handle).expect("undo bulk duplicate");
+    let restored = layer_summaries(&handle).expect("projection after undo");
+    assert!(
+        duplicates
+            .iter()
+            .all(|id| restored.iter().all(|layer| layer.id != *id))
+    );
+    assert!(restored.iter().any(|layer| layer.id == first));
+    assert!(restored.iter().any(|layer| layer.id == second));
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn merging_selected_layers_is_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD319, 256, 256, 144.0).expect("default document");
+    let bottom = add_layer(&mut handle, 0).expect("bottom raster");
+    let top = add_layer(&mut handle, 0).expect("top raster");
+    let target = merge_layers_bulk(&mut handle, vec![top, bottom]).expect("bulk merge");
+    assert_eq!(target, bottom);
+    let merged = layer_summaries(&handle).expect("merged projection");
+    assert!(merged.iter().any(|layer| layer.id == bottom));
+    assert!(merged.iter().all(|layer| layer.id != top));
+    undo(&mut handle).expect("undo bulk merge");
+    let restored = layer_summaries(&handle).expect("projection after undo");
+    assert!(restored.iter().any(|layer| layer.id == bottom));
+    assert!(restored.iter().any(|layer| layer.id == top));
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn selected_layer_visibility_uses_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD319, 256, 256, 144.0).expect("default document");
+    let base = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let extra = add_layer(&mut handle, 0).expect("extra raster layer");
+    set_layers_visibility(&mut handle, vec![base, extra], false).expect("hide selected layers");
+    let hidden = layer_summaries(&handle).expect("hidden layers");
+    assert!(
+        !hidden
+            .iter()
+            .find(|layer| layer.id == base)
+            .expect("base")
+            .visible
+    );
+    assert!(
+        !hidden
+            .iter()
+            .find(|layer| layer.id == extra)
+            .expect("extra")
+            .visible
+    );
+
+    undo(&mut handle).expect("undo visibility");
+    let visible = layer_summaries(&handle).expect("restored layers");
+    assert!(
+        visible
+            .iter()
+            .find(|layer| layer.id == base)
+            .expect("base")
+            .visible
+    );
+    assert!(
+        visible
+            .iter()
+            .find(|layer| layer.id == extra)
+            .expect("extra")
+            .visible
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn full_layer_lock_is_projected_and_undoable_through_bridge() {
+    let mut handle = create_default_document(0xD320, 256, 256, 144.0).expect("default document");
+    let layer = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+
+    set_layer_locked(&mut handle, layer, true).expect("lock layer");
+    let locked = layer_summaries(&handle).expect("locked projection");
+    assert!(
+        locked
+            .iter()
+            .find(|item| item.id == layer)
+            .expect("layer")
+            .locked
+    );
+    assert!(
+        update_layer_properties(&mut handle, layer, true, 50_000, false, false, false).is_err()
+    );
+
+    undo(&mut handle).expect("undo layer lock");
+    let unlocked = layer_summaries(&handle).expect("unlocked projection");
+    assert!(
+        !unlocked
+            .iter()
+            .find(|item| item.id == layer)
+            .expect("layer")
+            .locked
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn selected_layer_locks_use_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD321, 256, 256, 144.0).expect("default document");
+    let base = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let extra = add_layer(&mut handle, 0).expect("extra layer");
+    set_layers_locked(&mut handle, vec![base, extra], true).expect("lock selection");
+    let locked = layer_summaries(&handle).expect("locked projection");
+    assert!(
+        locked
+            .iter()
+            .filter(|layer| [base, extra].contains(&layer.id))
+            .all(|layer| layer.locked)
+    );
+    undo(&mut handle).expect("undo bulk lock");
+    let unlocked = layer_summaries(&handle).expect("unlocked projection");
+    assert!(
+        unlocked
+            .iter()
+            .filter(|layer| [base, extra].contains(&layer.id))
+            .all(|layer| !layer.locked)
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn selected_sibling_reorder_is_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD322, 256, 256, 144.0).expect("default document");
+    let bottom = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let middle = add_layer(&mut handle, 0).expect("middle layer");
+    let top = add_layer(&mut handle, 0).expect("top layer");
+    reorder_layers(&mut handle, vec![bottom, top], 1).expect("reorder siblings");
+
+    let mut summaries = layer_summaries(&handle).expect("reordered projection");
+    summaries.sort_by_key(|layer| layer.order);
+    assert_eq!(
+        summaries.iter().map(|layer| layer.id).collect::<Vec<_>>(),
+        [middle, bottom, top]
+    );
+    undo(&mut handle).expect("undo reorder");
+    let mut restored = layer_summaries(&handle).expect("restored projection");
+    restored.sort_by_key(|layer| layer.order);
+    assert_eq!(
+        restored.iter().map(|layer| layer.id).collect::<Vec<_>>(),
+        [bottom, middle, top]
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn selected_layer_labels_are_one_undoable_bridge_command() {
+    let mut handle = create_default_document(0xD323, 256, 256, 144.0).expect("default document");
+    let base = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let extra = add_layer(&mut handle, 0).expect("extra layer");
+    set_layers_label(&mut handle, vec![base, extra], Some(0xDC28_32FF))
+        .expect("label selected layers");
+    assert!(
+        layer_summaries(&handle)
+            .expect("label projection")
+            .iter()
+            .filter(|layer| [base, extra].contains(&layer.id))
+            .all(|layer| layer.label_rgba == Some(0xDC28_32FF))
+    );
+    undo(&mut handle).expect("undo bulk label");
+    assert!(
+        layer_summaries(&handle)
+            .expect("restored projection")
+            .iter()
+            .filter(|layer| [base, extra].contains(&layer.id))
+            .all(|layer| layer.label_rgba.is_none())
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
 fn duplicating_a_leaf_layer_is_available_through_bridge_and_undoable() {
     let mut handle = create_default_document(0xD312, 256, 256, 144.0).expect("default document");
     let source = add_layer(&mut handle, 0).expect("added raster layer");
+    add_layer(&mut handle, 3).expect("attached source mask");
     let duplicate = duplicate_layer(&mut handle, source).expect("duplicate through bridge");
     let layers = layer_summaries(&handle).expect("layer projection");
     assert!(layers.iter().any(|layer| layer.id == source));
     assert!(layers.iter().any(|layer| layer.id == duplicate));
+    let duplicate_mask = layers
+        .iter()
+        .find(|layer| layer.kind == "Mask" && layer.mask_owner == Some(duplicate))
+        .expect("duplicated mask owner link")
+        .id;
     undo(&mut handle).expect("undo duplication");
     assert!(
         !layer_summaries(&handle)
             .expect("projection after undo")
             .iter()
-            .any(|layer| layer.id == duplicate)
+            .any(|layer| layer.id == duplicate || layer.id == duplicate_mask)
     );
     redo(&mut handle).expect("redo duplication");
+    let redone = layer_summaries(&handle).expect("projection after redo");
+    assert!(redone.iter().any(|layer| layer.id == duplicate));
+    assert!(
+        redone
+            .iter()
+            .any(|layer| layer.id == duplicate_mask && layer.mask_owner == Some(duplicate))
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn layer_panel_state_is_projected_and_validated_through_bridge() {
+    let mut handle = create_document(
+        0x33a1,
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let primary = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let group = add_layer(&mut handle, 2).expect("group");
+
+    set_layer_panel_state(&mut handle, Some(primary), vec![group]).expect("save panel state");
+    assert_eq!(
+        layer_panel_state(&handle).expect("project panel state"),
+        LayerPanelStateView {
+            primary_layer_id: Some(primary),
+            collapsed_group_ids: vec![group.to_string()],
+        }
+    );
+    assert!(set_layer_panel_state(&mut handle, Some(999), vec![]).is_err());
+    assert_eq!(
+        layer_panel_state(&handle)
+            .expect("panel state remains atomic")
+            .primary_layer_id,
+        Some(primary)
+    );
+}
+
+#[test]
+fn grouping_layers_is_available_through_bridge_and_undoable() {
+    let mut handle = create_default_document(0xD316, 256, 256, 144.0).expect("default document");
+    let lower = add_layer(&mut handle, 0).expect("lower raster layer");
+    let upper = add_layer(&mut handle, 0).expect("upper raster layer");
+
+    let revision_before_preflight = revision(&handle).expect("revision before preflight");
+    assert_eq!(
+        preflight_group_layers(&handle, vec![lower, upper]).expect("valid group preflight"),
+        None
+    );
+    assert_eq!(
+        preflight_group_layers(&handle, vec![lower]).expect("invalid group preflight"),
+        Some("Select at least two layers to create a group.".into())
+    );
+    assert_eq!(
+        revision(&handle).expect("preflight does not change revision"),
+        revision_before_preflight
+    );
+
+    let group = group_layers(&mut handle, vec![upper, lower]).expect("group through bridge");
+    let grouped = layer_summaries(&handle).expect("grouped layer projection");
+    let group_summary = grouped
+        .iter()
+        .find(|layer| layer.id == group)
+        .expect("group projection");
+    assert_eq!(group_summary.kind, "Group");
+    assert_eq!(group_summary.group_mode, "Pass-through");
+    assert!(
+        grouped
+            .iter()
+            .filter(|layer| layer.id == lower || layer.id == upper)
+            .all(|layer| layer.parent == Some(group))
+    );
+
+    undo(&mut handle).expect("undo grouping");
+    let ungrouped = layer_summaries(&handle).expect("projection after undo");
+    assert!(ungrouped.iter().all(|layer| layer.id != group));
+    assert!(
+        ungrouped
+            .iter()
+            .filter(|layer| layer.id == lower || layer.id == upper)
+            .all(|layer| layer.parent.is_none())
+    );
+
+    redo(&mut handle).expect("redo grouping");
     assert!(
         layer_summaries(&handle)
             .expect("projection after redo")
             .iter()
-            .any(|layer| layer.id == duplicate)
+            .filter(|layer| layer.id == lower || layer.id == upper)
+            .all(|layer| layer.parent == Some(group))
     );
     close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn grouping_a_mask_owner_carries_its_mask_through_bridge() {
+    let mut handle = create_default_document(0xD317, 256, 256, 144.0).expect("document");
+    let owner = document_info(&handle)
+        .expect("document info")
+        .primary_raster_layer;
+    let mask = add_layer(&mut handle, 3).expect("attached mask");
+    let sibling = add_layer(&mut handle, 0).expect("sibling raster");
+
+    assert_eq!(
+        preflight_group_layers(&handle, vec![owner, sibling]).expect("group preflight"),
+        None
+    );
+    let group = group_layers(&mut handle, vec![owner, sibling]).expect("group owners");
+    let summaries = layer_summaries(&handle).expect("grouped projections");
+    let owner_summary = summaries
+        .iter()
+        .find(|layer| layer.id == owner)
+        .expect("owner");
+    let mask_summary = summaries
+        .iter()
+        .find(|layer| layer.id == mask)
+        .expect("mask");
+    assert_eq!(owner_summary.parent, Some(group));
+    assert_eq!(mask_summary.parent, Some(group));
+    assert_eq!(mask_summary.mask_owner, Some(owner));
+
+    undo(&mut handle).expect("undo group");
+    let undone = layer_summaries(&handle).expect("undo projection");
+    assert!(
+        undone
+            .iter()
+            .find(|layer| layer.id == owner)
+            .expect("owner after undo")
+            .parent
+            .is_none()
+    );
+    assert!(
+        undone
+            .iter()
+            .find(|layer| layer.id == mask)
+            .expect("mask after undo")
+            .parent
+            .is_none()
+    );
+    redo(&mut handle).expect("redo group");
+    let redone = layer_summaries(&handle).expect("redo projection");
+    assert_eq!(
+        redone
+            .iter()
+            .find(|layer| layer.id == mask)
+            .expect("mask after redo")
+            .parent,
+        Some(group)
+    );
+    close_document(&mut handle).expect("close document");
+}
+
+#[test]
+fn ungrouping_layers_is_available_through_bridge_and_undoable() {
+    let mut handle = create_default_document(0xD314, 256, 256, 144.0).expect("document");
+    let bottom = add_layer(&mut handle, 0).expect("bottom");
+    let top = add_layer(&mut handle, 0).expect("top");
+    let group = group_layers(&mut handle, vec![bottom, top]).expect("group");
+    ungroup_layer(&mut handle, group).expect("ungroup");
+    let layers = layer_summaries(&handle).expect("ungrouped projection");
+    assert!(layers.iter().all(|layer| layer.id != group));
+    assert!(
+        layers
+            .iter()
+            .filter(|layer| layer.id == bottom || layer.id == top)
+            .all(|layer| layer.parent.is_none())
+    );
+    undo(&mut handle).expect("undo ungroup");
+    assert!(
+        layer_summaries(&handle)
+            .expect("restored projection")
+            .iter()
+            .filter(|layer| layer.id == bottom || layer.id == top)
+            .all(|layer| layer.parent == Some(group))
+    );
+    redo(&mut handle).expect("redo ungroup");
+    assert!(
+        layer_summaries(&handle)
+            .expect("redone projection")
+            .iter()
+            .all(|layer| layer.id != group)
+    );
+    close_document(&mut handle).expect("close");
 }
 
 #[test]
@@ -528,6 +1165,16 @@ fn delete_bridge_rejects_comic_owned_panel_layers() {
         .first()
         .expect("panel layer binding")
         .clone();
+    assert_eq!(
+        preflight_delete_project_layers(&project, vec![binding.panel_group_id])
+            .expect("comic-owned group preflight"),
+        Some("Comic-owned layers must be removed through the Comics workspace.".into())
+    );
+    assert_eq!(
+        preflight_delete_project_layers(&project, vec![binding.mask_layer_id])
+            .expect("comic-owned mask preflight"),
+        Some("Comic-owned layers must be removed through the Comics workspace.".into())
+    );
     assert!(delete_project_layer(&mut project, binding.panel_group_id).is_err());
     assert!(delete_project_layer(&mut project, binding.mask_layer_id).is_err());
     let page = project_active_document(&project).expect("active page");
@@ -1658,5 +2305,37 @@ fn psd_open_rejects_symlink_sources_before_reading() {
     symlink(&target, &alias).expect("symlink");
 
     assert!(open_document(alias.to_string_lossy().into_owned()).is_err());
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn psd_open_rejects_excessive_projected_memory_from_header_before_full_read() {
+    use std::io::Write as _;
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-psd-budget-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temp root");
+    let path = root.join("large.psd");
+    let mut file = std::fs::File::create(&path).expect("PSD file");
+    let mut header = [0_u8; 26];
+    header[..4].copy_from_slice(b"8BPS");
+    header[4..6].copy_from_slice(&1_u16.to_be_bytes());
+    header[12..14].copy_from_slice(&3_u16.to_be_bytes());
+    header[14..18].copy_from_slice(&8_192_u32.to_be_bytes());
+    header[18..22].copy_from_slice(&8_192_u32.to_be_bytes());
+    header[22..24].copy_from_slice(&8_u16.to_be_bytes());
+    header[24..26].copy_from_slice(&3_u16.to_be_bytes());
+    file.write_all(&header).expect("PSD header");
+    file.set_len(256 * 1024 * 1024 + 1)
+        .expect("sparse PSD payload");
+    drop(file);
+
+    let error = open_document(path.to_string_lossy().into_owned())
+        .err()
+        .expect("budget rejection");
+    assert!(error.to_string().contains("768 MiB safety limit"));
     std::fs::remove_dir_all(root).expect("cleanup");
 }

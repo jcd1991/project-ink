@@ -26,6 +26,80 @@ void main() {
     );
   });
 
+  test('in-memory merge preflight never commits a layer edit', () async {
+    final engine = InMemoryEngineApi();
+
+    await expectLater(
+      engine.preflightMergeLayers(targetLayerId: 1, sourceLayerId: 1),
+      throwsArgumentError,
+    );
+    expect(
+      await engine.preflightMergeLayers(targetLayerId: 1, sourceLayerId: 2),
+      'Merge layer no longer exists.',
+    );
+    expect(engine.revision, 0);
+  });
+
+  test(
+    'in-memory group preflight validates requests without committing',
+    () async {
+      final engine = InMemoryEngineApi();
+
+      await expectLater(
+        engine.preflightGroupLayers(layerIds: <int>[1]),
+        throwsArgumentError,
+      );
+      expect(await engine.preflightGroupLayers(layerIds: <int>[1, 2]), isNull);
+      expect(engine.revision, 0);
+    },
+  );
+
+  test(
+    'in-memory delete preflight validates requests without committing',
+    () async {
+      final engine = InMemoryEngineApi();
+
+      await expectLater(
+        engine.preflightDeleteLayers(layerIds: const <int>[]),
+        throwsArgumentError,
+      );
+      expect(
+        await engine.preflightDeleteLayers(layerIds: const <int>[1, 2]),
+        isNull,
+      );
+      expect(engine.revision, 0);
+    },
+  );
+
+  test(
+    'in-memory layer panel state preserves its primary and disclosures',
+    () async {
+      final engine = InMemoryEngineApi();
+
+      await engine.setLayerPanelState(
+        primaryLayerId: 17,
+        collapsedGroupIds: <int>[9, 4],
+      );
+
+      expect(
+        await engine.layerPanelState(),
+        isA<LayerPanelStateView>()
+            .having((state) => state.primaryLayerId, 'primary', 17)
+            .having((state) => state.collapsedGroupIds, 'collapsed', <int>[
+              4,
+              9,
+            ]),
+      );
+      await expectLater(
+        engine.setLayerPanelState(
+          primaryLayerId: 17,
+          collapsedGroupIds: <int>[4, 4],
+        ),
+        throwsArgumentError,
+      );
+    },
+  );
+
   test('decodes compact dirty tile packets', () {
     final packet = ByteData(8 + 32);
     packet.setUint16(0, 1, Endian.little);

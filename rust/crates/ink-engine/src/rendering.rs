@@ -169,9 +169,17 @@ pub(super) fn render_brush_dabs(
                     continue;
                 }
                 let edge = (1.0 - distance).clamp(0.0, 1.0);
-                let grain = dab
-                    .grain
-                    .map_or(1.0, |value| grain_multiplier(value, x as f32, y as f32));
+                let grain = dab.grain.map_or(1.0, |value| {
+                    let (gx, gy) = if value.canvas_space {
+                        (x as f32, y as f32)
+                    } else {
+                        (
+                            f32::midpoint(normalized_x, 1.0) * radius_x * 2.0,
+                            f32::midpoint(normalized_y, 1.0) * radius_y * 2.0,
+                        )
+                    };
+                    grain_multiplier(value, gx, gy, resources.get(&value.resource_hash))
+                });
                 let tip = dab
                     .tip_resource_hash
                     .and_then(|hash| resources.get(&hash))
@@ -739,17 +747,37 @@ fn sample_resource_alpha(resource: &BrushResource, x: f32, y: f32) -> f32 {
 /// Deterministic bounded grain modulation. The native v2 resource pipeline
 /// supplies content hashes; until decoded image resources are installed, the
 /// hash still gives every preset a stable, seam-free procedural texture.
-fn grain_multiplier(grain: GrainStamp, x: f32, y: f32) -> f32 {
+fn grain_multiplier(grain: GrainStamp, x: f32, y: f32, resource: Option<&BrushResource>) -> f32 {
     let scale = grain.scale.clamp(0.01, 64.0);
-    let qx = (x * scale).floor() as i64;
-    let qy = (y * scale).floor() as i64;
-    let mut state = u64::from_le_bytes(grain.resource_hash[..8].try_into().unwrap_or([0; 8]));
-    state ^= (qx as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    state ^= (qy as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    state ^= state >> 30;
-    state = state.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    state ^= state >> 27;
-    let noise = (state as f32 / u64::MAX as f32).clamp(0.0, 1.0);
+    let noise = resource
+        .filter(|value| value.kind == "grain" && value.width > 0 && value.height > 0)
+        .and_then(|value| {
+            let rgba_len = value.width as usize * value.height as usize * 4;
+            if value.rgba8.len() < rgba_len {
+                return None;
+            }
+            let px = ((x * scale).floor() as i64).rem_euclid(i64::from(value.width)) as usize;
+            let py = ((y * scale).floor() as i64).rem_euclid(i64::from(value.height)) as usize;
+            let offset = (py * value.width as usize + px) * 4;
+            Some(
+                (f32::from(value.rgba8[offset]) * 0.2126
+                    + f32::from(value.rgba8[offset + 1]) * 0.7152
+                    + f32::from(value.rgba8[offset + 2]) * 0.0722)
+                    / 255.0,
+            )
+        })
+        .unwrap_or_else(|| {
+            let qx = (x * scale).floor() as i64;
+            let qy = (y * scale).floor() as i64;
+            let mut state =
+                u64::from_le_bytes(grain.resource_hash[..8].try_into().unwrap_or([0; 8]));
+            state ^= (qx as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            state ^= (qy as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            state ^= state >> 30;
+            state = state.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            state ^= state >> 27;
+            (state as f32 / u64::MAX as f32).clamp(0.0, 1.0)
+        });
     let contrast = (1.0 + (noise - 0.5) * 2.0 * grain.contrast.clamp(-1.0, 1.0)).clamp(0.0, 2.0);
     (1.0 - grain.depth.clamp(0.0, 1.0) + grain.depth.clamp(0.0, 1.0) * contrast).clamp(0.0, 2.0)
 }

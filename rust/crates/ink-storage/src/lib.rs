@@ -29,13 +29,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Native extension for Project Ink documents.
 pub const EXTENSION: &str = "inkproj";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 6;
 const MIN_READER_VERSION: &str = "0.1.0";
 const TILE_BYTES: usize = (TILE_SIZE * TILE_SIZE * 4) as usize;
-const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SQLITE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COMPRESSED_TILE_BYTES: u64 = 1024 * 1024;
 const MAX_PROJECT_TILE_BYTES: usize = 768 * 1024 * 1024;
+const MAX_PROJECT_DECODED_BYTES: usize = 768 * 1024 * 1024;
+const MAX_PROJECT_LOAD_WORKING_SET_BYTES: usize = 900 * 1024 * 1024;
 const MAX_COMPRESSED_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DECOMPRESSED_HISTORY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LAYERS: usize = 4096;
@@ -56,6 +58,58 @@ const MAX_VECTOR_BYTES: usize = 1_024 * 1_024;
 const MAX_VECTOR_LIBRARY_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_COMIC_BYTES: u64 = 64 * 1_024 * 1_024;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ProjectLoadBudget {
+    retained_bytes: usize,
+}
+
+impl ProjectLoadBudget {
+    fn retain(&mut self, bytes: usize) -> Result<(), StorageError> {
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(bytes)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?;
+        if self.retained_bytes > MAX_PROJECT_DECODED_BYTES {
+            return Err(StorageError::LimitExceeded("aggregate project memory"));
+        }
+        Ok(())
+    }
+
+    fn ensure_peak(self, additional_bytes: usize) -> Result<(), StorageError> {
+        let projected = self
+            .retained_bytes
+            .checked_add(additional_bytes)
+            .ok_or(StorageError::LimitExceeded("project load working set"))?;
+        if projected > MAX_PROJECT_LOAD_WORKING_SET_BYTES {
+            return Err(StorageError::LimitExceeded("project load working set"));
+        }
+        Ok(())
+    }
+
+    fn sidecar_decode_limit(
+        self,
+        encoded_bytes: usize,
+        section_limit: usize,
+    ) -> Result<usize, StorageError> {
+        let retained_remaining = MAX_PROJECT_DECODED_BYTES
+            .checked_sub(self.retained_bytes)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?;
+        let working_remaining = MAX_PROJECT_LOAD_WORKING_SET_BYTES
+            .checked_sub(self.retained_bytes)
+            .and_then(|remaining| remaining.checked_sub(encoded_bytes))
+            .ok_or(StorageError::LimitExceeded("project load working set"))?;
+        // Reserve space for the decompressed JSON buffer, its parsed value,
+        // and Vec growth while read_to_end is filling the bounded buffer.
+        let decode_limit = (retained_remaining / 2)
+            .min(working_remaining / 4)
+            .min(section_limit);
+        if decode_limit == 0 {
+            return Err(StorageError::LimitExceeded("aggregate project memory"));
+        }
+        Ok(decode_limit)
+    }
+}
+
 /// A complete, immutable document payload suitable for saving or testing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectSnapshot {
@@ -69,9 +123,19 @@ pub struct ProjectSnapshot {
     pub history: HistorySnapshot,
     pub brushes: Vec<Vec<u8>>,
     pub resources: Vec<ResourceRecord>,
+    /// Persisted layer-panel presentation state for this document/page.
+    pub layer_panel_state: LayerPanelState,
     /// Optional validated Phase 3 comic structure stored beside the raster
     /// project. The bytes are canonical JSON from `ink-comic`.
     pub comic: Option<Vec<u8>>,
+}
+
+/// Durable layer-panel state that does not affect document pixels or history.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerPanelState {
+    pub primary_layer: Option<LayerId>,
+    #[serde(default)]
+    pub collapsed_groups: Vec<LayerId>,
 }
 
 /// One page document inside a v2 studio project. The page payload uses the
@@ -227,6 +291,8 @@ struct Manifest {
     modified_unix_seconds: u64,
     minimum_reader_version: String,
     revision: u64,
+    #[serde(default)]
+    layer_panel_state: LayerPanelState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -421,9 +487,18 @@ fn validate_studio_snapshot(
     if snapshot.comic.len() > usize::try_from(MAX_COMIC_BYTES).unwrap_or(usize::MAX) {
         return Err(StorageError::LimitExceeded("studio comic structure size"));
     }
+    let mut memory_budget = ProjectLoadBudget::default();
+    // Page snapshots are already resident while a caller validates a studio
+    // snapshot. Account for them before parsing comic metadata so the peak
+    // check covers the existing pages plus the parser's temporary allocations.
+    for page in &snapshot.pages {
+        memory_budget.retain(project_snapshot_memory_bytes(&page.snapshot)?)?;
+    }
+    memory_budget.ensure_peak(snapshot.comic.len().saturating_mul(3))?;
     let project = ink_comic::ComicProject::from_json(&snapshot.comic).map_err(|error| {
         StorageError::InvalidManifest(format!("invalid studio comic structure: {error}"))
     })?;
+    memory_budget.retain(snapshot.comic.len().saturating_mul(2))?;
     if snapshot.pages.len() != project.page_documents.len()
         || snapshot.pages.len() != project.pages.len()
     {
@@ -479,6 +554,53 @@ fn validate_nested_relative_path(path: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Convert v1/v2 implicit mask adjacency into stable owner IDs in memory.
+/// The source project remains read-only; the relation is written on its next
+/// v3 save.
+fn migrate_legacy_mask_ownership(layers: &mut [Layer]) {
+    let by_id = layers
+        .iter()
+        .map(|layer| (layer.id, layer.kind))
+        .collect::<HashMap<_, _>>();
+    let mut siblings: HashMap<Option<LayerId>, Vec<usize>> = HashMap::new();
+    for (index, layer) in layers.iter().enumerate() {
+        siblings.entry(layer.parent).or_default().push(index);
+    }
+    for (parent, indices) in siblings {
+        if parent.is_some_and(|id| {
+            by_id
+                .get(&id)
+                .is_some_and(|kind| matches!(kind, LayerKind::Group | LayerKind::PanelGroup))
+        }) {
+            if let Some(owner) = parent {
+                for index in indices {
+                    if layers[index].kind == LayerKind::Mask && layers[index].mask_owner.is_none() {
+                        layers[index].mask_owner = Some(owner);
+                    }
+                }
+            }
+            continue;
+        }
+        let mut current_paint = None;
+        let mut current_has_mask = false;
+        for index in indices {
+            match layers[index].kind {
+                LayerKind::Raster | LayerKind::VectorInk => {
+                    current_paint = Some(layers[index].id);
+                    current_has_mask = false;
+                }
+                LayerKind::Mask if !current_has_mask => {
+                    if layers[index].mask_owner.is_none() {
+                        layers[index].mask_owner = current_paint;
+                    }
+                    current_has_mask = true;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Open a v2 studio project without modifying its source. Every page is
 /// validated before the returned snapshot becomes available.
 pub fn load_studio_project(source: &Path) -> Result<StudioProjectSnapshot, StorageError> {
@@ -490,7 +612,7 @@ pub fn load_studio_project(source: &Path) -> Result<StudioProjectSnapshot, Stora
         "studio manifest size",
     )?;
     let manifest: StudioManifest = serde_json::from_slice(&manifest_bytes)?;
-    if manifest.format_version != FORMAT_VERSION {
+    if !(2..=FORMAT_VERSION).contains(&manifest.format_version) {
         return Err(StorageError::UnsupportedFormat(manifest.format_version));
     }
     validate_minimum_reader_version(&manifest.minimum_reader_version)?;
@@ -500,9 +622,12 @@ pub fn load_studio_project(source: &Path) -> Result<StudioProjectSnapshot, Stora
         MAX_COMIC_BYTES,
         "studio comic structure size",
     )?;
+    let mut memory_budget = ProjectLoadBudget::default();
+    memory_budget.ensure_peak(comic.len().saturating_mul(3))?;
     let project = ink_comic::ComicProject::from_json(&comic).map_err(|error| {
         StorageError::InvalidManifest(format!("invalid studio comic structure: {error}"))
     })?;
+    memory_budget.retain(comic.len().saturating_mul(2))?;
     if manifest.project_id != project.id.to_string()
         || usize::try_from(manifest.page_count).unwrap_or(usize::MAX) != project.pages.len()
     {
@@ -514,7 +639,7 @@ pub fn load_studio_project(source: &Path) -> Result<StudioProjectSnapshot, Stora
     for page_ref in &project.page_documents {
         validate_nested_relative_path(&page_ref.relative_path)?;
         let page_path = source.join(&page_ref.relative_path);
-        let page_snapshot = load_nested_project(&page_path)?;
+        let page_snapshot = load_nested_project_with_budget(&page_path, &mut memory_budget)?;
         if page_snapshot.id.0 != page_ref.document_id {
             return Err(StorageError::InvalidManifest(
                 "page document ID does not match comic metadata".into(),
@@ -616,6 +741,14 @@ pub fn load_nested_project(source: &Path) -> Result<ProjectSnapshot, StorageErro
     load_project_contents(source)
 }
 
+fn load_nested_project_with_budget(
+    source: &Path,
+    budget: &mut ProjectLoadBudget,
+) -> Result<ProjectSnapshot, StorageError> {
+    validate_nested_source(source)?;
+    load_project_contents_with_budget(source, MAX_DECOMPRESSED_HISTORY_BYTES, budget)
+}
+
 fn load_project_contents(source: &Path) -> Result<ProjectSnapshot, StorageError> {
     load_project_contents_with_history_limit(source, MAX_DECOMPRESSED_HISTORY_BYTES)
 }
@@ -623,6 +756,15 @@ fn load_project_contents(source: &Path) -> Result<ProjectSnapshot, StorageError>
 fn load_project_contents_with_history_limit(
     source: &Path,
     history_limit: usize,
+) -> Result<ProjectSnapshot, StorageError> {
+    let mut budget = ProjectLoadBudget::default();
+    load_project_contents_with_budget(source, history_limit, &mut budget)
+}
+
+fn load_project_contents_with_budget(
+    source: &Path,
+    history_limit: usize,
+    project_budget: &mut ProjectLoadBudget,
 ) -> Result<ProjectSnapshot, StorageError> {
     let manifest_relative = Path::new("manifest.json");
     if !source.join(manifest_relative).is_file() {
@@ -706,19 +848,48 @@ fn load_project_contents_with_history_limit(
         && layer_columns.contains("label");
     let has_adjustment_column = layer_columns.contains("adjustment");
     let has_group_mode_column = layer_columns.contains("group_mode");
+    let has_mask_owner_column = layer_columns.contains("mask_owner");
+    let has_locked_column = layer_columns.contains("locked");
+    let has_mask_enabled_column = layer_columns.contains("mask_enabled");
+    let has_mask_stencil_column = layer_columns.contains("mask_stencil");
+    let has_mask_inverted_column = layer_columns.contains("mask_inverted");
     let mut layers = Vec::new();
     let query = if phase_two_layers && has_adjustment_column && has_group_mode_column {
-        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, group_mode, adjustment FROM layers ORDER BY rowid"
+        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, group_mode, adjustment"
     } else if phase_two_layers && has_adjustment_column {
-        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, 1, adjustment FROM layers ORDER BY rowid"
+        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, 1, adjustment"
     } else if phase_two_layers && has_group_mode_column {
-        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, group_mode, NULL FROM layers ORDER BY rowid"
+        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, group_mode, NULL"
     } else if phase_two_layers {
-        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, 1, NULL FROM layers ORDER BY rowid"
+        "SELECT id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference, label, 1, NULL"
     } else {
-        "SELECT id, parent, kind, name, opacity, visible, 0, 0, 0, 0, NULL, 1, NULL FROM layers ORDER BY rowid"
+        "SELECT id, parent, kind, name, opacity, visible, 0, 0, 0, 0, NULL, 1, NULL"
     };
-    let mut statement = connection.prepare(query)?;
+    let query = format!(
+        "{query}, {}, {}, {}, {}, {} FROM layers ORDER BY rowid",
+        if has_mask_owner_column {
+            "mask_owner"
+        } else {
+            "NULL"
+        },
+        if has_locked_column { "locked" } else { "0" },
+        if has_mask_enabled_column {
+            "mask_enabled"
+        } else {
+            "1"
+        },
+        if has_mask_stencil_column {
+            "mask_stencil"
+        } else {
+            "0"
+        },
+        if has_mask_inverted_column {
+            "mask_inverted"
+        } else {
+            "0"
+        },
+    );
+    let mut statement = connection.prepare(&query)?;
     let rows = statement.query_map([], |row| {
         let id: String = row.get(0)?;
         let parent: Option<String> = row.get(1)?;
@@ -733,9 +904,30 @@ fn load_project_contents_with_history_limit(
         let label: Option<String> = row.get(10)?;
         let group_mode: i64 = row.get(11)?;
         let adjustment: Option<String> = row.get(12)?;
+        let mask_owner: Option<String> = row.get(13)?;
+        let locked: i64 = row.get(14)?;
+        let mask_enabled: i64 = row.get(15)?;
+        let mask_stencil: i64 = row.get(16)?;
+        let mask_inverted: i64 = row.get(17)?;
         Ok((
-            id, parent, kind, name, opacity, visible, blend_mode, alpha_lock, clipping, reference,
-            label, group_mode, adjustment,
+            id,
+            parent,
+            kind,
+            name,
+            opacity,
+            visible,
+            blend_mode,
+            alpha_lock,
+            clipping,
+            reference,
+            label,
+            group_mode,
+            adjustment,
+            mask_owner,
+            locked,
+            mask_enabled,
+            mask_stencil,
+            mask_inverted,
         ))
     })?;
     for row in rows {
@@ -756,6 +948,11 @@ fn load_project_contents_with_history_limit(
             label,
             group_mode,
             adjustment,
+            mask_owner,
+            locked,
+            mask_enabled,
+            mask_stencil,
+            mask_inverted,
         ) = row?;
         if name.len() > MAX_LAYER_NAME_BYTES {
             return Err(StorageError::LimitExceeded("layer name length"));
@@ -769,6 +966,19 @@ fn load_project_contents_with_history_limit(
         {
             return Err(StorageError::InvalidManifest(
                 "layer flags must be zero or one".into(),
+            ));
+        }
+        if !matches!(locked, 0 | 1) {
+            return Err(StorageError::InvalidManifest(
+                "layer lock must be zero or one".into(),
+            ));
+        }
+        if !matches!(mask_enabled, 0 | 1)
+            || !matches!(mask_stencil, 0 | 1)
+            || !matches!(mask_inverted, 0 | 1)
+        {
+            return Err(StorageError::InvalidManifest(
+                "mask flags must be zero or one".into(),
             ));
         }
         if !matches!(group_mode, 0 | 1) {
@@ -786,6 +996,12 @@ fn load_project_contents_with_history_limit(
             // placeholder is intentionally overwritten there.
             order: 0,
             kind: decode_layer_kind(kind)?,
+            mask_owner: mask_owner
+                .map(|value| parse_id(&value).map(LayerId::from_u128))
+                .transpose()?,
+            mask_enabled: mask_enabled != 0,
+            mask_stencil: mask_stencil != 0,
+            mask_inverted: mask_inverted != 0,
             name,
             opacity: u16::try_from(opacity).map_err(|_| {
                 StorageError::InvalidManifest("layer opacity is out of range".into())
@@ -794,6 +1010,7 @@ fn load_project_contents_with_history_limit(
             blend_mode: decode_layer_blend_mode(blend_mode)?,
             group_mode: decode_layer_group_mode(group_mode)?,
             alpha_lock: alpha_lock != 0,
+            locked: locked != 0,
             clipping: clipping != 0,
             reference: reference != 0,
             label: label
@@ -832,12 +1049,30 @@ fn load_project_contents_with_history_limit(
             "document has no layers".into(),
         ));
     }
+    if manifest.format_version < 3 || !has_mask_owner_column {
+        migrate_legacy_mask_ownership(&mut layers);
+    }
+    if manifest.format_version < 5 || !has_mask_stencil_column {
+        for layer in &mut layers {
+            if layer.kind == LayerKind::Mask {
+                layer.mask_stencil = true;
+            }
+        }
+    }
     let layer_ids: HashSet<_> = layers.iter().map(|layer| layer.id).collect();
     if layer_ids.len() != layers.len() {
         return Err(StorageError::InvalidManifest(
             "layer IDs are not unique".into(),
         ));
     }
+    let layer_memory = layers.iter().try_fold(0_usize, |total, layer| {
+        total
+            .checked_add(std::mem::size_of::<Layer>())
+            .and_then(|bytes| bytes.checked_add(layer.name.capacity()))
+            .and_then(|bytes| bytes.checked_add(if layer.label.is_some() { 4 } else { 0 }))
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))
+    })?;
+    project_budget.retain(layer_memory)?;
     let mut tiles = Vec::new();
     let mut tile_keys = HashSet::new();
     let mut total_tile_bytes = 0usize;
@@ -887,12 +1122,23 @@ fn load_project_contents_with_history_limit(
             MAX_COMPRESSED_TILE_BYTES,
             "compressed tile size",
         )?;
+        project_budget.ensure_peak(
+            encoded
+                .len()
+                .saturating_add(TILE_BYTES.saturating_mul(2))
+                .saturating_add(std::mem::size_of::<TileRecord>()),
+        )?;
         let bytes = decode_zstd_bounded(&encoded, TILE_BYTES, "decoded tile size")?;
         if bytes.len() != TILE_BYTES {
             return Err(StorageError::InvalidManifest(
                 "tile byte length is not 256x256 BGRA8".into(),
             ));
         }
+        project_budget.retain(
+            bytes
+                .capacity()
+                .saturating_add(std::mem::size_of::<TileRecord>()),
+        )?;
         tiles.push(TileRecord {
             layer,
             coordinate: TileCoord { x, y },
@@ -907,10 +1153,11 @@ fn load_project_contents_with_history_limit(
             MAX_COMPRESSED_HISTORY_BYTES,
             "compressed vector library size",
         )?;
-        let decoded = decode_zstd_bounded(
+        let decoded = decode_project_sidecar(
             &encoded,
             usize::try_from(MAX_VECTOR_LIBRARY_BYTES).unwrap_or(usize::MAX),
             "decoded vector library size",
+            project_budget,
         )?;
         let vectors: Vec<VectorRecord> = serde_json::from_slice(&decoded)?;
         validate_vectors(&vectors, &layer_ids)?;
@@ -937,6 +1184,7 @@ fn load_project_contents_with_history_limit(
         if payload.len() > MAX_JOURNAL_PAYLOAD_BYTES {
             return Err(StorageError::LimitExceeded("command journal payload size"));
         }
+        project_budget.retain(payload.len().saturating_add(std::mem::size_of::<Vec<u8>>()))?;
         decode_command(&payload).map_err(|error| {
             StorageError::InvalidManifest(format!("invalid command journal: {error}"))
         })?;
@@ -950,7 +1198,12 @@ fn load_project_contents_with_history_limit(
             MAX_COMPRESSED_HISTORY_BYTES,
             "compressed history size",
         )?;
-        match decode_zstd_bounded(&encoded, history_limit, "decoded history size") {
+        match decode_project_sidecar(
+            &encoded,
+            history_limit,
+            "decoded history size",
+            project_budget,
+        ) {
             Ok(decoded) => {
                 let history: HistorySnapshot = serde_json::from_slice(&decoded)?;
                 validate_history(&history, spec)?;
@@ -960,7 +1213,9 @@ fn load_project_contents_with_history_limit(
             // snapshots. Older writers could create a history sidecar larger
             // than the reader's memory budget, so retain the document and
             // discard only that optional undo/redo sidecar.
-            Err(StorageError::LimitExceeded("decoded history size")) => HistorySnapshot {
+            Err(StorageError::LimitExceeded(
+                "decoded history size" | "aggregate project memory",
+            )) => HistorySnapshot {
                 truncated_on_load: true,
                 ..HistorySnapshot::default()
             },
@@ -977,10 +1232,11 @@ fn load_project_contents_with_history_limit(
             MAX_COMPRESSED_HISTORY_BYTES,
             "compressed brush library size",
         )?;
-        let decoded = decode_zstd_bounded(
+        let decoded = decode_project_sidecar(
             &encoded,
             usize::try_from(MAX_BRUSH_LIBRARY_BYTES).unwrap_or(usize::MAX),
             "decoded brush library size",
+            project_budget,
         )?;
         let brushes: Vec<Vec<u8>> = serde_json::from_slice(&decoded)?;
         if brushes.len() > MAX_BRUSHES || brushes.iter().any(|brush| brush.len() > MAX_BRUSH_BYTES)
@@ -999,10 +1255,11 @@ fn load_project_contents_with_history_limit(
             MAX_COMPRESSED_HISTORY_BYTES,
             "compressed resource metadata size",
         )?;
-        let decoded = decode_zstd_bounded(
+        let decoded = decode_project_sidecar(
             &encoded,
             usize::try_from(MAX_RESOURCE_LIBRARY_BYTES).unwrap_or(usize::MAX),
             "decoded resource metadata size",
+            project_budget,
         )?;
         let descriptors: Vec<ResourceDescriptor> = serde_json::from_slice(&decoded)?;
         if descriptors.len() > MAX_RESOURCES {
@@ -1021,6 +1278,9 @@ fn load_project_contents_with_history_limit(
             if expected > MAX_RESOURCE_BYTES {
                 return Err(StorageError::LimitExceeded("resource size"));
             }
+            project_budget.ensure_peak(expected)?;
+            project_budget
+                .retain(expected.saturating_add(std::mem::size_of::<ResourceRecord>()))?;
             let relative = PathBuf::from(format!("resources/{}.rgba", descriptor.hash));
             let bytes = read_project_file_bounded(
                 source,
@@ -1052,12 +1312,19 @@ fn load_project_contents_with_history_limit(
             MAX_COMIC_BYTES,
             "comic structure size",
         )?;
+        project_budget.ensure_peak(bytes.len().saturating_mul(3))?;
         ink_comic::ComicProject::from_json(&bytes).map_err(|error| {
             StorageError::InvalidManifest(format!("invalid comic structure: {error}"))
         })?;
+        project_budget.retain(bytes.len())?;
         Some(bytes)
     } else {
         None
+    };
+    let layer_panel_state = if manifest.format_version >= 6 {
+        manifest.layer_panel_state
+    } else {
+        LayerPanelState::default()
     };
     Ok(ProjectSnapshot {
         id,
@@ -1070,6 +1337,7 @@ fn load_project_contents_with_history_limit(
         history,
         brushes,
         resources,
+        layer_panel_state,
         comic,
     })
 }
@@ -1077,6 +1345,14 @@ fn load_project_contents_with_history_limit(
 /// Recover a corrupted source from the last atomic backup into a new sibling.
 /// The original source is never modified.
 pub fn recover_project(source: &Path, recovered_destination: &Path) -> Result<(), StorageError> {
+    recover_project_inner(source, recovered_destination, None)
+}
+
+fn recover_project_inner(
+    source: &Path,
+    recovered_destination: &Path,
+    fail_after: Option<SaveStage>,
+) -> Result<(), StorageError> {
     validate_destination(source)?;
     validate_destination(recovered_destination)?;
     let backup = sibling_path(source, ".bak");
@@ -1084,7 +1360,7 @@ pub fn recover_project(source: &Path, recovered_destination: &Path) -> Result<()
         return Err(StorageError::RecoveryUnavailable);
     }
     let snapshot = load_project(&backup).map_err(|_| StorageError::RecoveryUnavailable)?;
-    save_project(recovered_destination, &snapshot)
+    save_project_inner(recovered_destination, &snapshot, fail_after)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1148,6 +1424,7 @@ fn write_snapshot(
         modified_unix_seconds: now,
         minimum_reader_version: MIN_READER_VERSION.into(),
         revision: snapshot.revision,
+        layer_panel_state: snapshot.layer_panel_state.clone(),
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     if manifest_bytes.len() > usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX) {
@@ -1181,12 +1458,12 @@ fn write_snapshot(
 
     let connection = Connection::open(destination.join("document.sqlite"))?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE layers(id TEXT PRIMARY KEY, parent TEXT, kind INTEGER NOT NULL, name TEXT NOT NULL, opacity INTEGER NOT NULL, visible INTEGER NOT NULL, blend_mode INTEGER NOT NULL DEFAULT 0, group_mode INTEGER NOT NULL DEFAULT 0, alpha_lock INTEGER NOT NULL DEFAULT 0, clipping INTEGER NOT NULL DEFAULT 0, reference INTEGER NOT NULL DEFAULT 0, label TEXT, adjustment TEXT); CREATE TABLE tiles(layer_id TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(layer_id, x, y)); CREATE TABLE checkpoints(revision INTEGER NOT NULL); CREATE TABLE command_journal(sequence INTEGER PRIMARY KEY, payload BLOB NOT NULL); COMMIT;")?;
+    connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE layers(id TEXT PRIMARY KEY, parent TEXT, kind INTEGER NOT NULL, name TEXT NOT NULL, opacity INTEGER NOT NULL, visible INTEGER NOT NULL, blend_mode INTEGER NOT NULL DEFAULT 0, group_mode INTEGER NOT NULL DEFAULT 0, alpha_lock INTEGER NOT NULL DEFAULT 0, clipping INTEGER NOT NULL DEFAULT 0, reference INTEGER NOT NULL DEFAULT 0, label TEXT, adjustment TEXT, mask_owner TEXT, locked INTEGER NOT NULL DEFAULT 0, mask_enabled INTEGER NOT NULL DEFAULT 1, mask_stencil INTEGER NOT NULL DEFAULT 0, mask_inverted INTEGER NOT NULL DEFAULT 0); CREATE TABLE tiles(layer_id TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(layer_id, x, y)); CREATE TABLE checkpoints(revision INTEGER NOT NULL); CREATE TABLE command_journal(sequence INTEGER PRIMARY KEY, payload BLOB NOT NULL); COMMIT;")?;
     let transaction = connection.unchecked_transaction()?;
     for layer in &snapshot.layers {
         let label = serde_json::to_string(&layer.label)?;
         let adjustment = serde_json::to_string(&layer.adjustment)?;
-        transaction.execute("INSERT INTO layers(id, parent, kind, name, opacity, visible, blend_mode, group_mode, alpha_lock, clipping, reference, label, adjustment) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", params![layer.id.to_string(), layer.parent.map(|id| id.to_string()), encode_layer_kind(layer.kind), layer.name, i64::from(layer.opacity), i64::from(u8::from(layer.visible)), encode_layer_blend_mode(layer.blend_mode), encode_layer_group_mode(layer.group_mode), i64::from(u8::from(layer.alpha_lock)), i64::from(u8::from(layer.clipping)), i64::from(u8::from(layer.reference)), label, adjustment])?;
+        transaction.execute("INSERT INTO layers(id, parent, kind, name, opacity, visible, blend_mode, group_mode, alpha_lock, clipping, reference, label, adjustment, mask_owner, locked, mask_enabled, mask_stencil, mask_inverted) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)", params![layer.id.to_string(), layer.parent.map(|id| id.to_string()), encode_layer_kind(layer.kind), layer.name, i64::from(layer.opacity), i64::from(u8::from(layer.visible)), encode_layer_blend_mode(layer.blend_mode), encode_layer_group_mode(layer.group_mode), i64::from(u8::from(layer.alpha_lock)), i64::from(u8::from(layer.clipping)), i64::from(u8::from(layer.reference)), label, adjustment, layer.mask_owner.map(|id| id.to_string()), i64::from(u8::from(layer.locked)), i64::from(u8::from(layer.mask_enabled)), i64::from(u8::from(layer.mask_stencil)), i64::from(u8::from(layer.mask_inverted))])?;
     }
     transaction.execute(
         "INSERT INTO checkpoints(revision) VALUES(?1)",
@@ -1370,14 +1647,45 @@ fn validate_snapshot(snapshot: &ProjectSnapshot) -> Result<(), StorageError> {
         .spec
         .validate()
         .map_err(|error| StorageError::InvalidManifest(error.to_string()))?;
+    validate_project_snapshot_memory(snapshot)?;
     validate_stored_state(
-        &StoredState {
-            layers: snapshot.layers.clone(),
-            tiles: snapshot.tiles.clone(),
-            vectors: snapshot.vectors.clone(),
-        },
+        &snapshot.layers,
+        &snapshot.tiles,
+        &snapshot.vectors,
         snapshot.spec,
     )?;
+    let layer_ids = snapshot
+        .layers
+        .iter()
+        .map(|layer| layer.id)
+        .collect::<HashSet<_>>();
+    if snapshot
+        .layer_panel_state
+        .primary_layer
+        .is_some_and(|primary| !layer_ids.contains(&primary))
+    {
+        return Err(StorageError::InvalidManifest(
+            "layer-panel primary target does not exist".into(),
+        ));
+    }
+    let group_ids = snapshot
+        .layers
+        .iter()
+        .filter(|layer| layer.kind == LayerKind::Group)
+        .map(|layer| layer.id)
+        .collect::<HashSet<_>>();
+    let mut collapsed = HashSet::with_capacity(snapshot.layer_panel_state.collapsed_groups.len());
+    if snapshot.layer_panel_state.collapsed_groups.len() > MAX_LAYERS
+        || snapshot
+            .layer_panel_state
+            .collapsed_groups
+            .iter()
+            .any(|group| !group_ids.contains(group) || !collapsed.insert(*group))
+    {
+        return Err(StorageError::InvalidManifest(
+            "collapsed layer-panel groups must be unique existing ordinary groups".into(),
+        ));
+    }
     if let Some(comic) = &snapshot.comic {
         if u64::try_from(comic.len()).unwrap_or(u64::MAX) > MAX_COMIC_BYTES {
             return Err(StorageError::LimitExceeded("comic structure size"));
@@ -1429,6 +1737,93 @@ fn validate_snapshot(snapshot: &ProjectSnapshot) -> Result<(), StorageError> {
         }
     }
     validate_history(&snapshot.history, snapshot.spec)
+}
+
+fn serialized_size<T: Serialize>(value: &T) -> Result<usize, StorageError> {
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+fn validate_project_snapshot_memory(snapshot: &ProjectSnapshot) -> Result<(), StorageError> {
+    let _ = project_snapshot_memory_bytes(snapshot)?;
+    Ok(())
+}
+
+fn project_snapshot_memory_bytes(snapshot: &ProjectSnapshot) -> Result<usize, StorageError> {
+    let mut budget = ProjectLoadBudget::default();
+    if snapshot.resources.len() > MAX_RESOURCES {
+        return Err(StorageError::LimitExceeded("resource count"));
+    }
+    let layer_bytes = snapshot.layers.iter().try_fold(0_usize, |total, layer| {
+        total
+            .checked_add(std::mem::size_of::<Layer>())
+            .and_then(|bytes| bytes.checked_add(layer.name.capacity()))
+            .and_then(|bytes| bytes.checked_add(if layer.label.is_some() { 4 } else { 0 }))
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))
+    })?;
+    budget.retain(layer_bytes)?;
+    for tile in &snapshot.tiles {
+        budget.retain(
+            tile.bytes
+                .capacity()
+                .saturating_add(std::mem::size_of::<TileRecord>()),
+        )?;
+    }
+    let vectors_json_bytes = serialized_size(&snapshot.vectors)?;
+    budget.retain(
+        vectors_json_bytes
+            .checked_mul(2)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?,
+    )?;
+    for payload in &snapshot.journal {
+        budget.retain(payload.len().saturating_add(std::mem::size_of::<Vec<u8>>()))?;
+    }
+    let history_window = bounded_history_window(&snapshot.history, MAX_DECOMPRESSED_HISTORY_BYTES)?;
+    let history_bytes = serialized_size(&HistorySnapshotView {
+        undo: &snapshot.history.undo[history_window.undo_start..],
+        redo: &snapshot.history.redo[history_window.redo_start..],
+    })?;
+    budget.retain(
+        history_bytes
+            .checked_mul(2)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?,
+    )?;
+    let brush_bytes = serialized_size(&snapshot.brushes)?;
+    budget.retain(
+        brush_bytes
+            .checked_mul(2)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?,
+    )?;
+    let descriptors: Vec<_> = snapshot
+        .resources
+        .iter()
+        .map(|resource| ResourceDescriptor {
+            hash: hex_hash(&resource.hash),
+            kind: resource.kind.clone(),
+            width: resource.width,
+            height: resource.height,
+        })
+        .collect();
+    let descriptor_bytes = serialized_size(&descriptors)?;
+    budget.retain(
+        descriptor_bytes
+            .checked_mul(2)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?,
+    )?;
+    for resource in &snapshot.resources {
+        budget.retain(
+            resource
+                .bytes
+                .capacity()
+                .saturating_add(std::mem::size_of::<ResourceRecord>()),
+        )?;
+    }
+    if let Some(comic) = &snapshot.comic {
+        budget.ensure_peak(comic.len().saturating_mul(3))?;
+        budget.retain(comic.len())?;
+    }
+    Ok(budget.retained_bytes)
 }
 
 fn validate_resource_record(resource: &ResourceRecord) -> Result<(), StorageError> {
@@ -1507,7 +1902,7 @@ fn validate_history(history: &HistorySnapshot, spec: DocumentSpec) -> Result<(),
     }
     let mut history_tile_bytes = 0usize;
     for state in history.undo.iter().chain(&history.redo) {
-        validate_stored_state(state, spec)?;
+        validate_stored_state(&state.layers, &state.tiles, &state.vectors, spec)?;
         history_tile_bytes = history_tile_bytes
             .checked_add(state.tiles.len().saturating_mul(TILE_BYTES))
             .ok_or(StorageError::LimitExceeded("undo history tile bytes"))?;
@@ -1554,17 +1949,22 @@ fn validate_vectors(
     Ok(())
 }
 
-fn validate_stored_state(state: &StoredState, spec: DocumentSpec) -> Result<(), StorageError> {
-    if state.layers.is_empty() {
+fn validate_stored_state(
+    state_layers: &[Layer],
+    state_tiles: &[TileRecord],
+    state_vectors: &[VectorRecord],
+    spec: DocumentSpec,
+) -> Result<(), StorageError> {
+    if state_layers.is_empty() {
         return Err(StorageError::InvalidManifest(
             "document state has no layers".into(),
         ));
     }
-    if state.layers.len() > MAX_LAYERS {
+    if state_layers.len() > MAX_LAYERS {
         return Err(StorageError::LimitExceeded("layer count"));
     }
-    let mut layers = HashMap::with_capacity(state.layers.len());
-    for layer in &state.layers {
+    let mut layers = HashMap::with_capacity(state_layers.len());
+    for layer in state_layers {
         if layer.name.len() > MAX_LAYER_NAME_BYTES {
             return Err(StorageError::LimitExceeded("layer name length"));
         }
@@ -1574,9 +1974,9 @@ fn validate_stored_state(state: &StoredState, spec: DocumentSpec) -> Result<(), 
             ));
         }
     }
-    let layer_ids: HashSet<_> = state.layers.iter().map(|layer| layer.id).collect();
-    validate_vectors(&state.vectors, &layer_ids)?;
-    for layer in &state.layers {
+    let layer_ids: HashSet<_> = state_layers.iter().map(|layer| layer.id).collect();
+    validate_vectors(state_vectors, &layer_ids)?;
+    for layer in state_layers {
         let mut visited = HashSet::new();
         let mut current = Some(layer.id);
         while let Some(id) = current {
@@ -1591,9 +1991,34 @@ fn validate_stored_state(state: &StoredState, spec: DocumentSpec) -> Result<(), 
             current = entry.parent;
         }
     }
+    for layer in state_layers {
+        match (layer.kind, layer.mask_owner) {
+            (LayerKind::Mask, Some(owner_id)) => {
+                let owner = layers.get(&owner_id).ok_or_else(|| {
+                    StorageError::InvalidManifest("mask references a missing owner layer".into())
+                })?;
+                let valid_owner = match owner.kind {
+                    LayerKind::Raster | LayerKind::VectorInk => layer.parent == owner.parent,
+                    LayerKind::Group | LayerKind::PanelGroup => layer.parent == Some(owner_id),
+                    _ => false,
+                };
+                if !valid_owner {
+                    return Err(StorageError::InvalidManifest(
+                        "mask owner must be a paint sibling or its parent group".into(),
+                    ));
+                }
+            }
+            (_, Some(_)) => {
+                return Err(StorageError::InvalidManifest(
+                    "only mask layers can have a mask owner".into(),
+                ));
+            }
+            (LayerKind::Mask | _, None) => {}
+        }
+    }
     let mut tile_keys = HashSet::new();
     let mut tile_bytes = 0usize;
-    for tile in &state.tiles {
+    for tile in state_tiles {
         if !layers.contains_key(&tile.layer) {
             return Err(StorageError::InvalidManifest(
                 "tile references an unknown layer".into(),
@@ -1718,6 +2143,31 @@ fn decode_zstd_bounded(
     if decoded.len() > max_bytes {
         return Err(StorageError::LimitExceeded(limit_name));
     }
+    Ok(decoded)
+}
+
+fn decode_project_sidecar(
+    encoded: &[u8],
+    section_limit: usize,
+    section_limit_name: &'static str,
+    budget: &mut ProjectLoadBudget,
+) -> Result<Vec<u8>, StorageError> {
+    let decode_limit = budget.sidecar_decode_limit(encoded.len(), section_limit)?;
+    let limit_name = if decode_limit < section_limit {
+        "aggregate project memory"
+    } else {
+        section_limit_name
+    };
+    let decoded = decode_zstd_bounded(encoded, decode_limit, limit_name)?;
+    // Keep a conservative estimate for parsed Rust structures after the JSON
+    // buffer is dropped; the decompression limit reserves for the buffer,
+    // parsed structures, and temporary Vec capacity at the same time.
+    budget.retain(
+        decoded
+            .len()
+            .checked_mul(2)
+            .ok_or(StorageError::LimitExceeded("aggregate project memory"))?,
+    )?;
     Ok(decoded)
 }
 
@@ -1917,6 +2367,31 @@ mod tests {
     use ink_model::ColorSpace;
     use std::process::Command;
 
+    #[test]
+    fn project_memory_budget_rejects_aggregate_overflow() {
+        let mut budget = ProjectLoadBudget {
+            retained_bytes: MAX_PROJECT_DECODED_BYTES - 1,
+        };
+        budget.retain(1).expect("last byte fits");
+        assert!(matches!(
+            budget.retain(1),
+            Err(StorageError::LimitExceeded("aggregate project memory"))
+        ));
+    }
+
+    #[test]
+    fn sidecar_decode_respects_remaining_project_memory_before_parsing() {
+        let encoded =
+            zstd::stream::encode_all(&b"bounded payload"[..], 1).expect("encode tiny test sidecar");
+        let mut budget = ProjectLoadBudget {
+            retained_bytes: MAX_PROJECT_DECODED_BYTES - 8,
+        };
+        assert!(matches!(
+            decode_project_sidecar(&encoded, 1024, "section limit", &mut budget),
+            Err(StorageError::LimitExceeded("aggregate project memory"))
+        ));
+    }
+
     fn save_with_failpoint(
         destination: &Path,
         snapshot: &ProjectSnapshot,
@@ -1958,8 +2433,186 @@ mod tests {
             history: HistorySnapshot::default(),
             brushes: Vec::new(),
             resources: Vec::new(),
+            layer_panel_state: LayerPanelState {
+                primary_layer: Some(layer.id),
+                collapsed_groups: Vec::new(),
+            },
             comic: None,
         }
+    }
+
+    fn project_file_bytes(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn collect(
+            root: &Path,
+            directory: &Path,
+            files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            for entry in fs::read_dir(directory).expect("read project directory") {
+                let entry = entry.expect("project entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    files.insert(
+                        path.strip_prefix(root)
+                            .expect("relative project path")
+                            .into(),
+                        fs::read(path).expect("read project file"),
+                    );
+                }
+            }
+        }
+
+        let mut files = std::collections::BTreeMap::new();
+        collect(root, root, &mut files);
+        files
+    }
+
+    #[test]
+    fn v5_lock_mask_ownership_and_sparse_mask_modes_round_trip_and_migrate() {
+        let mut expected = snapshot();
+        expected.layers[0].locked = true;
+        let mut mask = Layer::new(LayerId::from_u128(2), LayerKind::Mask, "Ink mask");
+        mask.mask_owner = Some(expected.layers[0].id);
+        mask.mask_enabled = false;
+        mask.mask_inverted = true;
+        mask.locked = true;
+        expected.layers.push(mask);
+        let root =
+            std::env::temp_dir().join(format!("project-ink-mask-owner-{}", std::process::id()));
+        let destination = root.join("mask-owner.inkproj");
+        let _ = fs::remove_dir_all(&root);
+        save_project(&destination, &expected).expect("save v5 layer semantics");
+        let actual = load_project(&destination).expect("load v5 layer semantics");
+        assert_eq!(actual.layers, expected.layers);
+
+        let manifest_path = destination.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read v4 manifest"))
+                .expect("parse manifest");
+        manifest["format_version"] = serde_json::json!(3);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode v3 manifest"),
+        )
+        .expect("write v3 manifest");
+        let connection =
+            Connection::open(destination.join("document.sqlite")).expect("open v4 metadata");
+        connection
+            .execute_batch("ALTER TABLE layers DROP COLUMN locked;")
+            .expect("remove v4 lock column");
+        drop(connection);
+        let legacy_v3_source = project_file_bytes(&destination);
+        let legacy_v3 = load_project(&destination).expect("read v3 without lock semantics");
+        assert!(!legacy_v3.layers[0].locked);
+        assert_eq!(legacy_v3.layers[1].mask_owner, Some(legacy_v3.layers[0].id));
+        assert!(legacy_v3.layers[1].mask_stencil);
+        assert_eq!(
+            project_file_bytes(&destination),
+            legacy_v3_source,
+            "reading v3 migration semantics must not rewrite source files"
+        );
+
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        manifest["format_version"] = serde_json::json!(2);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("write legacy manifest");
+        let connection =
+            Connection::open(destination.join("document.sqlite")).expect("open metadata");
+        connection
+            .execute_batch("ALTER TABLE layers DROP COLUMN mask_owner;")
+            .expect("remove v3 column");
+        drop(connection);
+        let legacy_v2_source = project_file_bytes(&destination);
+        let legacy = load_project(&destination).expect("migrate legacy mask adjacency");
+        assert_eq!(legacy.layers[1].mask_owner, Some(legacy.layers[0].id));
+        assert_eq!(
+            project_file_bytes(&destination),
+            legacy_v2_source,
+            "reading v2 migration semantics must not rewrite source files"
+        );
+
+        let mut invalid = expected;
+        invalid.layers[1].mask_owner = Some(LayerId::from_u128(999));
+        assert!(save_project(&root.join("invalid-owner.inkproj"), &invalid).is_err());
+        fs::remove_dir_all(root).expect("remove test project");
+    }
+
+    #[test]
+    fn unsupported_format_rejection_does_not_mutate_project_files() {
+        let root = std::env::temp_dir().join(format!(
+            "project-ink-unsupported-format-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root");
+        let destination = root.join("future.inkproj");
+        save_project(&destination, &snapshot()).expect("save project");
+        let manifest_path = destination.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        manifest["format_version"] = serde_json::json!(FORMAT_VERSION + 1);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("write future version");
+        let source = project_file_bytes(&destination);
+
+        assert!(matches!(
+            load_project(&destination),
+            Err(StorageError::UnsupportedFormat(version)) if version == FORMAT_VERSION + 1
+        ));
+        assert_eq!(
+            project_file_bytes(&destination),
+            source,
+            "rejecting an unsupported format must preserve every source file"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn v6_layer_panel_state_round_trips_and_older_versions_ignore_it() {
+        let mut expected = snapshot();
+        let group = Layer::new(LayerId::from_u128(2), LayerKind::Group, "Folder");
+        expected.layer_panel_state.collapsed_groups = vec![group.id];
+        expected.layers.push(group);
+        let root =
+            std::env::temp_dir().join(format!("project-ink-panel-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let destination = root.join("panel-state.inkproj");
+        save_project(&destination, &expected).expect("save v6 layer-panel state");
+        assert_eq!(
+            load_project(&destination)
+                .expect("load v6 layer-panel state")
+                .layer_panel_state,
+            expected.layer_panel_state
+        );
+
+        let manifest_path = destination.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read v6 manifest"))
+                .expect("parse v6 manifest");
+        assert_eq!(manifest["format_version"], serde_json::json!(6));
+        manifest["format_version"] = serde_json::json!(5);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode v5 manifest"),
+        )
+        .expect("write legacy version marker");
+        assert_eq!(
+            load_project(&destination)
+                .expect("load v5 without v6 panel state")
+                .layer_panel_state,
+            LayerPanelState::default()
+        );
+        fs::remove_dir_all(root).expect("remove test project");
     }
 
     fn history_with_named_states(names: &[&str]) -> HistorySnapshot {
@@ -2321,6 +2974,55 @@ mod tests {
                 .as_slice(),
             b"not-json"
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn injected_repair_copy_failures_preserve_corrupt_source_and_publish_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "project-ink-repair-failpoints-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root");
+        let source = root.join("drawing.inkproj");
+        let recovered = root.join("drawing-recovered.inkproj");
+        let original = snapshot();
+        save_project(&source, &original).expect("initial save");
+        save_project(
+            &source,
+            &ProjectSnapshot {
+                revision: original.revision + 1,
+                ..original
+            },
+        )
+        .expect("create recovery backup");
+        let corrupt_manifest = b"not-json";
+        fs::write(source.join("manifest.json"), corrupt_manifest).expect("corrupt source");
+
+        for stage in [
+            SaveStage::Manifest,
+            SaveStage::Tiles,
+            SaveStage::Sqlite,
+            SaveStage::History,
+        ] {
+            let result = recover_project_inner(&source, &recovered, Some(stage));
+            assert!(matches!(result, Err(StorageError::Io(_))));
+            assert_eq!(
+                fs::read(source.join("manifest.json")).expect("source manifest"),
+                corrupt_manifest,
+                "repair failure after {stage:?} must preserve the source"
+            );
+            assert!(
+                !recovered.exists(),
+                "repair failure after {stage:?} must publish no destination"
+            );
+            assert!(
+                !sibling_path(&recovered, ".tmp").exists(),
+                "repair failure after {stage:?} must clean its temporary copy"
+            );
+        }
+
         fs::remove_dir_all(root).expect("cleanup");
     }
 

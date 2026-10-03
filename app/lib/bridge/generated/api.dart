@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `blend_mode_name`, `bound_studio_history_stack`, `bounded_text`, `comic_project_mut`, `comic_project`, `comic_template`, `comic_view`, `decode_live_dab_packet`, `document_mut`, `document_state`, `document`, `encode_live_dab_packet`, `group_mode_name`, `inspection_view`, `layer_kind_name`, `make_page_document_from_snapshot`, `make_page_document`, `materialize_and_set_panel_mask`, `materialize_studio_panel_layers`, `new_document_handle`, `page_document_snapshot`, `panel_mask_points`, `payload_bytes`, `purge_expired_brush_imports`, `report_view`, `restore_page_document`, `staged_brush_import`, `studio_active_document_mut`, `studio_active_document`, `studio_capture_state`, `studio_from_project`, `studio_mutate`, `studio_panel_binding`, `studio_project_mut`, `studio_project`, `studio_push_history`, `studio_restore_state`, `studio_snapshot_payload_bytes`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentHandleState`, `DocumentMutRef`, `DocumentRef`, `StagedBrushImport`, `StudioProjectHistoryState`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Inspect an external brush before conversion or installation.
 Future<BrushImportInspectionView> inspectBrushImport({required String path}) =>
@@ -1317,12 +1317,156 @@ Future<BigInt> deleteLayer({
   required BigInt layer,
 }) => RustLib.instance.api.crateApiDeleteLayer(handle: handle, layer: layer);
 
+/// Delete several selected layer roots and descendants as one undoable edit.
+Future<BigInt> deleteLayers({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+}) => RustLib.instance.api.crateApiDeleteLayers(handle: handle, layers: layers);
+
+/// Return an engine-authored reason when selected page layers cannot be
+/// deleted. The query does not change revision, content, or history.
+Future<String?> preflightDeleteLayers({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+}) => RustLib.instance.api.crateApiPreflightDeleteLayers(
+  handle: handle,
+  layers: layers,
+);
+
+/// Preflight page deletion while preserving project-owned comic layers.
+Future<String?> preflightDeleteProjectLayers({
+  required StudioProjectHandle handle,
+  required List<BigInt> layerIds,
+}) => RustLib.instance.api.crateApiPreflightDeleteProjectLayers(
+  handle: handle,
+  layerIds: layerIds,
+);
+
+/// Set visibility on distinct layers as one undoable operation.
+Future<BigInt> setLayersVisibility({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+  required bool visible,
+}) => RustLib.instance.api.crateApiSetLayersVisibility(
+  handle: handle,
+  layers: layers,
+  visible: visible,
+);
+
+/// Set or clear the session-only Solo presentation override for one layer.
+Future<BigInt> setLayerSolo({required DocumentHandle handle, BigInt? layer}) =>
+    RustLib.instance.api.crateApiSetLayerSolo(handle: handle, layer: layer);
+
+/// Set or clear a layer's full content and property lock.
+Future<BigInt> setLayerLocked({
+  required DocumentHandle handle,
+  required BigInt layer,
+  required bool locked,
+}) => RustLib.instance.api.crateApiSetLayerLocked(
+  handle: handle,
+  layer: layer,
+  locked: locked,
+);
+
+/// Enable or disable an attached mask with one undoable property change.
+Future<BigInt> setMaskEnabled({
+  required DocumentHandle handle,
+  required BigInt mask,
+  required bool enabled,
+}) => RustLib.instance.api.crateApiSetMaskEnabled(
+  handle: handle,
+  mask: mask,
+  enabled: enabled,
+);
+
+/// Invert an attached mask without rewriting pixels.
+Future<BigInt> setMaskInverted({
+  required DocumentHandle handle,
+  required BigInt mask,
+  required bool inverted,
+}) => RustLib.instance.api.crateApiSetMaskInverted(
+  handle: handle,
+  mask: mask,
+  inverted: inverted,
+);
+
+/// Bake an attached mask into its raster owner and remove the mask in one edit.
+Future<BigInt> applyLayerMask({
+  required DocumentHandle handle,
+  required BigInt mask,
+}) => RustLib.instance.api.crateApiApplyLayerMask(handle: handle, mask: mask);
+
+/// Set or clear full locks on distinct selected layers in one undoable edit.
+Future<BigInt> setLayersLocked({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+  required bool locked,
+}) => RustLib.instance.api.crateApiSetLayersLocked(
+  handle: handle,
+  layers: layers,
+  locked: locked,
+);
+
+/// Set or clear color labels on distinct selected layers in one undoable edit.
+/// `label_rgba` is packed as `0xRRGGBBAA`; `None` clears the labels.
+Future<BigInt> setLayersLabel({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+  int? labelRgba,
+}) => RustLib.instance.api.crateApiSetLayersLabel(
+  handle: handle,
+  layers: layers,
+  labelRgba: labelRgba,
+);
+
+/// Reorder selected sibling roots as one undoable stack operation.
+Future<BigInt> reorderLayers({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+  required int index,
+}) => RustLib.instance.api.crateApiReorderLayers(
+  handle: handle,
+  layers: layers,
+  index: index,
+);
+
 /// Duplicate a leaf layer within the active page document.
 Future<BigInt> duplicateLayer({
   required DocumentHandle handle,
   required BigInt source,
 }) =>
     RustLib.instance.api.crateApiDuplicateLayer(handle: handle, source: source);
+
+/// Duplicate multiple sibling layer roots and their owned hierarchy atomically.
+Future<List<BigInt>> duplicateLayers({
+  required DocumentHandle handle,
+  required List<BigInt> sources,
+}) => RustLib.instance.api.crateApiDuplicateLayers(
+  handle: handle,
+  sources: sources,
+);
+
+/// Group selected sibling layers in a single undoable pass-through group.
+Future<BigInt> groupLayers({
+  required DocumentHandle handle,
+  required List<BigInt> members,
+}) =>
+    RustLib.instance.api.crateApiGroupLayers(handle: handle, members: members);
+
+/// Return an actionable reason when selected layers cannot be grouped.
+Future<String?> preflightGroupLayers({
+  required DocumentHandle handle,
+  required List<BigInt> members,
+}) => RustLib.instance.api.crateApiPreflightGroupLayers(
+  handle: handle,
+  members: members,
+);
+
+/// Ungroup a compositing-safe ordinary layer group as one undoable edit.
+Future<BigInt> ungroupLayer({
+  required DocumentHandle handle,
+  required BigInt group,
+}) => RustLib.instance.api.crateApiUngroupLayer(handle: handle, group: group);
 
 /// Duplicate a page layer through the active studio project document handle.
 Future<BigInt> duplicateProjectLayer({
@@ -1331,6 +1475,15 @@ Future<BigInt> duplicateProjectLayer({
 }) => RustLib.instance.api.crateApiDuplicateProjectLayer(
   handle: handle,
   source: source,
+);
+
+/// Duplicate multiple sibling roots in the active unified-project page.
+Future<List<BigInt>> duplicateProjectLayers({
+  required StudioProjectHandle handle,
+  required List<BigInt> sources,
+}) => RustLib.instance.api.crateApiDuplicateProjectLayers(
+  handle: handle,
+  sources: sources,
 );
 
 /// Delete a page layer while preserving the unified comic project's panel
@@ -1342,6 +1495,15 @@ Future<BigInt> deleteProjectLayer({
 }) => RustLib.instance.api.crateApiDeleteProjectLayer(
   handle: handle,
   layer: layer,
+);
+
+/// Atomically delete selected page layers while preserving comic ownership.
+Future<BigInt> deleteProjectLayers({
+  required StudioProjectHandle handle,
+  required List<BigInt> layerIds,
+}) => RustLib.instance.api.crateApiDeleteProjectLayers(
+  handle: handle,
+  layerIds: layerIds,
 );
 
 /// Move a layer within the validated sibling list. The index is a position
@@ -1409,6 +1571,35 @@ Future<BigInt> mergeLayers({
   handle: handle,
   targetLayer: targetLayer,
   sourceLayer: sourceLayer,
+);
+
+/// Validate a two-layer merge without mutating the active document.
+Future<String> preflightMergeLayers({
+  required DocumentHandle handle,
+  required BigInt targetLayer,
+  required BigInt sourceLayer,
+}) => RustLib.instance.api.crateApiPreflightMergeLayers(
+  handle: handle,
+  targetLayer: targetLayer,
+  sourceLayer: sourceLayer,
+);
+
+/// Merge contiguous selected sibling rasters in the active document.
+Future<BigInt> mergeLayersBulk({
+  required DocumentHandle handle,
+  required List<BigInt> layers,
+}) => RustLib.instance.api.crateApiMergeLayersBulk(
+  handle: handle,
+  layers: layers,
+);
+
+/// Merge contiguous selected sibling rasters on the active unified-project page.
+Future<BigInt> mergeProjectLayersBulk({
+  required StudioProjectHandle handle,
+  required List<BigInt> layers,
+}) => RustLib.instance.api.crateApiMergeProjectLayersBulk(
+  handle: handle,
+  layers: layers,
 );
 
 /// Begin the built-in technical-pen stroke on the active raster layer.
@@ -1553,6 +1744,21 @@ Future<void> cancelBrushDraft({
   draftId: draftId,
 );
 
+/// Render a bounded brush-editor scratch stroke as a transparent PNG.
+Future<Uint8List> renderBrushPreviewPng({
+  required DocumentHandle handle,
+  required BigInt brushId,
+  required int width,
+  required int height,
+  required List<BrushPreviewPoint> points,
+}) => RustLib.instance.api.crateApiRenderBrushPreviewPng(
+  handle: handle,
+  brushId: brushId,
+  width: width,
+  height: height,
+  points: points,
+);
+
 /// Apply the common editable layer flags through shared command IDs.
 Future<BigInt> updateLayerProperties({
   required DocumentHandle handle,
@@ -1570,6 +1776,44 @@ Future<BigInt> updateLayerProperties({
   alphaLock: alphaLock,
   clipping: clipping,
   reference: reference,
+);
+
+/// Begin an opacity-slider preview for one stable layer ID.
+Future<BigInt> beginLayerOpacityEdit({
+  required DocumentHandle handle,
+  required BigInt layerId,
+}) => RustLib.instance.api.crateApiBeginLayerOpacityEdit(
+  handle: handle,
+  layerId: layerId,
+);
+
+/// Update the temporary opacity preview without creating history entries.
+Future<BigInt> updateLayerOpacityEdit({
+  required DocumentHandle handle,
+  required BigInt editId,
+  required int opacity,
+}) => RustLib.instance.api.crateApiUpdateLayerOpacityEdit(
+  handle: handle,
+  editId: editId,
+  opacity: opacity,
+);
+
+/// Commit a slider preview as one undoable command.
+Future<BigInt> commitLayerOpacityEdit({
+  required DocumentHandle handle,
+  required BigInt editId,
+}) => RustLib.instance.api.crateApiCommitLayerOpacityEdit(
+  handle: handle,
+  editId: editId,
+);
+
+/// Cancel a slider preview and restore its gesture-start opacity.
+Future<BigInt> cancelLayerOpacityEdit({
+  required DocumentHandle handle,
+  required BigInt editId,
+}) => RustLib.instance.api.crateApiCancelLayerOpacityEdit(
+  handle: handle,
+  editId: editId,
 );
 
 /// Apply the non-destructive layer presentation fields through journaled
@@ -2119,9 +2363,9 @@ Future<CompositeTilesSnapshotHandle> captureCompositeTilesSnapshot({
 /// [`capture_composite_tiles_snapshot`]. This call uses the snapshot's own
 /// opaque handle, leaving the document handle free for incoming pointer work.
 Future<Uint8List> composeCompositeTilesSnapshot({
-  required CompositeTilesSnapshotHandle snapshot,
+  required CompositeTilesSnapshotHandle snapshotHandle,
 }) => RustLib.instance.api.crateApiComposeCompositeTilesSnapshot(
-  snapshot: snapshot,
+  snapshotHandle: snapshotHandle,
 );
 
 /// Read a bounded RGBA layer thumbnail for the responsive layer panel.
@@ -2152,7 +2396,7 @@ Future<List<EngineEvent>> drainEvents({required DocumentHandle handle}) =>
 /// The packet is intentionally not JSON: it crosses the high-frequency
 /// control/data boundary with fixed-width little-endian fields. Version 3
 /// drains tile invalidations and exact stroke-tile coverage from the same
-/// event snapshot. Header: `u16 version`, `u16 flags`, `u32 tile_count`,
+/// event snapshot. Version 4 header: `u16 version`, `u16 flags`, `u32 tile_count`,
 /// `u32 acknowledgement_count`. Tile records contain a `u64 revision`,
 /// `u128 layer_id`, `i32 tile_x`, and `i32 tile_y`; acknowledgements retain
 /// the fixed-width prefix documented by `drain_stroke_acknowledgements`, then
@@ -2175,6 +2419,22 @@ Future<Uint8List> drainStrokeAcknowledgements({
 /// Return an immutable layer projection.
 Future<List<Layer>> layers({required DocumentHandle handle}) =>
     RustLib.instance.api.crateApiLayers(handle: handle);
+
+/// Read the durable layer-panel state for the active document/page.
+Future<LayerPanelStateView> layerPanelState({required DocumentHandle handle}) =>
+    RustLib.instance.api.crateApiLayerPanelState(handle: handle);
+
+/// Persist the primary target and collapsed groups without creating a content
+/// history entry. Validation and project revision ownership stay in Rust.
+Future<BigInt> setLayerPanelState({
+  required DocumentHandle handle,
+  BigInt? primaryLayerId,
+  required List<BigInt> collapsedGroupIds,
+}) => RustLib.instance.api.crateApiSetLayerPanelState(
+  handle: handle,
+  primaryLayerId: primaryLayerId,
+  collapsedGroupIds: collapsedGroupIds,
+);
 
 /// Return immutable layer projections without leaking the engine's layer map.
 Future<List<LayerSummary>> layerSummaries({required DocumentHandle handle}) =>
@@ -2343,9 +2603,35 @@ class BrushImportStageView {
           expiresInSeconds == other.expiresInSeconds;
 }
 
+/// Normalized scratchpad sample sent to the bounded Rust preview renderer.
+class BrushPreviewPoint {
+  final double x;
+  final double y;
+  final double pressure;
+
+  const BrushPreviewPoint({
+    required this.x,
+    required this.y,
+    required this.pressure,
+  });
+
+  @override
+  int get hashCode => x.hashCode ^ y.hashCode ^ pressure.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BrushPreviewPoint &&
+          runtimeType == other.runtimeType &&
+          x == other.x &&
+          y == other.y &&
+          pressure == other.pressure;
+}
+
 /// Small immutable brush projection for the Flutter library UI.
 class BrushSummary {
   final BigInt id;
+  final bool isBuiltin;
   final String name;
   final List<String> tags;
   final double diameterPx;
@@ -2367,6 +2653,7 @@ class BrushSummary {
 
   const BrushSummary({
     required this.id,
+    required this.isBuiltin,
     required this.name,
     required this.tags,
     required this.diameterPx,
@@ -2390,6 +2677,7 @@ class BrushSummary {
   @override
   int get hashCode =>
       id.hashCode ^
+      isBuiltin.hashCode ^
       name.hashCode ^
       tags.hashCode ^
       diameterPx.hashCode ^
@@ -2415,6 +2703,7 @@ class BrushSummary {
       other is BrushSummary &&
           runtimeType == other.runtimeType &&
           id == other.id &&
+          isBuiltin == other.isBuiltin &&
           name == other.name &&
           tags == other.tags &&
           diameterPx == other.diameterPx &&
@@ -3052,12 +3341,40 @@ class HistorySnapshotView {
           wasTrimmed == other.wasTrimmed;
 }
 
+/// Persisted layer-panel selection and group disclosure for one document page.
+class LayerPanelStateView {
+  final BigInt? primaryLayerId;
+  final List<String> collapsedGroupIds;
+
+  const LayerPanelStateView({
+    this.primaryLayerId,
+    required this.collapsedGroupIds,
+  });
+
+  static Future<LayerPanelStateView> default_() =>
+      RustLib.instance.api.crateApiLayerPanelStateViewDefault();
+
+  @override
+  int get hashCode => primaryLayerId.hashCode ^ collapsedGroupIds.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LayerPanelStateView &&
+          runtimeType == other.runtimeType &&
+          primaryLayerId == other.primaryLayerId &&
+          collapsedGroupIds == other.collapsedGroupIds;
+}
+
 /// Immutable layer projection for responsive Flutter panels.  Keeping this
 /// DTO flat avoids exposing the internal layer tree or mutable document state
 /// across the FFI boundary.
 class LayerSummary {
   final BigInt id;
   final BigInt? parent;
+  final BigInt? maskOwner;
+  final bool maskEnabled;
+  final bool maskInverted;
   final int order;
   final String kind;
   final String name;
@@ -3066,15 +3383,34 @@ class LayerSummary {
   final String blendMode;
   final String groupMode;
   final bool alphaLock;
+  final bool locked;
   final bool clipping;
   final bool reference;
   final int? labelRgba;
   final int adjustmentBrightness;
   final int adjustmentContrast;
+  final bool canDrag;
+  final String? dragReason;
+  final bool canReceiveLayers;
+  final String? receiveReason;
+  final bool canEditProperties;
+  final String? editPropertiesReason;
+  final bool canDuplicate;
+  final String? duplicateReason;
+  final bool canDelete;
+  final String? deleteReason;
+  final bool canUngroup;
+  final String? ungroupReason;
+  final bool canApplyMask;
+  final String? applyMaskReason;
+  final String? mergeDownReason;
 
   const LayerSummary({
     required this.id,
     this.parent,
+    this.maskOwner,
+    required this.maskEnabled,
+    required this.maskInverted,
     required this.order,
     required this.kind,
     required this.name,
@@ -3083,17 +3419,36 @@ class LayerSummary {
     required this.blendMode,
     required this.groupMode,
     required this.alphaLock,
+    required this.locked,
     required this.clipping,
     required this.reference,
     this.labelRgba,
     required this.adjustmentBrightness,
     required this.adjustmentContrast,
+    required this.canDrag,
+    this.dragReason,
+    required this.canReceiveLayers,
+    this.receiveReason,
+    required this.canEditProperties,
+    this.editPropertiesReason,
+    required this.canDuplicate,
+    this.duplicateReason,
+    required this.canDelete,
+    this.deleteReason,
+    required this.canUngroup,
+    this.ungroupReason,
+    required this.canApplyMask,
+    this.applyMaskReason,
+    this.mergeDownReason,
   });
 
   @override
   int get hashCode =>
       id.hashCode ^
       parent.hashCode ^
+      maskOwner.hashCode ^
+      maskEnabled.hashCode ^
+      maskInverted.hashCode ^
       order.hashCode ^
       kind.hashCode ^
       name.hashCode ^
@@ -3102,11 +3457,27 @@ class LayerSummary {
       blendMode.hashCode ^
       groupMode.hashCode ^
       alphaLock.hashCode ^
+      locked.hashCode ^
       clipping.hashCode ^
       reference.hashCode ^
       labelRgba.hashCode ^
       adjustmentBrightness.hashCode ^
-      adjustmentContrast.hashCode;
+      adjustmentContrast.hashCode ^
+      canDrag.hashCode ^
+      dragReason.hashCode ^
+      canReceiveLayers.hashCode ^
+      receiveReason.hashCode ^
+      canEditProperties.hashCode ^
+      editPropertiesReason.hashCode ^
+      canDuplicate.hashCode ^
+      duplicateReason.hashCode ^
+      canDelete.hashCode ^
+      deleteReason.hashCode ^
+      canUngroup.hashCode ^
+      ungroupReason.hashCode ^
+      canApplyMask.hashCode ^
+      applyMaskReason.hashCode ^
+      mergeDownReason.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3115,6 +3486,9 @@ class LayerSummary {
           runtimeType == other.runtimeType &&
           id == other.id &&
           parent == other.parent &&
+          maskOwner == other.maskOwner &&
+          maskEnabled == other.maskEnabled &&
+          maskInverted == other.maskInverted &&
           order == other.order &&
           kind == other.kind &&
           name == other.name &&
@@ -3123,11 +3497,27 @@ class LayerSummary {
           blendMode == other.blendMode &&
           groupMode == other.groupMode &&
           alphaLock == other.alphaLock &&
+          locked == other.locked &&
           clipping == other.clipping &&
           reference == other.reference &&
           labelRgba == other.labelRgba &&
           adjustmentBrightness == other.adjustmentBrightness &&
-          adjustmentContrast == other.adjustmentContrast;
+          adjustmentContrast == other.adjustmentContrast &&
+          canDrag == other.canDrag &&
+          dragReason == other.dragReason &&
+          canReceiveLayers == other.canReceiveLayers &&
+          receiveReason == other.receiveReason &&
+          canEditProperties == other.canEditProperties &&
+          editPropertiesReason == other.editPropertiesReason &&
+          canDuplicate == other.canDuplicate &&
+          duplicateReason == other.duplicateReason &&
+          canDelete == other.canDelete &&
+          deleteReason == other.deleteReason &&
+          canUngroup == other.canUngroup &&
+          ungroupReason == other.ungroupReason &&
+          canApplyMask == other.canApplyMask &&
+          applyMaskReason == other.applyMaskReason &&
+          mergeDownReason == other.mergeDownReason;
 }
 
 /// Bounded editable vector-stroke projection used by the vector inspector.

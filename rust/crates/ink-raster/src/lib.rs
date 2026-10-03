@@ -165,7 +165,9 @@ impl TileStore {
             x: i32::try_from(x / TILE_SIZE).unwrap_or(i32::MAX),
             y: i32::try_from(y / TILE_SIZE).unwrap_or(i32::MAX),
         };
-        self.read(coord).pixel_rgba(x % TILE_SIZE, y % TILE_SIZE)
+        self.tiles.get(&coord).map_or_else(Rgba8::default, |tile| {
+            tile.pixel_rgba(x % TILE_SIZE, y % TILE_SIZE)
+        })
     }
 
     /// Blend a pixel and mark the containing tile dirty.

@@ -21,17 +21,44 @@ pub enum EditorCommand {
     DeleteLayer {
         layer: LayerId,
     },
+    /// Delete several structural roots and their descendants atomically.
+    DeleteLayers {
+        layers: Vec<LayerId>,
+    },
     /// Duplicate one leaf layer into a new stable ID, preserving its content
     /// and presentation while inserting the copy immediately above its source.
     DuplicateLayer {
         source: LayerId,
         duplicate: LayerId,
     },
+    /// Duplicate one leaf together with every mask attached to it. The mask
+    /// pairs are encoded in sibling order and receive fresh stable IDs.
+    DuplicateLayerWithMasks {
+        source: LayerId,
+        duplicate: LayerId,
+        masks: Vec<(LayerId, LayerId)>,
+    },
     /// Duplicate an ordinary group and every descendant with stable ID remaps.
     /// Pairs are encoded in deterministic source preorder, with the root first.
     DuplicateLayerSubtree {
         source: LayerId,
         duplicates: Vec<(LayerId, LayerId)>,
+    },
+    /// Atomically duplicate selected sibling roots and their owned subtrees.
+    /// `duplicates` is concatenated source-preorder mappings in `sources` order.
+    DuplicateLayers {
+        sources: Vec<LayerId>,
+        duplicates: Vec<(LayerId, LayerId)>,
+    },
+    /// Group selected sibling layers into one pass-through group.
+    GroupLayers {
+        group: LayerId,
+        members: Vec<LayerId>,
+    },
+    /// Remove an ordinary group while keeping its children at the group's
+    /// sibling position. The engine validates that this preserves compositing.
+    UngroupLayer {
+        group: LayerId,
     },
     /// Merge the standalone raster [source] into [target] and remove source.
     /// The command is intentionally explicit about both IDs so replay and
@@ -40,9 +67,18 @@ pub enum EditorCommand {
         target: LayerId,
         source: LayerId,
     },
+    /// Merge a contiguous selected sibling stack into its lowest layer.
+    MergeLayersBulk {
+        layers: Vec<LayerId>,
+    },
     MoveLayer {
         layer: LayerId,
         parent: Option<LayerId>,
+        index: u32,
+    },
+    /// Reorder selected sibling roots together while preserving their order.
+    ReorderLayers {
+        layers: Vec<LayerId>,
         index: u32,
     },
     /// Atomically create the deterministic layer tree owned by a comic panel.
@@ -72,6 +108,30 @@ pub enum EditorCommand {
         layer: LayerId,
         visible: bool,
     },
+    /// Enable or disable an attached mask without changing its stored tiles.
+    SetMaskEnabled {
+        mask: LayerId,
+        enabled: bool,
+    },
+    /// Invert an attached mask without rewriting its stored tiles.
+    SetMaskInverted {
+        mask: LayerId,
+        inverted: bool,
+    },
+    /// Apply an attached mask to its raster owner and remove the mask atomically.
+    ApplyLayerMask {
+        mask: LayerId,
+    },
+    /// Change visibility for a set of distinct layers in one history entry.
+    SetLayersVisibility {
+        layers: Vec<LayerId>,
+        visible: bool,
+    },
+    /// Change the color label for distinct selected layers atomically.
+    SetLayersLabel {
+        layers: Vec<LayerId>,
+        label: Option<Rgba8>,
+    },
     SetLayerBlendMode {
         layer: LayerId,
         mode: LayerBlendMode,
@@ -83,6 +143,16 @@ pub enum EditorCommand {
     SetLayerAlphaLock {
         layer: LayerId,
         enabled: bool,
+    },
+    /// Set or clear the full content and property lock on one layer.
+    SetLayerLocked {
+        layer: LayerId,
+        locked: bool,
+    },
+    /// Change full lock state on distinct selected layers in one history entry.
+    SetLayersLocked {
+        layers: Vec<LayerId>,
+        locked: bool,
     },
     SetLayerClipping {
         layer: LayerId,
@@ -251,10 +321,42 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
             bytes.push(2);
             append_id(&mut bytes, *layer);
         }
+        EditorCommand::DeleteLayers { layers } => {
+            bytes.push(37);
+            let count = u16::try_from(layers.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for layer in layers.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *layer);
+            }
+        }
+        EditorCommand::SetLayersVisibility { layers, visible } => {
+            bytes.push(40);
+            bytes.push(u8::from(*visible));
+            let count = u16::try_from(layers.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for layer in layers.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *layer);
+            }
+        }
         EditorCommand::DuplicateLayer { source, duplicate } => {
             bytes.push(33);
             append_id(&mut bytes, *source);
             append_id(&mut bytes, *duplicate);
+        }
+        EditorCommand::DuplicateLayerWithMasks {
+            source,
+            duplicate,
+            masks,
+        } => {
+            bytes.push(39);
+            append_id(&mut bytes, *source);
+            append_id(&mut bytes, *duplicate);
+            let count = u16::try_from(masks.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for (source_mask, duplicate_mask) in masks.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *source_mask);
+                append_id(&mut bytes, *duplicate_mask);
+            }
         }
         EditorCommand::DuplicateLayerSubtree { source, duplicates } => {
             bytes.push(34);
@@ -266,10 +368,48 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
                 append_id(&mut bytes, *duplicate_id);
             }
         }
+        EditorCommand::DuplicateLayers {
+            sources,
+            duplicates,
+        } => {
+            bytes.push(45);
+            let source_count = u16::try_from(sources.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&source_count.to_le_bytes());
+            for source in sources.iter().take(usize::from(source_count)) {
+                append_id(&mut bytes, *source);
+            }
+            let duplicate_count = u16::try_from(duplicates.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&duplicate_count.to_le_bytes());
+            for (source, duplicate) in duplicates.iter().take(usize::from(duplicate_count)) {
+                append_id(&mut bytes, *source);
+                append_id(&mut bytes, *duplicate);
+            }
+        }
+        EditorCommand::GroupLayers { group, members } => {
+            bytes.push(36);
+            append_id(&mut bytes, *group);
+            let count = u16::try_from(members.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for member in members.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *member);
+            }
+        }
+        EditorCommand::UngroupLayer { group } => {
+            bytes.push(38);
+            append_id(&mut bytes, *group);
+        }
         EditorCommand::MergeLayers { target, source } => {
             bytes.push(29);
             append_id(&mut bytes, *target);
             append_id(&mut bytes, *source);
+        }
+        EditorCommand::MergeLayersBulk { layers } => {
+            bytes.push(46);
+            let count = u16::try_from(layers.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for layer in layers.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *layer);
+            }
         }
         EditorCommand::MoveLayer {
             layer,
@@ -319,6 +459,20 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
             append_id(&mut bytes, *layer);
             bytes.push(u8::from(*visible));
         }
+        EditorCommand::SetMaskEnabled { mask, enabled } => {
+            bytes.push(47);
+            append_id(&mut bytes, *mask);
+            bytes.push(u8::from(*enabled));
+        }
+        EditorCommand::SetMaskInverted { mask, inverted } => {
+            bytes.push(48);
+            append_id(&mut bytes, *mask);
+            bytes.push(u8::from(*inverted));
+        }
+        EditorCommand::ApplyLayerMask { mask } => {
+            bytes.push(49);
+            append_id(&mut bytes, *mask);
+        }
         EditorCommand::SetLayerBlendMode { layer, mode } => {
             bytes.push(11);
             append_id(&mut bytes, *layer);
@@ -336,6 +490,41 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
             bytes.push(12);
             append_id(&mut bytes, *layer);
             bytes.push(u8::from(*enabled));
+        }
+        EditorCommand::SetLayerLocked { layer, locked } => {
+            bytes.push(41);
+            append_id(&mut bytes, *layer);
+            bytes.push(u8::from(*locked));
+        }
+        EditorCommand::SetLayersLocked { layers, locked } => {
+            bytes.push(42);
+            bytes.push(u8::from(*locked));
+            let count = u16::try_from(layers.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for layer in layers.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *layer);
+            }
+        }
+        EditorCommand::SetLayersLabel { layers, label } => {
+            bytes.push(44);
+            bytes.push(u8::from(label.is_some()));
+            if let Some(label) = label {
+                bytes.extend([label.r, label.g, label.b, label.a]);
+            }
+            let count = u16::try_from(layers.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for layer in layers.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *layer);
+            }
+        }
+        EditorCommand::ReorderLayers { layers, index } => {
+            bytes.push(43);
+            bytes.extend_from_slice(&index.to_le_bytes());
+            let count = u16::try_from(layers.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for layer in layers.iter().take(usize::from(count)) {
+                append_id(&mut bytes, *layer);
+            }
         }
         EditorCommand::SetLayerClipping { layer, enabled } => {
             bytes.push(13);
@@ -652,10 +841,57 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
         2 => EditorCommand::DeleteLayer {
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
         },
+        37 => {
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut layers = Vec::with_capacity(count);
+            for _ in 0..count {
+                layers.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::DeleteLayers { layers }
+        }
+        40 => {
+            let visible = match read_u8(bytes, &mut cursor)? {
+                0 => false,
+                1 => true,
+                _ => return Err(CommandDecodeError::TrailingBytes),
+            };
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut layers = Vec::with_capacity(count);
+            for _ in 0..count {
+                layers.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::SetLayersVisibility { layers, visible }
+        }
         33 => EditorCommand::DuplicateLayer {
             source: Id::from_u128(read_id(bytes, &mut cursor)?),
             duplicate: Id::from_u128(read_id(bytes, &mut cursor)?),
         },
+        39 => {
+            let source = Id::from_u128(read_id(bytes, &mut cursor)?);
+            let duplicate = Id::from_u128(read_id(bytes, &mut cursor)?);
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut masks = Vec::with_capacity(count);
+            for _ in 0..count {
+                masks.push((
+                    Id::from_u128(read_id(bytes, &mut cursor)?),
+                    Id::from_u128(read_id(bytes, &mut cursor)?),
+                ));
+            }
+            EditorCommand::DuplicateLayerWithMasks {
+                source,
+                duplicate,
+                masks,
+            }
+        }
         34 => {
             let source = Id::from_u128(read_id(bytes, &mut cursor)?);
             let count = usize::from(read_u16(bytes, &mut cursor)?);
@@ -671,6 +907,57 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
             }
             EditorCommand::DuplicateLayerSubtree { source, duplicates }
         }
+        45 => {
+            let source_count = usize::from(read_u16(bytes, &mut cursor)?);
+            if !(2..=4_096).contains(&source_count) {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut sources = Vec::with_capacity(source_count);
+            for _ in 0..source_count {
+                sources.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            let duplicate_count = usize::from(read_u16(bytes, &mut cursor)?);
+            if duplicate_count < source_count || duplicate_count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut duplicates = Vec::with_capacity(duplicate_count);
+            for _ in 0..duplicate_count {
+                duplicates.push((
+                    Id::from_u128(read_id(bytes, &mut cursor)?),
+                    Id::from_u128(read_id(bytes, &mut cursor)?),
+                ));
+            }
+            EditorCommand::DuplicateLayers {
+                sources,
+                duplicates,
+            }
+        }
+        46 => {
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if !(2..=4_096).contains(&count) {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut layers = Vec::with_capacity(count);
+            for _ in 0..count {
+                layers.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::MergeLayersBulk { layers }
+        }
+        36 => {
+            let group = Id::from_u128(read_id(bytes, &mut cursor)?);
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if !(2..=4_096).contains(&count) {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut members = Vec::with_capacity(count);
+            for _ in 0..count {
+                members.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::GroupLayers { group, members }
+        }
+        38 => EditorCommand::UngroupLayer {
+            group: Id::from_u128(read_id(bytes, &mut cursor)?),
+        },
         29 => EditorCommand::MergeLayers {
             target: Id::from_u128(read_id(bytes, &mut cursor)?),
             source: Id::from_u128(read_id(bytes, &mut cursor)?),
@@ -715,6 +1002,17 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
             visible: read_bool(bytes, &mut cursor)?,
         },
+        47 => EditorCommand::SetMaskEnabled {
+            mask: Id::from_u128(read_id(bytes, &mut cursor)?),
+            enabled: read_bool(bytes, &mut cursor)?,
+        },
+        48 => EditorCommand::SetMaskInverted {
+            mask: Id::from_u128(read_id(bytes, &mut cursor)?),
+            inverted: read_bool(bytes, &mut cursor)?,
+        },
+        49 => EditorCommand::ApplyLayerMask {
+            mask: Id::from_u128(read_id(bytes, &mut cursor)?),
+        },
         11 => EditorCommand::SetLayerBlendMode {
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
             mode: decode_layer_blend_mode(read_u8(bytes, &mut cursor)?)?,
@@ -732,6 +1030,55 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
             enabled: read_bool(bytes, &mut cursor)?,
         },
+        41 => EditorCommand::SetLayerLocked {
+            layer: Id::from_u128(read_id(bytes, &mut cursor)?),
+            locked: read_bool(bytes, &mut cursor)?,
+        },
+        42 => {
+            let locked = read_bool(bytes, &mut cursor)?;
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut layers = Vec::with_capacity(count);
+            for _ in 0..count {
+                layers.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::SetLayersLocked { layers, locked }
+        }
+        43 => {
+            let index = read_u32(bytes, &mut cursor)?;
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut layers = Vec::with_capacity(count);
+            for _ in 0..count {
+                layers.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::ReorderLayers { layers, index }
+        }
+        44 => {
+            let label = if read_optional_flag(bytes, &mut cursor)? {
+                Some(Rgba8 {
+                    r: read_u8(bytes, &mut cursor)?,
+                    g: read_u8(bytes, &mut cursor)?,
+                    b: read_u8(bytes, &mut cursor)?,
+                    a: read_u8(bytes, &mut cursor)?,
+                })
+            } else {
+                None
+            };
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > 4_096 {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut layers = Vec::with_capacity(count);
+            for _ in 0..count {
+                layers.push(Id::from_u128(read_id(bytes, &mut cursor)?));
+            }
+            EditorCommand::SetLayersLabel { layers, label }
+        }
         13 => EditorCommand::SetLayerClipping {
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
             enabled: read_bool(bytes, &mut cursor)?,
@@ -1244,9 +1591,40 @@ mod tests {
             EditorCommand::DeleteLayer {
                 layer: LayerId::from_u128(3),
             },
+            EditorCommand::DeleteLayers {
+                layers: vec![LayerId::from_u128(3), LayerId::from_u128(4)],
+            },
+            EditorCommand::SetLayersVisibility {
+                layers: vec![LayerId::from_u128(3), LayerId::from_u128(4)],
+                visible: false,
+            },
+            EditorCommand::SetMaskEnabled {
+                mask: LayerId::from_u128(5),
+                enabled: false,
+            },
+            EditorCommand::SetMaskInverted {
+                mask: LayerId::from_u128(5),
+                inverted: true,
+            },
+            EditorCommand::ApplyLayerMask {
+                mask: LayerId::from_u128(5),
+            },
+            EditorCommand::SetLayerLocked {
+                layer: LayerId::from_u128(8),
+                locked: true,
+            },
+            EditorCommand::SetLayersLocked {
+                layers: vec![LayerId::from_u128(8), LayerId::from_u128(9)],
+                locked: false,
+            },
             EditorCommand::DuplicateLayer {
                 source: LayerId::from_u128(2),
                 duplicate: LayerId::from_u128(3),
+            },
+            EditorCommand::DuplicateLayerWithMasks {
+                source: LayerId::from_u128(2),
+                duplicate: LayerId::from_u128(4),
+                masks: vec![(LayerId::from_u128(3), LayerId::from_u128(5))],
             },
             EditorCommand::DuplicateLayerSubtree {
                 source: LayerId::from_u128(2),
@@ -1255,14 +1633,44 @@ mod tests {
                     (LayerId::from_u128(3), LayerId::from_u128(6)),
                 ],
             },
+            EditorCommand::DuplicateLayers {
+                sources: vec![LayerId::from_u128(2), LayerId::from_u128(4)],
+                duplicates: vec![
+                    (LayerId::from_u128(2), LayerId::from_u128(10)),
+                    (LayerId::from_u128(4), LayerId::from_u128(11)),
+                ],
+            },
+            EditorCommand::GroupLayers {
+                group: LayerId::from_u128(9),
+                members: vec![LayerId::from_u128(2), LayerId::from_u128(3)],
+            },
+            EditorCommand::UngroupLayer {
+                group: LayerId::from_u128(9),
+            },
             EditorCommand::MergeLayers {
                 target: LayerId::from_u128(2),
                 source: LayerId::from_u128(3),
+            },
+            EditorCommand::MergeLayersBulk {
+                layers: vec![LayerId::from_u128(2), LayerId::from_u128(3)],
             },
             EditorCommand::MoveLayer {
                 layer: LayerId::from_u128(4),
                 parent: None,
                 index: 7,
+            },
+            EditorCommand::ReorderLayers {
+                layers: vec![LayerId::from_u128(2), LayerId::from_u128(4)],
+                index: 1,
+            },
+            EditorCommand::SetLayersLabel {
+                layers: vec![LayerId::from_u128(2), LayerId::from_u128(4)],
+                label: Some(Rgba8 {
+                    r: 10,
+                    g: 20,
+                    b: 30,
+                    a: 255,
+                }),
             },
             EditorCommand::CreatePanelLayerTree {
                 panel: LayerId::from_u128(20),

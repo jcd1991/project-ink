@@ -919,6 +919,7 @@ dependencies = [
  "image",
  "ink-input",
  "ink-model",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

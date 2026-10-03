@@ -4,7 +4,8 @@ import 'package:flutter/foundation.dart';
 
 import '../generated/api.dart' as rust;
 import '../generated/frb_generated.dart' show RustLib;
-import '../../tools/brush_library.dart' show BrushCurvePointView;
+import '../../tools/brush_library.dart'
+    show BrushCurvePointView, BrushPreviewPointView;
 import 'engine_api_contract.dart';
 import 'engine_api_models.dart';
 import 'engine_api_packets.dart';
@@ -690,6 +691,31 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<Uint8List> renderBrushPreview({
+    required int brushId,
+    required int width,
+    required int height,
+    required List<BrushPreviewPointView> points,
+  }) async {
+    _requireOpen();
+    return rust.renderBrushPreviewPng(
+      handle: _handle,
+      brushId: BigInt.from(brushId),
+      width: width,
+      height: height,
+      points: points
+          .map(
+            (point) => rust.BrushPreviewPoint(
+              x: point.x,
+              y: point.y,
+              pressure: point.pressure,
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  @override
   Future<void> endStroke() async {
     _requireOpen();
     _revision = (await rust.endStroke(handle: _handle)).toInt();
@@ -921,6 +947,28 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<void> reorderLayers({
+    required List<int> layerIds,
+    required int index,
+  }) async {
+    _requireOpen();
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length ||
+        index < 0) {
+      throw ArgumentError(
+        'reorder requires unique IDs and a non-negative index',
+      );
+    }
+    _revision =
+        (await rust.reorderLayers(
+          handle: _handle,
+          layers: layerIds.map(_layerIds.toRust).toList(growable: false),
+          index: index,
+        )).toInt();
+  }
+
+  @override
   Future<void> deleteLayer({required int layerId}) async {
     _requireOpen();
     if (layerId <= 0) throw ArgumentError('invalid layer ID');
@@ -935,6 +983,204 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
               handle: _handle,
               layer: _layerIds.toRust(layerId),
             )).toInt();
+  }
+
+  @override
+  Future<void> deleteLayers({required List<int> layerIds}) async {
+    _requireOpen();
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('delete requires unique layer IDs');
+    }
+    final project = _projectHandle;
+    _revision =
+        project != null && _usingProjectHandle
+            ? (await rust.deleteProjectLayers(
+              handle: project,
+              layerIds: layerIds.map(_layerIds.toRust).toList(growable: false),
+            )).toInt()
+            : (await rust.deleteLayers(
+              handle: _handle,
+              layers: layerIds.map(_layerIds.toRust).toList(growable: false),
+            )).toInt();
+  }
+
+  @override
+  Future<String?> preflightDeleteLayers({required List<int> layerIds}) async {
+    _requireOpen();
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('delete requires unique positive layer IDs');
+    }
+    final ids = layerIds.map(_layerIds.toRust).toList(growable: false);
+    final project = _projectHandle;
+    if (project != null && _usingProjectHandle) {
+      return rust.preflightDeleteProjectLayers(handle: project, layerIds: ids);
+    }
+    return rust.preflightDeleteLayers(handle: _handle, layers: ids);
+  }
+
+  @override
+  Future<void> setLayersVisibility({
+    required List<int> layerIds,
+    required bool visible,
+  }) async {
+    _requireOpen();
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('visibility requires unique layer IDs');
+    }
+    _revision =
+        (await rust.setLayersVisibility(
+          handle: _handle,
+          layers: layerIds.map(_layerIds.toRust).toList(growable: false),
+          visible: visible,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setLayerSolo({required int? layerId}) async {
+    _requireOpen();
+    if (layerId != null && layerId <= 0) {
+      throw ArgumentError('invalid solo layer ID');
+    }
+    _revision =
+        (await rust.setLayerSolo(
+          handle: _handle,
+          layer: layerId == null ? null : _layerIds.toRust(layerId),
+        )).toInt();
+  }
+
+  @override
+  Future<LayerPanelStateView> layerPanelState() async {
+    _requireOpen();
+    final state = await rust.layerPanelState(handle: _handle);
+    return LayerPanelStateView(
+      primaryLayerId:
+          state.primaryLayerId == null
+              ? null
+              : _layerIds.toDart(state.primaryLayerId!),
+      collapsedGroupIds: state.collapsedGroupIds
+          .map((id) => _layerIds.toDart(BigInt.parse(id)))
+          .toList(growable: false),
+    );
+  }
+
+  @override
+  Future<void> setLayerPanelState({
+    required int? primaryLayerId,
+    required List<int> collapsedGroupIds,
+  }) async {
+    _requireOpen();
+    final primary =
+        primaryLayerId == null ? null : _layerIds.toRust(primaryLayerId);
+    final collapsed = collapsedGroupIds
+        .map(_layerIds.toRust)
+        .toList(growable: false);
+    _revision =
+        (await rust.setLayerPanelState(
+          handle: _handle,
+          primaryLayerId: primary,
+          collapsedGroupIds: collapsed,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setLayersLocked({
+    required List<int> layerIds,
+    required bool locked,
+  }) async {
+    _requireOpen();
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('lock requires unique layer IDs');
+    }
+    _revision =
+        (await rust.setLayersLocked(
+          handle: _handle,
+          layers: layerIds.map(_layerIds.toRust).toList(growable: false),
+          locked: locked,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setLayersLabel({
+    required List<int> layerIds,
+    required int? labelRgba,
+  }) async {
+    _requireOpen();
+    if (layerIds.isEmpty ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length ||
+        (labelRgba != null && (labelRgba < 0 || labelRgba > 0xffffffff))) {
+      throw ArgumentError('label requires unique layer IDs and valid color');
+    }
+    _revision =
+        (await rust.setLayersLabel(
+          handle: _handle,
+          layers: layerIds.map(_layerIds.toRust).toList(growable: false),
+          labelRgba: labelRgba,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setLayerLocked({
+    required int layerId,
+    required bool locked,
+  }) async {
+    _requireOpen();
+    if (layerId <= 0) throw ArgumentError.value(layerId, 'layerId');
+    _revision =
+        (await rust.setLayerLocked(
+          handle: _handle,
+          layer: _layerIds.toRust(layerId),
+          locked: locked,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setMaskEnabled({
+    required int maskId,
+    required bool enabled,
+  }) async {
+    _requireOpen();
+    if (maskId <= 0) throw ArgumentError.value(maskId, 'maskId');
+    _revision =
+        (await rust.setMaskEnabled(
+          handle: _handle,
+          mask: _layerIds.toRust(maskId),
+          enabled: enabled,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setMaskInverted({
+    required int maskId,
+    required bool inverted,
+  }) async {
+    _requireOpen();
+    if (maskId <= 0) throw ArgumentError.value(maskId, 'maskId');
+    _revision =
+        (await rust.setMaskInverted(
+          handle: _handle,
+          mask: _layerIds.toRust(maskId),
+          inverted: inverted,
+        )).toInt();
+  }
+
+  @override
+  Future<void> applyLayerMask({required int maskId}) async {
+    _requireOpen();
+    if (maskId <= 0) throw ArgumentError.value(maskId, 'maskId');
+    _revision =
+        (await rust.applyLayerMask(
+          handle: _handle,
+          mask: _layerIds.toRust(maskId),
+        )).toInt();
   }
 
   @override
@@ -953,6 +1199,72 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
               source: _layerIds.toRust(layerId),
             );
     return _layerIds.toDart(duplicate);
+  }
+
+  @override
+  Future<List<int>> duplicateLayers({required List<int> layerIds}) async {
+    _requireOpen();
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('duplicate requires at least two unique layer IDs');
+    }
+    final sources = layerIds.map(_layerIds.toRust).toList(growable: false);
+    final project = _projectHandle;
+    final duplicates =
+        project != null && _usingProjectHandle
+            ? await rust.duplicateProjectLayers(
+              handle: project,
+              sources: sources,
+            )
+            : await rust.duplicateLayers(handle: _handle, sources: sources);
+    return duplicates.map(_layerIds.toDart).toList(growable: false);
+  }
+
+  @override
+  Future<int> groupLayers({required List<int> layerIds}) async {
+    _requireOpen();
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('group requires at least two unique layer IDs');
+    }
+    final members = layerIds.map(_layerIds.toRust).toList(growable: false);
+    final reason = await rust.preflightGroupLayers(
+      handle: _handle,
+      members: members,
+    );
+    if (reason != null) {
+      throw StateError(reason);
+    }
+    final group = await rust.groupLayers(handle: _handle, members: members);
+    _revision++;
+    return _layerIds.toDart(group);
+  }
+
+  @override
+  Future<String?> preflightGroupLayers({required List<int> layerIds}) async {
+    _requireOpen();
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('group requires at least two unique layer IDs');
+    }
+    return rust.preflightGroupLayers(
+      handle: _handle,
+      members: layerIds.map(_layerIds.toRust).toList(growable: false),
+    );
+  }
+
+  @override
+  Future<void> ungroupLayer({required int groupId}) async {
+    _requireOpen();
+    if (groupId <= 0) throw ArgumentError.value(groupId, 'groupId');
+    _revision =
+        (await rust.ungroupLayer(
+          handle: _handle,
+          group: _layerIds.toRust(groupId),
+        )).toInt();
   }
 
   @override
@@ -1032,6 +1344,42 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           targetLayer: _layerIds.toRust(targetLayerId),
           sourceLayer: _layerIds.toRust(sourceLayerId),
         )).toInt();
+  }
+
+  @override
+  Future<int> mergeLayersBulk({required List<int> layerIds}) async {
+    _requireOpen();
+    if (layerIds.length < 2 ||
+        layerIds.any((id) => id <= 0) ||
+        layerIds.toSet().length != layerIds.length) {
+      throw ArgumentError('bulk merge requires unique layer IDs');
+    }
+    final ids = layerIds.map(_layerIds.toRust).toList(growable: false);
+    final project = _projectHandle;
+    final target =
+        project != null && _usingProjectHandle
+            ? await rust.mergeProjectLayersBulk(handle: project, layers: ids)
+            : await rust.mergeLayersBulk(handle: _handle, layers: ids);
+    return _layerIds.toDart(target);
+  }
+
+  @override
+  Future<String?> preflightMergeLayers({
+    required int targetLayerId,
+    required int sourceLayerId,
+  }) async {
+    _requireOpen();
+    if (targetLayerId <= 0 ||
+        sourceLayerId <= 0 ||
+        targetLayerId == sourceLayerId) {
+      throw ArgumentError('invalid layer merge preflight');
+    }
+    final reason = await rust.preflightMergeLayers(
+      handle: _handle,
+      targetLayer: _layerIds.toRust(targetLayerId),
+      sourceLayer: _layerIds.toRust(sourceLayerId),
+    );
+    return reason.isEmpty ? null : reason;
   }
 
   @override
@@ -1446,6 +1794,7 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           return BrushSummaryView(
             id: summary.id.toInt(),
             name: summary.name,
+            isBuiltin: summary.isBuiltin,
             tags: List<String>.unmodifiable(summary.tags),
             diameterPx: summary.diameterPx,
             opacity: summary.opacity,
@@ -1486,6 +1835,12 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           return LayerSummaryView(
             id: _layerIds.toDart(summary.id),
             parent: parent == null ? null : _layerIds.toDart(parent),
+            maskOwner:
+                summary.maskOwner == null
+                    ? null
+                    : _layerIds.toDart(summary.maskOwner!),
+            maskEnabled: summary.maskEnabled,
+            maskInverted: summary.maskInverted,
             order: summary.order,
             name: summary.name,
             kind: summary.kind,
@@ -1494,11 +1849,28 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
             blendMode: summary.blendMode,
             groupMode: summary.groupMode,
             alphaLock: summary.alphaLock,
+            locked: summary.locked,
             clipping: summary.clipping,
             reference: summary.reference,
             labelRgba: summary.labelRgba,
             adjustmentBrightness: summary.adjustmentBrightness,
             adjustmentContrast: summary.adjustmentContrast,
+            canDrag: summary.canDrag,
+            dragReason: summary.dragReason,
+            canReceiveLayers: summary.canReceiveLayers,
+            receiveReason: summary.receiveReason,
+            canEditProperties: summary.canEditProperties,
+            editPropertiesReason: summary.editPropertiesReason,
+            canDuplicate: summary.canDuplicate,
+            duplicateReason: summary.duplicateReason,
+            canDelete: summary.canDelete,
+            deleteReason: summary.deleteReason,
+            canUngroup: summary.canUngroup,
+            ungroupReason: summary.ungroupReason,
+            canApplyMask: summary.canApplyMask,
+            applyMaskReason: summary.applyMaskReason,
+            hasMergeDownCapability: true,
+            mergeDownReason: summary.mergeDownReason,
           );
         })
         .toList(growable: false);
@@ -1551,6 +1923,55 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           alphaLock: alphaLock,
           clipping: clipping,
           reference: reference,
+        )).toInt();
+  }
+
+  @override
+  Future<int> beginLayerOpacityEdit({required int layerId}) async {
+    _requireOpen();
+    if (layerId <= 0) throw ArgumentError.value(layerId, 'layerId');
+    return (await rust.beginLayerOpacityEdit(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+    )).toInt();
+  }
+
+  @override
+  Future<void> updateLayerOpacityEdit({
+    required int editId,
+    required double opacity,
+  }) async {
+    _requireOpen();
+    if (editId <= 0 || !opacity.isFinite || opacity < 0 || opacity > 1) {
+      throw ArgumentError('invalid opacity edit');
+    }
+    _revision =
+        (await rust.updateLayerOpacityEdit(
+          handle: _handle,
+          editId: BigInt.from(editId),
+          opacity: (opacity * 65535).round(),
+        )).toInt();
+  }
+
+  @override
+  Future<void> commitLayerOpacityEdit({required int editId}) async {
+    _requireOpen();
+    if (editId <= 0) throw ArgumentError.value(editId, 'editId');
+    _revision =
+        (await rust.commitLayerOpacityEdit(
+          handle: _handle,
+          editId: BigInt.from(editId),
+        )).toInt();
+  }
+
+  @override
+  Future<void> cancelLayerOpacityEdit({required int editId}) async {
+    _requireOpen();
+    if (editId <= 0) throw ArgumentError.value(editId, 'editId');
+    _revision =
+        (await rust.cancelLayerOpacityEdit(
+          handle: _handle,
+          editId: BigInt.from(editId),
         )).toInt();
   }
 
@@ -1724,7 +2145,9 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
     // Pixel composition runs against a separate immutable Rust handle. The
     // expensive work must not retain the document's opaque bridge lock, which
     // would serialize incoming Pencil and touch packets behind tile reads.
-    final packet = await rust.composeCompositeTilesSnapshot(snapshot: captured);
+    final packet = await rust.composeCompositeTilesSnapshot(
+      snapshotHandle: captured,
+    );
     return decodeCompositeTileSnapshot(packet);
   }
 

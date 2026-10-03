@@ -1,9 +1,124 @@
 use super::{
-    ActiveStroke, BTreeMap, BrushPreset, EngineError, EngineEvent, EngineState,
-    MAX_STROKE_INPUT_SEGMENT_SAMPLES, PointerPacket, StrokeRenderMetrics, TileBounds,
-    TileDescriptor, advance_revision, flags, legacy_dab_opacity, legacy_dab_radius,
+    ActiveStroke, BTreeMap, BrushPreset, BrushResource, Dab, EngineError, EngineEvent, EngineState,
+    MAX_STROKE_INPUT_SEGMENT_SAMPLES, PointerPacket, SelectionMask, StrokeRenderMetrics,
+    TileBounds, TileDescriptor, advance_revision, flags, legacy_dab_opacity, legacy_dab_radius,
     mask_preview_to_alpha, queue_live_dab, render_brush_dabs, render_dabs, resample_from,
 };
+use ink_brush::BrushDab;
+use ink_model::{LayerKind, Rgba8};
+use ink_raster::{TILE_SIZE, TileCoord, TileStore};
+
+#[derive(Clone, Copy)]
+struct MaskDabInput<'a> {
+    preset: BrushPreset,
+    compiled_dabs: Option<&'a [BrushDab]>,
+    legacy_dabs: &'a [Dab],
+    resources: &'a BTreeMap<[u8; 32], BrushResource>,
+    selection: Option<&'a SelectionMask>,
+    eraser: bool,
+    width_px: u32,
+    height_px: u32,
+}
+
+fn render_mask_dabs(mask: &mut TileStore, input: MaskDabInput<'_>) -> Vec<TileCoord> {
+    let MaskDabInput {
+        preset,
+        compiled_dabs,
+        legacy_dabs,
+        resources,
+        selection,
+        eraser,
+        width_px,
+        height_px,
+    } = input;
+    let color = compiled_dabs
+        .and_then(|dabs| dabs.first().map(|dab| dab.color))
+        .unwrap_or(preset.color);
+    let target_hidden = if eraser {
+        u8::MAX
+    } else {
+        let luminance =
+            (u32::from(color.r) * 54 + u32::from(color.g) * 183 + u32::from(color.b) * 19 + 128)
+                / 256;
+        u8::MAX - u8::try_from(luminance).unwrap_or(u8::MAX)
+    };
+    let color_opacity = if eraser { u8::MAX } else { color.a };
+    let white = Rgba8 {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
+    let mut stamps = TileStore::default();
+    let dirty = if let Some(dabs) = compiled_dabs {
+        let mut stamps_for_brush = dabs.to_vec();
+        for dab in &mut stamps_for_brush {
+            dab.color = white;
+        }
+        render_brush_dabs(
+            &mut stamps,
+            &stamps_for_brush,
+            resources,
+            selection,
+            false,
+            false,
+            false,
+            width_px,
+            height_px,
+        )
+    } else {
+        let mut white_preset = preset;
+        white_preset.color = white;
+        render_dabs(
+            &mut stamps,
+            legacy_dabs,
+            white_preset,
+            selection,
+            false,
+            false,
+            false,
+            width_px,
+            height_px,
+        )
+    };
+    for coordinate in &dirty {
+        let stamp = stamps.read(*coordinate);
+        let stamp_bytes = stamp.bytes();
+        let origin_x = i64::from(coordinate.x) * i64::from(TILE_SIZE);
+        let origin_y = i64::from(coordinate.y) * i64::from(TILE_SIZE);
+        for index in 0..(TILE_SIZE * TILE_SIZE) as usize {
+            let coverage = ((u16::from(stamp_bytes[index * 4 + 3]) * u16::from(color_opacity)
+                + 127)
+                / 255) as u8;
+            if coverage == 0 {
+                continue;
+            }
+            let x = origin_x + i64::try_from(index % TILE_SIZE as usize).unwrap_or(i64::MAX);
+            let y = origin_y + i64::try_from(index / TILE_SIZE as usize).unwrap_or(i64::MAX);
+            if x < 0 || y < 0 || x >= i64::from(width_px) || y >= i64::from(height_px) {
+                continue;
+            }
+            let x = u32::try_from(x).unwrap_or(u32::MAX);
+            let y = u32::try_from(y).unwrap_or(u32::MAX);
+            let old_hidden = mask.sample_pixel(x, y).a;
+            let next_hidden = ((u32::from(old_hidden) * (255 - u32::from(coverage))
+                + u32::from(target_hidden) * u32::from(coverage)
+                + 127)
+                / 255) as u8;
+            mask.set_pixel(
+                x,
+                y,
+                Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: next_hidden,
+                },
+            );
+        }
+    }
+    dirty
+}
 
 pub(super) fn same_brush_sample(a: ink_input::PointerSample, b: ink_input::PointerSample) -> bool {
     a.pointer_id == b.pointer_id
@@ -570,8 +685,24 @@ pub(super) fn consume_packet_with_sample_limit(
             .get_mut(layer_id)
             .ok_or(EngineError::InvalidLayer)?;
         let alpha_lock = layer_state.layer.alpha_lock;
+        let is_mask = layer_state.layer.kind == LayerKind::Mask;
         let mut compiled_tile_updates = 0;
-        if compiled_brush.is_some() {
+        if is_mask {
+            let tiles = render_mask_dabs(
+                &mut layer_state.tiles,
+                MaskDabInput {
+                    preset: *preset,
+                    compiled_dabs: phase_two_dabs.as_deref(),
+                    legacy_dabs: dabs,
+                    resources: &resolved_resources,
+                    selection: state.selection.as_ref(),
+                    eraser: *eraser,
+                    width_px: state.width_px,
+                    height_px: state.height_px,
+                },
+            );
+            committed_dirty.extend(tiles);
+        } else if compiled_brush.is_some() {
             let tiles = render_brush_dabs(
                 &mut layer_state.tiles,
                 phase_two_dabs.as_deref().unwrap_or_default(),
