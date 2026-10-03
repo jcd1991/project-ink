@@ -67,6 +67,8 @@ class MacLiveTextureAdapter {
     );
   }
 
+  /// Requests native unregistration. The host retains the backing pixel buffer
+  /// until Flutter's raster thread confirms that it no longer uses the texture.
   Future<void> dispose(int textureId) async {
     _validateTextureId(textureId);
     await _channel.invokeMethod<void>(
