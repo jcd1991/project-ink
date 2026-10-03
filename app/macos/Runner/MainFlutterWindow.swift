@@ -94,8 +94,12 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         result(nil)
       case "allowTerminate":
         result(nil)
-        DispatchQueue.main.async { [weak self] in
-          self?.replyToTermination(allow: true)
+        if Thread.isMainThread {
+          self.replyToTermination(allow: true)
+        } else {
+          DispatchQueue.main.async { [weak self] in
+            self?.replyToTermination(allow: true)
+          }
         }
       case "cancelTerminate":
         result(nil)

@@ -8,27 +8,30 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: run_macos_alpha_checks.sh [--unit-only | --full | --native-live-texture | --preflight-only]
+Usage: run_macos_alpha_checks.sh [--unit-only | --workflows-only | --full | --native-live-texture | --preflight-only]
 
   --unit-only      Run Flutter analysis and the complete unit/widget suite.
-  --full           Also build and run Rust-backed document workflow suites.
+  --workflows-only Also run Rust-backed disk journeys and build the app, but skip XCUITest.
+  --full           Also run Rust-backed document workflows and real-app AppKit close/quit checks.
   --native-live-texture Run the foreground macOS Rust/Metal/Flutter texture smoke test.
   --preflight-only Report toolchain, disk, and app-process state without tests.
 
 The default is --full. Full mode requires at least 6 GiB free and refuses to
 rebuild while any Project Ink macOS process is running. It never deletes build
-outputs, caches, or app data. See specifications/macos-alpha-acceptance.md for
-the separate interactive AppKit close/quit procedure.
+outputs, caches, or app data. The AppKit suite drives the actual app; macOS may
+need to allow Xcode UI automation before that stage can run.
 EOF
 }
 
 [[ "$(uname -s)" == Darwin ]] || fail 'must run on macOS'
 command -v flutter >/dev/null 2>&1 || fail 'Flutter is not on PATH'
+command -v xcodebuild >/dev/null 2>&1 || fail 'Xcode command-line tools are not on PATH'
 
 mode=full
 case "${1:-}" in
   '') ;;
   --unit-only) mode=unit ;;
+  --workflows-only) mode=workflows ;;
   --full) mode=full ;;
   --native-live-texture) mode=native ;;
   --preflight-only) mode=preflight ;;
@@ -61,7 +64,7 @@ if [[ "$mode" == preflight ]]; then
   exit 0
 fi
 
-if [[ "$mode" == full || "$mode" == native ]]; then
+if [[ "$mode" == full || "$mode" == workflows || "$mode" == native ]]; then
   min_free_mib="${PROJECT_INK_MACOS_BUILD_MIN_FREE_MIB:-6144}"
   [[ "$min_free_mib" =~ ^[0-9]+$ ]] || fail 'minimum free-space setting must be an integer MiB value'
   (( free_mib >= min_free_mib )) || \
@@ -102,7 +105,7 @@ if [[ "$mode" != native ]]; then
   run_check flutter_unit_and_widget_tests flutter test
 fi
 
-if [[ "$mode" == full ]]; then
+if [[ "$mode" == full || "$mode" == workflows ]]; then
   # Keep test recovery data in a unique child of the sandboxed app container.
   # Tests own this new directory; nothing in the runner removes existing app data.
   default_container="${HOME}/Library/Containers/org.projectink.studio/Data/Documents/ProjectInkAlphaValidation"
@@ -143,6 +146,21 @@ if [[ "$mode" == full ]]; then
     --plain-name 'failed disk-backed recovery write keeps dirty Rust document' \
     -d macos --dart-define="PROJECT_INK_TEST_DOCUMENTS_PATH=$validation_docs"
 
+  # Flutter's integration-test runner temporarily points Generated.xcconfig at
+  # a listener.dart file. Restore the normal app target before Xcode launches
+  # the app in its native UI-testing host.
+  run_check macos_acceptance_app_build flutter build macos --debug --no-pub
+  if [[ "$mode" == full ]]; then
+    result_bundle="$results_dir/NativeDocumentSafety-$(date +%Y%m%d-%H%M%S)-$$.xcresult"
+    run_check macos_native_document_safety \
+      xcodebuild test -quiet \
+      -workspace "$app_dir/macos/Runner.xcworkspace" \
+      -scheme Acceptance \
+      -destination 'platform=macOS' \
+      -derivedDataPath "$app_dir/build/macos-acceptance-derived" \
+      -resultBundlePath "$result_bundle"
+  fi
+
 fi
 
 if [[ "$mode" == native ]]; then
@@ -152,12 +170,12 @@ if [[ "$mode" == native ]]; then
     -d macos --timeout 60s
 fi
 
-if [[ "$mode" == full || "$mode" == native ]]; then
+if [[ "$mode" == native ]]; then
   cat <<'EOF'
 
-Automated suites do not drive AppKit's red close button or Cmd-Q. Complete
-specifications/macos-alpha-acceptance.md in a disposable app session and save
-the outcome record before claiming native close/quit acceptance.
+The native live-texture smoke test does not exercise the AppKit close/quit
+matrix. Complete specifications/macos-alpha-acceptance.md and retain its
+outcome record before claiming full native acceptance.
 EOF
 fi
 
@@ -166,4 +184,8 @@ if [[ "$failed" -ne 0 ]]; then
   exit 1
 fi
 
-printf '\nAll selected macOS alpha checks passed. Logs: %s\n' "$results_dir"
+if [[ "$mode" == workflows ]]; then
+  printf '\nAll selected workflow checks passed; the native AppKit UI suite was not run. Logs: %s\n' "$results_dir"
+else
+  printf '\nAll selected macOS alpha checks passed. Logs: %s\n' "$results_dir"
+fi

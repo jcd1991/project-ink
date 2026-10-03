@@ -1,9 +1,25 @@
 # macOS alpha acceptance
 
-This procedure records behavior that automated tests cannot prove through the
-real AppKit window. It is for a disposable debug run only. Do not point it at a
-personal project or delete the test profile after the run; retain its result
-record until the alpha decision is made.
+This procedure records the full acceptance evidence for native document safety.
+It is for a disposable debug run only. Do not point it at a personal project
+or delete the test profile after the run; retain its result record until the
+alpha decision is made.
+
+The `Acceptance` Xcode scheme drives the actual macOS app and covers all six
+red-close/Cmd-Q Save, Discard, and Cancel choices. `run_macos_alpha_checks.sh
+--full` runs that suite after the Rust-backed document workflows. Use
+`--workflows-only` to repeat Flutter analysis/tests, disk-backed document
+journeys, and the macOS app build when Xcode UI automation is unavailable; this
+mode does not claim native close/quit acceptance. The UI tests
+launch with a unique documents path inside the app sandbox and compare the
+named project's package files before and after the exit choice. Xcode must be
+allowed to use macOS UI automation; if the test runner cannot enable
+automation, record the Xcode result bundle and complete the manual matrix below
+instead. A compiled test bundle or a runner timeout is not a pass.
+
+The manual matrix remains useful for visual confirmation and for checking
+behaviors outside the six automated cases, including failed saves and picker
+cancellation.
 
 ## Before launch
 
@@ -78,8 +94,9 @@ record any difference:
   document and its dirty/recovery state unchanged.
 
 The automated failure suite is run by `app/tool/run_macos_alpha_checks.sh
---full`; it also covers failed writes to a disk-backed recovery destination
-and the document/layer/brush/comic round trips. The separate
+--full`; it also covers failed writes to a disk-backed recovery destination,
+the document/layer/brush/comic round trips, and the AppKit close/quit choices.
+The separate
 `--native-live-texture` mode exercises the Rust/Metal/Flutter surface handoff
 and needs a foreground macOS session with a working Metal adapter. A green
 automated suite does not replace the AppKit matrix above.
