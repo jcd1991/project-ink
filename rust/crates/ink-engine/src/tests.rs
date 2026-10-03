@@ -1810,6 +1810,61 @@ fn selected_layer_labels_change_atomically_and_undo_together() {
 }
 
 #[test]
+fn layer_presentation_round_trips_through_project_storage() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc =
+        Document::new(DocumentId::from_u128(0x4c41_5945_525f_5254), spec).expect("valid doc");
+    let layer = doc.add_layer(LayerKind::Raster).expect("add layer");
+    let label = Rgba8 {
+        r: 255,
+        g: 51,
+        b: 102,
+        a: 255,
+    };
+    doc.dispatch(EditorCommand::SetLayerName {
+        layer,
+        name: "Alpha Ink Layer".into(),
+    })
+    .expect("rename layer");
+    doc.dispatch(EditorCommand::SetLayerLabel {
+        layer,
+        label: Some(label),
+    })
+    .expect("label layer");
+    doc.dispatch(EditorCommand::SetLayerVisibility {
+        layer,
+        visible: false,
+    })
+    .expect("hide layer");
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "project-ink-layer-presentation-{}-{nonce}.inkproj",
+        std::process::id()
+    ));
+    doc.save_as(&path).expect("save layer presentation");
+    let reopened = Document::open(&path).expect("reopen layer presentation");
+    let persisted = reopened
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == layer)
+        .expect("persisted layer");
+    assert_eq!(persisted.name, "Alpha Ink Layer");
+    assert_eq!(persisted.label, Some(label));
+    assert!(!persisted.visible);
+    std::fs::remove_dir_all(path).expect("cleanup project");
+}
+
+#[test]
 fn full_group_lock_blocks_descendant_edits_but_allows_visibility_and_unlock() {
     let spec = DocumentSpec {
         width_px: 64,

@@ -1013,16 +1013,7 @@ fn load_project_contents_with_budget(
             locked: locked != 0,
             clipping: clipping != 0,
             reference: reference != 0,
-            label: label
-                .filter(|value| value != "null")
-                .map(|value| serde_json::from_str::<[u8; 4]>(&value))
-                .transpose()?
-                .map(|value| Rgba8 {
-                    r: value[0],
-                    g: value[1],
-                    b: value[2],
-                    a: value[3],
-                }),
+            label: decode_layer_label(label)?,
             adjustment: adjustment
                 .filter(|value| value != "null")
                 .map(|value| {
@@ -1461,7 +1452,11 @@ fn write_snapshot(
     connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE layers(id TEXT PRIMARY KEY, parent TEXT, kind INTEGER NOT NULL, name TEXT NOT NULL, opacity INTEGER NOT NULL, visible INTEGER NOT NULL, blend_mode INTEGER NOT NULL DEFAULT 0, group_mode INTEGER NOT NULL DEFAULT 0, alpha_lock INTEGER NOT NULL DEFAULT 0, clipping INTEGER NOT NULL DEFAULT 0, reference INTEGER NOT NULL DEFAULT 0, label TEXT, adjustment TEXT, mask_owner TEXT, locked INTEGER NOT NULL DEFAULT 0, mask_enabled INTEGER NOT NULL DEFAULT 1, mask_stencil INTEGER NOT NULL DEFAULT 0, mask_inverted INTEGER NOT NULL DEFAULT 0); CREATE TABLE tiles(layer_id TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(layer_id, x, y)); CREATE TABLE checkpoints(revision INTEGER NOT NULL); CREATE TABLE command_journal(sequence INTEGER PRIMARY KEY, payload BLOB NOT NULL); COMMIT;")?;
     let transaction = connection.unchecked_transaction()?;
     for layer in &snapshot.layers {
-        let label = serde_json::to_string(&layer.label)?;
+        let label = serde_json::to_string(
+            &layer
+                .label
+                .map(|value| [value.r, value.g, value.b, value.a]),
+        )?;
         let adjustment = serde_json::to_string(&layer.adjustment)?;
         transaction.execute("INSERT INTO layers(id, parent, kind, name, opacity, visible, blend_mode, group_mode, alpha_lock, clipping, reference, label, adjustment, mask_owner, locked, mask_enabled, mask_stencil, mask_inverted) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)", params![layer.id.to_string(), layer.parent.map(|id| id.to_string()), encode_layer_kind(layer.kind), layer.name, i64::from(layer.opacity), i64::from(u8::from(layer.visible)), encode_layer_blend_mode(layer.blend_mode), encode_layer_group_mode(layer.group_mode), i64::from(u8::from(layer.alpha_lock)), i64::from(u8::from(layer.clipping)), i64::from(u8::from(layer.reference)), label, adjustment, layer.mask_owner.map(|id| id.to_string()), i64::from(u8::from(layer.locked)), i64::from(u8::from(layer.mask_enabled)), i64::from(u8::from(layer.mask_stencil)), i64::from(u8::from(layer.mask_inverted))])?;
     }
@@ -2272,6 +2267,26 @@ fn parse_id(value: &str) -> Result<u128, StorageError> {
     u128::from_str_radix(value, 16)
         .map_err(|_| StorageError::InvalidManifest("object ID is invalid".into()))
 }
+
+fn decode_layer_label(value: Option<String>) -> Result<Option<Rgba8>, StorageError> {
+    let Some(value) = value.filter(|value| value != "null") else {
+        return Ok(None);
+    };
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PersistedLayerLabel {
+        Channels([u8; 4]),
+        Named(Rgba8),
+    }
+
+    let label = serde_json::from_str::<PersistedLayerLabel>(&value).map_err(|error| {
+        StorageError::InvalidManifest(format!("layer label is invalid: {error}"))
+    })?;
+    Ok(Some(match label {
+        PersistedLayerLabel::Channels([r, g, b, a]) => Rgba8 { r, g, b, a },
+        PersistedLayerLabel::Named(color) => color,
+    }))
+}
 fn encode_layer_kind(kind: LayerKind) -> i64 {
     match kind {
         LayerKind::Raster => 0,
@@ -2698,6 +2713,48 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(destination.join("document.sqlite").is_file());
         assert!(destination.join("tiles").is_dir());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_object_layer_labels_still_load_and_save_canonically() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "project-ink-legacy-layer-label-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        let destination = root.join("legacy-label.inkproj");
+        let mut expected = snapshot();
+        let label = Rgba8 {
+            r: 255,
+            g: 51,
+            b: 102,
+            a: 255,
+        };
+        expected.layers[0].label = Some(label);
+        save_project(&destination, &expected).expect("save current layer label");
+
+        let connection =
+            Connection::open(destination.join("document.sqlite")).expect("open project database");
+        connection
+            .execute(
+                "UPDATE layers SET label = ?1 WHERE id = ?2",
+                params![
+                    r#"{"r":255,"g":51,"b":102,"a":255}"#,
+                    expected.layers[0].id.to_string()
+                ],
+            )
+            .expect("write legacy object label");
+        drop(connection);
+
+        let loaded = load_project(&destination).expect("load legacy label");
+        assert_eq!(loaded.layers, expected.layers);
+        save_project(&destination, &loaded).expect("rewrite label canonically");
+        assert_eq!(load_project(&destination).expect("reload label"), loaded);
         fs::remove_dir_all(root).expect("cleanup");
     }
 
