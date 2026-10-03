@@ -24,6 +24,7 @@ use std::fmt::{self, Write as _};
 use std::path::Path;
 
 const MAX_PAGES: usize = 512;
+const MAX_TOTAL_PAGE_PIXELS: u64 = 128 * 1024 * 1024;
 const MAX_PANELS_PER_PAGE: usize = 256;
 const MAX_BALLOONS_PER_PAGE: usize = 512;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -591,6 +592,7 @@ impl ComicProject {
                 ComicError::InvalidVersion
             });
         }
+        total_page_pixels(&self.pages)?;
         let mut ids = std::collections::HashSet::new();
         for page in &self.pages {
             if !ids.insert(page.id) {
@@ -670,6 +672,16 @@ impl ComicProject {
     pub fn add_page(&mut self, page: Page) -> Result<usize, ComicError> {
         page.validate()?;
         if self.pages.len() >= MAX_PAGES {
+            return Err(ComicError::LimitExceeded);
+        }
+        let current_pixels = total_page_pixels(&self.pages)?;
+        let added_pixels = u64::from(page.spec.width_px)
+            .checked_mul(u64::from(page.spec.height_px))
+            .ok_or(ComicError::LimitExceeded)?;
+        if current_pixels
+            .checked_add(added_pixels)
+            .is_none_or(|total| total > MAX_TOTAL_PAGE_PIXELS)
+        {
             return Err(ComicError::LimitExceeded);
         }
         let mut incoming = std::collections::HashSet::new();
@@ -1984,6 +1996,21 @@ impl ComicProject {
     }
 }
 
+fn total_page_pixels(pages: &[Page]) -> Result<u64, ComicError> {
+    pages.iter().try_fold(0_u64, |total, page| {
+        let page_pixels = u64::from(page.spec.width_px)
+            .checked_mul(u64::from(page.spec.height_px))
+            .ok_or(ComicError::LimitExceeded)?;
+        let total = total
+            .checked_add(page_pixels)
+            .ok_or(ComicError::LimitExceeded)?;
+        if total > MAX_TOTAL_PAGE_PIXELS {
+            return Err(ComicError::LimitExceeded);
+        }
+        Ok(total)
+    })
+}
+
 fn preview_dimension(value: u32, scale: f32) -> u32 {
     let scaled = (f64::from(value) * f64::from(scale)).ceil();
     if !scaled.is_finite() {
@@ -2829,6 +2856,40 @@ mod tests {
         assert!(segment.contains("data-segment-y=\"4096\""));
         assert!(segment.contains("viewBox=\"0 4096 1080 904\""));
         std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn total_page_pixel_limit_rejects_import_and_add_without_mutation() {
+        let first_page = print_page(8_192, 8_192, 144.0, 1, 101);
+        let second_page = print_page(8_192, 8_193, 144.0, 2, 102);
+
+        let mut edited = ComicProject::new(100, ProjectTemplate::PrintComic, "bounded");
+        edited
+            .add_page(first_page.clone())
+            .expect("first page fits");
+        assert_eq!(
+            edited.add_page(second_page.clone()),
+            Err(ComicError::LimitExceeded)
+        );
+        assert_eq!(edited.pages.len(), 1);
+        assert_eq!(edited.page_documents.len(), 1);
+
+        let mut imported = ComicProject::new(100, ProjectTemplate::PrintComic, "bounded");
+        imported.pages = vec![first_page, second_page];
+        imported.page_documents = imported
+            .pages
+            .iter()
+            .map(|page| PageDocumentRef {
+                page_id: page.id,
+                document_id: page.id,
+                relative_path: format!("pages/{:032x}", page.id),
+            })
+            .collect();
+        let bytes = serde_json::to_vec(&imported).expect("encode untrusted fixture");
+        assert!(matches!(
+            ComicProject::from_json(&bytes),
+            Err(ComicError::LimitExceeded)
+        ));
     }
 
     #[test]

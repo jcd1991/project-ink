@@ -13,9 +13,13 @@ immutable projections through the FRB `ComicProjectHandle` API.
   page-document reference per existing page and deterministic panel-layer
   bindings for every existing panel. Source bytes are never rewritten during
   load; canonical v2 bytes are published only by a successful save.
-- Maximums are enforced before allocation: 512 pages, 256 panels per page,
+- Maximums are validated before a project becomes live: 512 pages, 256 panels
+  per page,
   512 balloons per page, 256 tones, 2,048 effect lines, 4,096 vector-ink
-  lines, and 16 KiB dialogue.
+  lines, and 16 KiB dialogue. The sum of `width_px * height_px` across all
+  pages is capped at 128 me pixels; the same cap applies when adding pages.
+  Import rejects an over-limit comic before loading any referenced page
+  documents, and page addition leaves the project unchanged on rejection.
 - All geometry, DPI, tone, and effect values must be finite and range checked.
 - IDs are stable `u128` values and must be unique across pages and comic
   objects; panel-layer IDs must also be non-zero and unique across bindings.

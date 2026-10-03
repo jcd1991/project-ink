@@ -15,6 +15,41 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
+/// Maximum projected memory for importing one flattened PSD. The projection
+/// includes the encoded source, decoded RGBA pixels, and the initial raster
+/// layer tiles that are built from those pixels.
+pub const MAX_PSD_IMPORT_WORKING_SET_BYTES: u64 = 768 * 1024 * 1024;
+const MAX_PSD_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// Reject PSD dimensions whose source and initial raster copy exceed the
+/// import working-set budget. The caller may use this after reading only the
+/// PSD header so an oversized source is rejected before loading the file.
+pub fn validate_psd_import_budget(
+    encoded_bytes: u64,
+    width: u32,
+    height: u32,
+) -> Result<(), ExportError> {
+    if width == 0 || height == 0 || width > 32_768 || height > 32_768 {
+        return Err(ExportError::InvalidPsd("dimensions outside safety limits"));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_PSD_PIXELS {
+        return Err(ExportError::InvalidPsd(
+            "pixel count exceeds the 64 megapixel safety limit",
+        ));
+    }
+    let projected_bytes = pixels
+        .checked_mul(8)
+        .and_then(|decoded_and_layer_bytes| encoded_bytes.checked_add(decoded_and_layer_bytes))
+        .ok_or(ExportError::InvalidPsd("projected import size overflows"))?;
+    if projected_bytes > MAX_PSD_IMPORT_WORKING_SET_BYTES {
+        return Err(ExportError::InvalidPsd(
+            "projected import memory exceeds the 768 MiB safety limit",
+        ));
+    }
+    Ok(())
+}
+
 /// Formats promised by the public plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportFormat {
@@ -98,9 +133,11 @@ pub fn decode_psd(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), ExportError> {
     }
     let height = u32::from_be_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
     let width = u32::from_be_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
-    if width == 0 || height == 0 || width > 32_768 || height > 32_768 {
-        return Err(ExportError::InvalidPsd("dimensions outside safety limits"));
-    }
+    validate_psd_import_budget(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        width,
+        height,
+    )?;
     if u16::from_be_bytes([bytes[22], bytes[23]]) != 8
         || u16::from_be_bytes([bytes[24], bytes[25]]) != 3
     {
@@ -405,6 +442,46 @@ mod tests {
         assert!(matches!(
             decode_psd(&psd[..psd.len() - 1]),
             Err(ExportError::InvalidPsd(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_psd_pixel_count_before_allocating_rgba() {
+        let mut header = [0_u8; 26];
+        header[..4].copy_from_slice(b"8BPS");
+        header[4..6].copy_from_slice(&1_u16.to_be_bytes());
+        header[12..14].copy_from_slice(&3_u16.to_be_bytes());
+        header[14..18].copy_from_slice(&8_193_u32.to_be_bytes());
+        header[18..22].copy_from_slice(&8_193_u32.to_be_bytes());
+        header[22..24].copy_from_slice(&8_u16.to_be_bytes());
+        header[24..26].copy_from_slice(&3_u16.to_be_bytes());
+
+        assert!(matches!(
+            decode_psd(&header),
+            Err(ExportError::InvalidPsd(
+                "pixel count exceeds the 64 megapixel safety limit"
+            ))
+        ));
+
+        header[14..18].copy_from_slice(&8_192_u32.to_be_bytes());
+        header[18..22].copy_from_slice(&8_192_u32.to_be_bytes());
+        assert!(matches!(
+            decode_psd(&header),
+            Err(ExportError::InvalidPsd("truncated section length"))
+        ));
+    }
+
+    #[test]
+    fn psd_working_set_budget_accounts_for_source_pixels_and_initial_layer() {
+        let max_pixels = 8_192_u32 * 8_192;
+        let decoded_and_layer_bytes = u64::from(max_pixels) * 8;
+        let source_bytes_at_budget = MAX_PSD_IMPORT_WORKING_SET_BYTES - decoded_and_layer_bytes;
+        assert!(validate_psd_import_budget(source_bytes_at_budget, 8_192, 8_192).is_ok());
+        assert!(matches!(
+            validate_psd_import_budget(source_bytes_at_budget + 1, 8_192, 8_192),
+            Err(ExportError::InvalidPsd(
+                "projected import memory exceeds the 768 MiB safety limit"
+            ))
         ));
     }
 
