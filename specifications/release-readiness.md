@@ -559,10 +559,19 @@ evidence remain separate hardware gates.
   target was not built or run: disk availability during this gate was 2.7 GiB,
   below the runner's 6 GiB build threshold. The runner's full preflight must
   pass before attempting it.
+- After the user freed space, `app/tool/run_macos_alpha_checks.sh
+  --appkit-only` passed its disk preflight (17,880 MiB) and built/launched the
+  native test target. All six XCUITests then stopped at the shared startup
+  assertion because `drawing-canvas` was absent from the accessibility tree;
+  the captured hierarchy showed a disabled `project_ink` window and no Flutter
+  controls. No Save/Discard/Cancel behavior was exercised. Result bundle:
+  `app/build/macos-alpha-checks/NativeDocumentSafety-20261003-162729-69510.xcresult`.
+  Treat the native matrix as unverified until the macOS UI automation/focus
+  issue is resolved and the assertions execute against the app.
 - The paired physical iPad Pro (11-inch, 3rd generation; iPadOS 27.0) is
   currently visible to Flutter and `devicectl`. The acceptance preflight
   reported 19.9 GiB free before the macOS workflow rerun. That rerun used disk;
-  current free space is about 12 GiB, below the 18 GiB device threshold and
+  current free space is about 14 GiB, below the 18 GiB device threshold and
   28 GiB full-run threshold. Approved inactive simulator and macOS Xcode build
   products were removed to recover space; per-run simulator checksum
   manifests were refreshed, and logs/Xcode result bundles remain preserved.
