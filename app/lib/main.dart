@@ -2,11 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
 
 import 'app/project_ink_app.dart';
 import 'canvas/canvas_diagnostic_recorder.dart';
 import 'documents/platform_document_picker.dart';
+import 'documents/project_documents_directory.dart';
 
 const _phase1TraceEnabled = bool.fromEnvironment(
   'PROJECT_INK_TRACE',
@@ -66,6 +66,8 @@ Future<void> main() async {
     ProjectInkApp(
       documentPicker: PlatformDocumentPicker(),
       autosavePath: recoveryPath,
+      recoveryDirectory:
+          recoveryPath == null ? null : path.dirname(recoveryPath),
       performanceTracePath: tracePath,
     ),
   );
@@ -73,7 +75,7 @@ Future<void> main() async {
 
 Future<String> _recoveryProjectPath() async {
   debugPrint('Project Ink startup: resolving app documents directory');
-  final documents = await getApplicationDocumentsDirectory();
+  final documents = await projectDocumentsDirectory();
   final recovery = Directory(
     path.join(documents.path, 'Project Ink', 'Recovery'),
   );
@@ -83,7 +85,7 @@ Future<String> _recoveryProjectPath() async {
 }
 
 Future<String> _phase1TracePath() async {
-  final documents = await getApplicationDocumentsDirectory();
+  final documents = await projectDocumentsDirectory();
   final traces = Directory(path.join(documents.path, 'phase1-traces'));
   await traces.create(recursive: true);
   final runId = DateTime.now().toUtc().millisecondsSinceEpoch;

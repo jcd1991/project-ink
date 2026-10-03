@@ -26,6 +26,11 @@ abstract interface class BrushPicker {
   Future<String?> saveBrush({String suggestedName = 'brush.inkbrush'});
 }
 
+/// Optional picker action for image resources used to recreate a brush tip.
+abstract interface class BrushTipImagePicker {
+  Future<String?> openBrushTipImage();
+}
+
 /// Optional write-back capability for a provider-imported project.
 ///
 /// A picker may keep saves local when the provider cannot offer a safe

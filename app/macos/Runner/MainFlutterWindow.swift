@@ -2,8 +2,13 @@ import Cocoa
 import Darwin
 import FlutterMacOS
 
-class MainFlutterWindow: NSWindow {
+class MainFlutterWindow: NSWindow, NSWindowDelegate {
   private var inkLiveTextures: InkLiveTextureRegistry?
+  private var windowCloseChannel: FlutterMethodChannel?
+  private var closeRequestPending = false
+  private var allowNextClose = false
+  private var terminationDecisionPending = false
+  private var lastWindowCloseApproved = false
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -65,8 +70,101 @@ class MainFlutterWindow: NSWindow {
     liveTextureChannel.setMethodCallHandler { call, result in
       liveTextures.handle(call, result: result)
     }
+    let closeChannel = FlutterMethodChannel(
+      name: "org.projectink.studio/window_close_v1",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    windowCloseChannel = closeChannel
+    closeChannel.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else {
+        result(FlutterError(code: "window_unavailable", message: nil, details: nil))
+        return
+      }
+      switch call.method {
+      case "allowClose":
+        self.closeRequestPending = false
+        self.allowNextClose = true
+        self.lastWindowCloseApproved = NSApp.windows.filter {
+          $0.isVisible && !$0.isMiniaturized && !($0 is NSPanel)
+        }.count <= 1
+        self.performClose(nil)
+        result(nil)
+      case "cancelClose":
+        self.closeRequestPending = false
+        result(nil)
+      case "allowTerminate":
+        result(nil)
+        DispatchQueue.main.async { [weak self] in
+          self?.replyToTermination(allow: true)
+        }
+      case "cancelTerminate":
+        result(nil)
+        DispatchQueue.main.async { [weak self] in
+          self?.replyToTermination(allow: false)
+        }
+      case "terminate":
+        result(nil)
+        DispatchQueue.main.async {
+          NSApp.terminate(nil)
+        }
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
     InkPointerMonitor.shared.start(view: flutterViewController.view)
 
     super.awakeFromNib()
+    delegate = self
+  }
+
+  func requestApplicationTermination() -> NSApplication.TerminateReply {
+    if lastWindowCloseApproved {
+      lastWindowCloseApproved = false
+      return .terminateNow
+    }
+    guard !terminationDecisionPending else { return .terminateCancel }
+    terminationDecisionPending = true
+    guard let windowCloseChannel else {
+      terminationDecisionPending = false
+      return .terminateCancel
+    }
+    windowCloseChannel.invokeMethod("requestQuit", arguments: nil) {
+      [weak self] result in
+      if let error = result as? FlutterError {
+        NSLog("Project Ink quit confirmation unavailable: %@", error.message ?? error.code)
+        self?.replyToTermination(allow: false)
+      }
+    }
+    return .terminateLater
+  }
+
+  private func replyToTermination(allow: Bool) {
+    guard terminationDecisionPending else { return }
+    terminationDecisionPending = false
+    NSApp.reply(toApplicationShouldTerminate: allow)
+  }
+
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    if allowNextClose {
+      allowNextClose = false
+      return true
+    }
+    guard !closeRequestPending else { return false }
+    closeRequestPending = true
+    guard let windowCloseChannel else {
+      // Keep the window open if Flutter cannot decide whether unsaved work is
+      // safe to discard. Reset the latch so a later close can retry after the
+      // channel becomes available.
+      closeRequestPending = false
+      NSLog("Project Ink close confirmation unavailable: channel not ready")
+      return false
+    }
+    windowCloseChannel.invokeMethod("requestClose", arguments: nil) { [weak self] result in
+      if let error = result as? FlutterError {
+        NSLog("Project Ink close confirmation unavailable: %@", error.message ?? error.code)
+        self?.closeRequestPending = false
+      }
+    }
+    return false
   }
 }

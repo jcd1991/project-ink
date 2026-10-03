@@ -432,6 +432,10 @@ void main() {
           home: CanvasScreen(
             engine: engine,
             targetPlatform: TargetPlatform.iOS,
+            nativePointerPacketsOverride: const Stream.empty(),
+            nativePointerReadyOverride: const Stream.empty(),
+            nativePencilCommandsOverride: const Stream.empty(),
+            nativeCanvasDiagnosticEventsOverride: const Stream.empty(),
           ),
         ),
       );
@@ -440,12 +444,20 @@ void main() {
       final canvas = find.bySemanticsLabel('Drawing canvas');
       final bounds = tester.getRect(canvas);
       final center = bounds.center;
-      final gesture = await tester.startGesture(
-        center,
-        kind: PointerDeviceKind.touch,
-      );
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.touch);
+      await gesture.moveTo(center);
+      await gesture.down(center);
       await tester.pump();
-      await engine.firstPushStarted.future;
+      await tester.runAsync(
+        () => engine.firstPushStarted.future.timeout(
+          const Duration(seconds: 3),
+          onTimeout:
+              () =>
+                  throw TimeoutException(
+                    'The touch down did not reach the engine bridge.',
+                  ),
+        ),
+      );
 
       // Keep sending a curved confirmed path while its first engine packet is
       // blocked. Flutter must append and paint every input sample without
@@ -1103,6 +1115,70 @@ void main() {
       expect(engine.pushCount, greaterThan(packetsBeforePredictedStroke));
       expect(engine.endCount, 3);
       expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'native stylus preview continues from the gray page margin onto the page',
+    (tester) async {
+      tester.view.physicalSize = const Size(2300, 2200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final engine = _RecordingPointerEngine();
+      final packets = StreamController<Uint8List>.broadcast();
+      addTearDown(packets.close);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CanvasScreen(
+            engine: engine,
+            targetPlatform: TargetPlatform.macOS,
+            nativePointerPacketsOverride: packets.stream,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      Uint8List packet(InkPointerPhase phase, Offset point, int sequence) =>
+          encodePointerPacket(
+            pointerId: 19,
+            device: InkPointerDevice.stylus,
+            phase: phase,
+            x: point.dx,
+            y: point.dy,
+            pressure: 1,
+            timestampNs: sequence * 1_000_000,
+            sequence: sequence,
+          );
+
+      // The 2048px document is centered in this wider viewport, so x=100 and
+      // x=115 are in the gray margin while x=145 is inside the white page.
+      packets.add(packet(InkPointerPhase.down, const Offset(100, 1000), 1));
+      packets.add(packet(InkPointerPhase.move, const Offset(115, 1000), 2));
+      await tester.pump(const Duration(milliseconds: 20));
+      packets.add(packet(InkPointerPhase.move, const Offset(145, 1000), 3));
+      await tester.pump(const Duration(milliseconds: 20));
+
+      final previewFinder = find.byKey(
+        const ValueKey('live-stroke-preview-boundary'),
+      );
+      expect(previewFinder, findsOneWidget);
+      final previewPaint = tester.widget<CustomPaint>(
+        find.descendant(of: previewFinder, matching: find.byType(CustomPaint)),
+      );
+      final painter = previewPaint.painter! as LiveStrokePreviewPainter;
+      expect(painter.preview!.points, isNotEmpty);
+      expect(
+        painter.preview!.points.last.position.dx,
+        greaterThan(0),
+        reason: 'the first visible point should be inside the document',
+      );
+
+      packets.add(packet(InkPointerPhase.up, const Offset(160, 1000), 4));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(engine.endCount, 1);
       expect(tester.takeException(), isNull);
     },
   );

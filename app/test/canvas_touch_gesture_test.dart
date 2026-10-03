@@ -9,6 +9,7 @@ import 'package:project_ink/app/workspace_preferences.dart';
 import 'package:project_ink/layers/layer_panel.dart';
 import 'package:project_ink/bridge/generated/api.dart' as rust;
 import 'package:project_ink/design_system/ink_components.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class _GestureEngine extends InMemoryEngineApi {
   bool historyWasTrimmed = false;
@@ -124,6 +125,91 @@ class _GestureEngine extends InMemoryEngineApi {
   }
 }
 
+class _PrimaryLayerTargetEngine extends _GestureEngine {
+  int? lastStrokeLayerId;
+  int? lastFillLayerId;
+
+  @override
+  Future<List<LayerSummaryView>> layerSummaries() async => const [
+    LayerSummaryView(id: 1, name: 'Primary', kind: 'Raster', order: 0),
+    LayerSummaryView(id: 2, name: 'Secondary', kind: 'Raster', order: 1),
+  ];
+
+  @override
+  Future<void> beginBrushStrokeOnLayer(int brushId, int layerId) async {
+    lastStrokeLayerId = layerId;
+    await super.beginBrushStrokeOnLayer(brushId, layerId);
+  }
+
+  @override
+  Future<void> fillRegion({
+    required int layerId,
+    required int x,
+    required int y,
+    required int red,
+    required int green,
+    required int blue,
+    required int alpha,
+    required int tolerance,
+    required int gap,
+  }) async {
+    lastFillLayerId = layerId;
+  }
+}
+
+class _LayerVisibilityRefreshEngine extends _PrimaryLayerTargetEngine {
+  bool secondaryVisible = true;
+  TileUpdateBatch? pendingLayerInvalidation;
+  final List<(int, int)> compositeSnapshotCoordinates = <(int, int)>[];
+
+  @override
+  Future<List<LayerSummaryView>> layerSummaries() async => [
+    const LayerSummaryView(id: 1, name: 'Primary', kind: 'Raster', order: 0),
+    LayerSummaryView(
+      id: 2,
+      name: 'Secondary',
+      kind: 'Raster',
+      order: 1,
+      visible: secondaryVisible,
+    ),
+  ];
+
+  @override
+  Future<void> updateLayerProperties({
+    required int layerId,
+    required bool visible,
+    required double opacity,
+    required bool alphaLock,
+    required bool clipping,
+    required bool reference,
+  }) async {
+    if (layerId == 2) secondaryVisible = visible;
+    final nextRevision = revision + 1;
+    pendingLayerInvalidation = TileUpdateBatch(
+      revision: nextRevision,
+      fullRedraw: true,
+      tiles: [TileUpdate(revision: nextRevision, layer: layerId, x: 0, y: 0)],
+    );
+  }
+
+  @override
+  Future<TileUpdateBatch> drainTileUpdates() async {
+    final pending = pendingLayerInvalidation;
+    pendingLayerInvalidation = null;
+    return pending ?? TileUpdateBatch.empty(revision);
+  }
+
+  @override
+  Future<CompositeTileSnapshot> readCompositeTilesSnapshot({
+    required List<StrokeTileCoordinate> coordinates,
+  }) async {
+    compositeSnapshotCoordinates.addAll(
+      coordinates.map((coordinate) => (coordinate.x, coordinate.y)),
+    );
+    return super.readCompositeTilesSnapshot(coordinates: coordinates);
+  }
+}
+
 class _RejectingLayerEngine extends _GestureEngine {
   @override
   Future<void> updateLayerProperties({
@@ -205,6 +291,122 @@ class _DuplicateGroupEngine extends _GestureEngine {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+  testWidgets('secondary layer selection never redirects brush strokes', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 2;
+    tester.view.physicalSize = const Size(2200, 1800);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _PrimaryLayerTargetEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.macOS,
+          desktopDockEnabled: true,
+          workspacePreferences: const WorkspacePreferences(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final panel = tester.widget<LayerPanel>(find.byType(LayerPanel));
+    expect(panel.selection.primaryId, 1);
+    panel.selection.toggleSecondary(2);
+    expect(panel.selection.selected, <int>{1, 2});
+
+    final canvas = find.bySemanticsLabel('Drawing canvas');
+    final gesture = await tester.startGesture(
+      tester.getCenter(canvas),
+      kind: PointerDeviceKind.stylus,
+    );
+    await gesture.moveBy(const Offset(12, 8));
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(engine.lastStrokeLayerId, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('bucket fill uses the selected primary raster layer', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(820, 1180);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _PrimaryLayerTargetEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.android,
+          workspacePreferences: const WorkspacePreferences(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Layers').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Secondary').first);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<LayerPanel>(find.byType(LayerPanel)).selection.primaryId,
+      2,
+    );
+
+    await tester.tap(find.byTooltip('Layers'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Selections'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Select and fill'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Bucket fill'));
+    await tester.tap(find.text('Bucket fill'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.bySemanticsLabel('Drawing canvas'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Fill'));
+    await tester.pumpAndSettle();
+
+    expect(engine.lastFillLayerId, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('visibility full redraw composites hidden layer coordinates', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(2200, 1800);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _LayerVisibilityRefreshEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.macOS,
+          desktopDockEnabled: true,
+          workspacePreferences: const WorkspacePreferences(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Layers').first);
+    await tester.pumpAndSettle();
+    await tester.tap(_layerVisibilityTooltip('Hide').first);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pumpAndSettle();
+
+    expect(engine.secondaryVisible, isFalse);
+    expect(engine.compositeSnapshotCoordinates, contains((0, 0)));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('two-finger tap invokes undo', (tester) async {
     final engine = _GestureEngine();
     await _pumpCanvas(tester, engine);
@@ -310,7 +512,12 @@ void main() {
     await showStatus(null);
     expect(find.text('Not saved'), findsOneWidget);
     await showStatus(
-      const AutosaveState(dirty: true, saving: false, lastError: null),
+      const AutosaveState(
+        dirty: true,
+        hasUnsavedChanges: true,
+        saving: false,
+        lastError: null,
+      ),
     );
     expect(find.text('Unsaved changes'), findsOneWidget);
     await showStatus(
@@ -318,12 +525,18 @@ void main() {
     );
     expect(find.text('Saving…'), findsOneWidget);
     await showStatus(
-      const AutosaveState(dirty: true, saving: true, lastError: null),
+      const AutosaveState(
+        dirty: true,
+        hasUnsavedChanges: true,
+        saving: true,
+        lastError: null,
+      ),
     );
     expect(find.text('Saving…  •  Changes pending'), findsOneWidget);
     await showStatus(
       const AutosaveState(
         dirty: true,
+        hasUnsavedChanges: true,
         saving: false,
         lastError: 'disk unavailable',
       ),
@@ -627,6 +840,8 @@ void main() {
     expect(
       initialLayerPanel.layers.any((layer) => layer.name == 'Scratch Layer'),
       isTrue,
+      reason:
+          'snapshots=${engine.layerSnapshotCount}, layers=${initialLayerPanel.layers.map((layer) => '${layer.id}:${layer.name}').join(',')}',
     );
     final snapshotsBeforeUndo = engine.layerSnapshotCount;
     await tester.tap(_toolbarCommand('Undo'));
@@ -1145,13 +1360,13 @@ void main() {
 
     await tester.tap(find.byTooltip('Layers'));
     await tester.pumpAndSettle();
-    expect(find.byTooltip('Hide layer'), findsOneWidget);
+    expect(_layerVisibilityTooltip('Hide'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Hide layer'));
+    await tester.tap(_layerVisibilityTooltip('Hide'));
     await tester.pumpAndSettle();
 
-    expect(find.byTooltip('Hide layer'), findsOneWidget);
-    expect(find.byTooltip('Show layer'), findsNothing);
+    expect(_layerVisibilityTooltip('Hide'), findsOneWidget);
+    expect(_layerVisibilityTooltip('Show'), findsNothing);
   });
 }
 
@@ -1183,6 +1398,12 @@ Future<void> _pumpCanvas(
 Finder _toolbarCommand(String labelPrefix) => find.byWidgetPredicate(
   (widget) =>
       widget is Tooltip && (widget.message?.startsWith(labelPrefix) ?? false),
+);
+
+Finder _layerVisibilityTooltip(String action) => find.byWidgetPredicate(
+  (widget) =>
+      widget is Tooltip &&
+      (widget.message?.startsWith('$action layer;') ?? false),
 );
 
 Future<void> _tapWithFingers(WidgetTester tester, int count) async {

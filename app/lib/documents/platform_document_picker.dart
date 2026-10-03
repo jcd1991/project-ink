@@ -21,6 +21,7 @@ class PlatformDocumentPicker
         DocumentPicker,
         PsdImportPicker,
         BrushPicker,
+        BrushTipImagePicker,
         DocumentWriteback,
         DocumentPngWriteback,
         DocumentExportPicker,
@@ -319,9 +320,14 @@ class PlatformDocumentPicker
   Future<String?> openBrush() async {
     try {
       final selected = await _selector.openFile(
-        acceptedTypeGroups: const [
+        acceptedTypeGroups: [
           XTypeGroup(
             label: 'Project Ink or supported brush',
+            // file_selector_ios uses uniformTypeIdentifiers and ignores file
+            // extensions. Custom brush formats do not have registered UTIs,
+            // so allow data files there and let Rust validate the selection.
+            uniformTypeIdentifiers:
+                _targetPlatform == TargetPlatform.iOS ? ['public.data'] : null,
             extensions: [
               'inkbrush',
               'kpp',
@@ -344,6 +350,27 @@ class PlatformDocumentPicker
       return selected?.path;
     } on Object catch (error, stack) {
       debugPrint('Brush import picker unavailable: $error\n$stack');
+      return null;
+    }
+  }
+
+  @override
+  Future<String?> openBrushTipImage() async {
+    try {
+      final selected = await _selector.openFile(
+        acceptedTypeGroups: [
+          XTypeGroup(
+            label: 'Brush tip image',
+            uniformTypeIdentifiers:
+                _targetPlatform == TargetPlatform.iOS ? ['public.image'] : null,
+            extensions: ['png', 'jpg', 'jpeg', 'webp'],
+          ),
+        ],
+        confirmButtonText: 'Use image as brush tip',
+      );
+      return selected?.path;
+    } on Object catch (error, stack) {
+      debugPrint('Brush tip image picker unavailable: $error\n$stack');
       return null;
     }
   }

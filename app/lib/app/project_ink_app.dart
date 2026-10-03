@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import '../canvas/canvas_screen.dart';
 import '../canvas/performance_trace.dart';
 import '../bridge/engine_api.dart';
+import '../comics/comic_workspace.dart';
 import '../documents/autosave_coordinator.dart';
 import '../documents/document_picker.dart';
+import '../documents/recovery_checkpoint_store.dart';
 import '../design_system/ink_theme.dart';
 import 'workspace_preferences.dart';
 
@@ -16,13 +18,16 @@ class ProjectInkApp extends StatefulWidget {
     super.key,
     this.engineOverride,
     this.autosavePath,
+    this.recoveryDirectory,
     this.documentPicker,
     @visibleForTesting this.targetPlatformOverride,
     this.openDocumentEngine,
     this.onOpenDocument,
+    @visibleForTesting this.deleteRecoveryCheckpoint,
     this.onAutosaveStateChanged,
     this.onPerformanceSnapshot,
     this.performanceTracePath,
+    @visibleForTesting this.comicWorkspaceController,
   });
 
   /// Optional engine seam for widget tests. Production entry points leave this
@@ -32,6 +37,10 @@ class ProjectInkApp extends StatefulWidget {
   /// Optional native `.inkproj` destination selected by the document session.
   /// When omitted, the app remains a new unsaved document.
   final String? autosavePath;
+
+  /// Trusted app-owned directory allowed to contain a disposable checkpoint.
+  /// Custom [autosavePath] values are never recursively deleted by default.
+  final String? recoveryDirectory;
 
   /// Optional platform implementation for the document toolbar.
   final DocumentPicker? documentPicker;
@@ -47,6 +56,10 @@ class ProjectInkApp extends StatefulWidget {
   /// Parent-owned document replacement callback for an approved open path.
   final Future<void> Function(String path)? onOpenDocument;
 
+  /// Optional deletion seam for deterministic recovery-cleanup failure tests.
+  @visibleForTesting
+  final Future<void> Function(String path)? deleteRecoveryCheckpoint;
+
   /// Local-only status hook for a document shell or accessibility surface.
   final ValueChanged<AutosaveState>? onAutosaveStateChanged;
 
@@ -57,6 +70,10 @@ class ProjectInkApp extends StatefulWidget {
   /// No file is created when this is omitted.
   final String? performanceTracePath;
 
+  /// Isolates document-session tests from sample comic loading and page binds.
+  @visibleForTesting
+  final ComicWorkspaceController? comicWorkspaceController;
+
   @override
   State<ProjectInkApp> createState() => _ProjectInkAppState();
 }
@@ -65,6 +82,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
   late Future<EngineApi> _engine;
   late String? _activeAutosavePath;
   String? _activeDocumentPath;
+  bool _autosaveInitiallyUnsavedChanges = false;
   AutosaveCoordinator? _autosave;
   final Set<EngineApi> _retiringEngines = <EngineApi>{};
   AutosaveState? _autosaveState;
@@ -134,6 +152,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
         debugPrint('Project Ink startup: checking recovery project');
         if (await Directory(recoveryPath).exists()) {
           debugPrint('Project Ink startup: opening recovery project');
+          _autosaveInitiallyUnsavedChanges = true;
           return await FrbEngineApi.open(recoveryPath);
         }
         debugPrint('Project Ink startup: recovery project does not exist');
@@ -184,7 +203,8 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
       coordinator = AutosaveCoordinator(
         engine: engine,
         path: path,
-        hasSavedCheckpoint: _activeDocumentPath == path,
+        hasSavedCheckpoint: _activeDocumentPath != null,
+        hasUnsavedChanges: _autosaveInitiallyUnsavedChanges,
         onStateChanged: (state) {
           if (!identical(_autosave, coordinator)) return;
           _autosaveState = state;
@@ -217,14 +237,32 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
       await next.close();
       return;
     }
+    try {
+      // The candidate is now known-good. Remove only the old session copy;
+      // future edits to this named project checkpoint to the recovery path.
+      await _clearRecoveryCheckpoint();
+    } catch (_) {
+      await next.close();
+      rethrow;
+    }
     _autosave = null;
     _autosaveEngine = null;
     _autosaveBoundPath = null;
     _autosaveState = null;
-    await previous?.dispose(flush: false);
+    try {
+      await previous?.dispose(flush: false);
+    } catch (_) {
+      await next.close();
+      rethrow;
+    }
+    if (!mounted) {
+      await next.close();
+      return;
+    }
     setState(() {
-      _activeAutosavePath = path;
+      _activeAutosavePath = widget.autosavePath;
       _activeDocumentPath = path;
+      _autosaveInitiallyUnsavedChanges = false;
       _engine = Future<EngineApi>.value(next);
     });
   }
@@ -252,6 +290,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
       // Preserve the current project/checkpoint before this explicit document
       // replacement. A failure here leaves the visible engine untouched.
       await previousAutosave?.flush();
+      await _clearRecoveryCheckpoint();
     } catch (_) {
       await next.close();
       rethrow;
@@ -268,20 +307,20 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     setState(() {
       _activeAutosavePath = widget.autosavePath;
       _activeDocumentPath = null;
+      _autosaveInitiallyUnsavedChanges = false;
       _engine = Future<EngineApi>.value(next);
     });
   }
 
   Future<void> _documentSaved(String path) async {
-    if (_activeDocumentPath == path && _activeAutosavePath == path) return;
     final previous = _autosave;
-    _autosave = null;
-    _autosaveEngine = null;
-    _autosaveBoundPath = null;
-    _autosaveState = null;
-    _activeAutosavePath = path;
+    // Finish edits that arrived while the explicit save was in flight. They
+    // remain in recovery if they were not part of the saved revision.
+    await previous?.flush();
+    final changesAfterSave = previous?.hasUnsavedChanges ?? false;
     _activeDocumentPath = path;
-    await previous?.dispose();
+    _autosaveInitiallyUnsavedChanges = changesAfterSave;
+    if (!changesAfterSave) await _clearRecoveryCheckpoint();
     if (mounted) setState(() {});
   }
 
@@ -297,12 +336,57 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     _autosaveEngine = null;
     _autosaveBoundPath = null;
     _autosaveState = null;
-    _activeAutosavePath = path;
+    await _clearRecoveryCheckpoint();
+    _activeAutosavePath = widget.autosavePath;
     _activeDocumentPath = path;
+    _autosaveInitiallyUnsavedChanges = false;
     // The old coordinator was flushed before the capability rebind. It must
     // not issue another save against the now-rebound studio project.
     await previous?.dispose(flush: false);
     if (mounted) setState(() {});
+  }
+
+  Future<void> _clearRecoveryCheckpoint() async {
+    final recoveryPath = _activeAutosavePath;
+    if (recoveryPath == null || recoveryPath.isEmpty) return;
+    final deleteOverride = widget.deleteRecoveryCheckpoint;
+    if (deleteOverride != null) {
+      await deleteOverride(recoveryPath);
+      return;
+    }
+    final recoveryDirectory = widget.recoveryDirectory;
+    if (recoveryDirectory == null) return;
+    await RecoveryCheckpointStore(
+      recoveryDirectory: recoveryDirectory,
+    ).delete(recoveryPath);
+  }
+
+  Future<void> _discardRecoveryForClose() async {
+    final previous = _autosave;
+    _autosave = null;
+    _autosaveEngine = null;
+    _autosaveBoundPath = null;
+    _autosaveState = null;
+    try {
+      await previous?.discard();
+      await _clearRecoveryCheckpoint();
+    } catch (error, stack) {
+      // Close will be canceled on cleanup failure. Rebind autosave so further
+      // edits in the still-open document continue producing recovery copies.
+      _autosaveInitiallyUnsavedChanges = true;
+      try {
+        if (mounted && _activeAutosavePath?.isNotEmpty == true) {
+          final engine = await _engine;
+          if (mounted) _autosaveFor(engine)?.markDirty();
+        }
+      } catch (restoreError, restoreStack) {
+        debugPrint(
+          'Project Ink recovery scheduling could not be restored: '
+          '$restoreError\n$restoreStack',
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
   }
 
   @override
@@ -392,6 +476,9 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
   Widget build(BuildContext context) => MaterialApp(
     title: 'Project Ink',
     debugShowCheckedModeBanner: false,
+    // The current product ships English-only interface copy. Keep the chosen
+    // app locale deterministic when the host OS requests an unsupported one.
+    supportedLocales: const [Locale('en')],
     theme: InkTheme.light(),
     highContrastTheme: InkTheme.light(highContrast: true),
     darkTheme: InkTheme.dark(),
@@ -415,6 +502,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
         final engine = snapshot.data!;
         return CanvasScreen(
           engine: engine,
+          comicWorkspaceController: widget.comicWorkspaceController,
           targetPlatform: widget.targetPlatformOverride,
           autosave: _autosaveFor(engine),
           autosaveState: _autosaveState,
@@ -424,6 +512,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
           onDocumentSaved: _documentSaved,
           onBeforeOpenStudioProject: _beforeOpenStudioProject,
           onStudioProjectOpened: _studioProjectOpened,
+          onDiscardRecovery: _discardRecoveryForClose,
           onEngineReplaced: _retireEngineAfterCanvasCleanup,
           desktopDockEnabled: true,
           workspaceModeOverride: _workspacePreferences.modeOverride,

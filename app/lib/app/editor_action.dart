@@ -227,6 +227,23 @@ List<EditorActionId> searchEditorActions(String query) {
 
 typedef EditorActionHandler = void Function(EditorActionId action);
 
+/// Returns whether an editor action is temporarily unavailable in the UI.
+/// The Rust bridge remains responsible for validating document mutations.
+bool isEditorActionDisabled({
+  required EditorActionId action,
+  required bool documentActionsEnabled,
+  required bool documentActionRunning,
+}) =>
+    (documentActionRunning && action == EditorActionId.newDocument) ||
+    (!documentActionsEnabled &&
+        const {
+          EditorActionId.openProject,
+          EditorActionId.importPsd,
+          EditorActionId.saveProject,
+          EditorActionId.saveProjectAs,
+          EditorActionId.exportPng,
+        }.contains(action));
+
 class EditorCommandRegistry {
   EditorCommandRegistry(this._handler);
 

@@ -1,14 +1,16 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/bridge/engine_api.dart';
 import 'package:project_ink/canvas/canvas_screen.dart';
 import 'package:project_ink/canvas/live_preview_controller.dart';
 import 'package:project_ink/comics/comic_workspace.dart';
+import 'package:project_ink/documents/autosave_coordinator.dart';
 import 'package:project_ink/documents/document_picker.dart';
 import 'package:project_ink/tools/brush_library_panel.dart';
 
@@ -46,6 +48,11 @@ class _CancelDocumentPicker extends _Picker {
   }
 }
 
+class _PsdPicker extends _Picker implements PsdImportPicker {
+  @override
+  Future<String?> openPsd() async => '/tmp/replacement.psd';
+}
+
 class _StudioPicker extends _Picker {
   _StudioPicker(this.path);
 
@@ -73,7 +80,7 @@ class _FailingComicController extends _RecordingComicController {
   }
 }
 
-class _BrushPicker implements DocumentPicker, BrushPicker {
+class _BrushPicker implements DocumentPicker, BrushPicker, BrushTipImagePicker {
   @override
   Future<String?> openProject() async => null;
 
@@ -90,6 +97,9 @@ class _BrushPicker implements DocumentPicker, BrushPicker {
   Future<String?> openBrush() async => '/tmp/converted.kpp';
 
   @override
+  Future<String?> openBrushTipImage() async => '/tmp/tip.png';
+
+  @override
   Future<String?> saveBrush({String suggestedName = 'brush.inkbrush'}) async =>
       '/tmp/$suggestedName';
 }
@@ -97,9 +107,17 @@ class _BrushPicker implements DocumentPicker, BrushPicker {
 class _RecordingEngine extends InMemoryEngineApi {
   String? savedPath;
   String? exportedPath;
+  int saveAttempts = 0;
+  bool failSave = false;
+  Future<void> Function()? beforeSaveCompletes;
 
   @override
-  Future<void> saveAs(String path) async => savedPath = path;
+  Future<void> saveAs(String path) async {
+    saveAttempts++;
+    if (failSave) throw StateError('disk full');
+    await beforeSaveCompletes?.call();
+    savedPath = path;
+  }
 
   @override
   Future<void> exportPng(String path) async => exportedPath = path;
@@ -175,8 +193,9 @@ class _ImportEngine extends InMemoryEngineApi {
   String? inspectedPath;
   String? convertedPath;
   String? importedPath;
-  final List<int> strokeBrushIds = <int>[];
   bool customBrushInstalled = false;
+  int? duplicatedBrushId;
+  String? renamedBrush;
 
   static final Uint8List sourceHash = Uint8List.fromList(
     List<int>.filled(32, 7),
@@ -235,15 +254,21 @@ class _ImportEngine extends InMemoryEngineApi {
   }
 
   @override
-  Future<void> beginBrushStroke(int brushId) async {
-    strokeBrushIds.add(brushId);
-    await super.beginBrushStroke(brushId);
-  }
-
-  @override
   Future<int> importBrushVerified(String path, Uint8List sourceSha256) async {
     expect(sourceSha256, orderedEquals(sourceHash));
     return importBrush(path);
+  }
+
+  @override
+  Future<int> duplicateBrush(int brushId) async {
+    duplicatedBrushId = brushId;
+    return 1013;
+  }
+
+  @override
+  Future<void> renameBrush({required int brushId, required String name}) async {
+    expect(brushId, 1013);
+    renamedBrush = name;
   }
 }
 
@@ -291,6 +316,38 @@ class _BundleImportEngine extends _ImportEngine {
   }
 }
 
+class _GuidedImageImportEngine extends _ImportEngine {
+  bool includeExtractedAssets = false;
+  @override
+  Future<BrushImportInspectionView> inspectBrushImport(String path) async {
+    inspectedPath = path;
+    return BrushImportInspectionView(
+      sourceFormat: path.endsWith('.png') ? 'Image' : 'ProcreateBrush',
+      sourceSha256: _ImportEngine.sourceHash,
+      bytes: 128,
+      fidelity: path.endsWith('.png') ? 'Approximate' : 'GuidedRecreation',
+      importerVersion: 'test',
+    );
+  }
+
+  @override
+  Future<BrushImportReportView> convertBrushImport(String path) async {
+    convertedPath = path;
+    return BrushImportReportView(
+      sourceFormat: path.endsWith('.png') ? 'Image' : 'ProcreateBrush',
+      sourceSha256: _ImportEngine.sourceHash,
+      importerVersion: 'test',
+      fidelity: path.endsWith('.png') ? 'Approximate' : 'GuidedRecreation',
+      mappings: <String>[],
+      omitted: path.endsWith('.png') ? <String>[] : <String>['source settings'],
+      warnings: <String>[],
+      resourceCount: path.endsWith('.png') || includeExtractedAssets ? 1 : 0,
+      previewWidth: 160,
+      previewHeight: 64,
+    );
+  }
+}
+
 class _WritebackPicker implements DocumentPicker, DocumentWriteback {
   String? committedPath;
 
@@ -309,6 +366,13 @@ class _WritebackPicker implements DocumentPicker, DocumentWriteback {
   @override
   Future<void> commitProject(String localPath) async {
     committedPath = localPath;
+  }
+}
+
+class _FailingWritebackPicker extends _WritebackPicker {
+  @override
+  Future<void> commitProject(String localPath) async {
+    throw StateError('provider write-back failed');
   }
 }
 
@@ -334,6 +398,173 @@ class _PngWritebackPicker implements DocumentPicker, DocumentPngWriteback {
 }
 
 void main() {
+  testWidgets('native window close cancels or discards dirty recovery', (
+    tester,
+  ) async {
+    const closeChannel = MethodChannel('org.projectink.studio/window_close_v1');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final nativeReplies = <String>[];
+    messenger.setMockMethodCallHandler(closeChannel, (call) async {
+      nativeReplies.add(call.method);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(closeChannel, null));
+
+    var recoveryDiscards = 0;
+    final engine = _RecordingEngine();
+    final picker = _Picker();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: picker,
+          activeDocumentPath: '/tmp/current.inkproj',
+          targetPlatform: TargetPlatform.macOS,
+          autosaveState: const AutosaveState(
+            dirty: false,
+            hasUnsavedChanges: true,
+            saving: false,
+            lastError: null,
+            hasSavedCheckpoint: true,
+          ),
+          onDiscardRecovery: () async => recoveryDiscards++,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    Future<ByteData?> requestNativeClose() => messenger.handlePlatformMessage(
+      closeChannel.name,
+      closeChannel.codec.encodeMethodCall(const MethodCall('requestClose')),
+      null,
+    );
+
+    final cancelledClose = requestNativeClose();
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await tester.pumpAndSettle();
+    await cancelledClose;
+    expect(nativeReplies, <String>['cancelClose']);
+    expect(recoveryDiscards, 0);
+
+    final discardedClose = requestNativeClose();
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+    await discardedClose;
+    expect(nativeReplies, <String>['cancelClose', 'allowClose']);
+    expect(recoveryDiscards, 1);
+
+    Future<ByteData?> requestNativeQuit() => messenger.handlePlatformMessage(
+      closeChannel.name,
+      closeChannel.codec.encodeMethodCall(const MethodCall('requestQuit')),
+      null,
+    );
+
+    final cancelledQuit = requestNativeQuit();
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await tester.pumpAndSettle();
+    await cancelledQuit;
+    expect(nativeReplies, <String>[
+      'cancelClose',
+      'allowClose',
+      'cancelTerminate',
+    ]);
+    expect(recoveryDiscards, 1);
+
+    final discardedQuit = requestNativeQuit();
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+    await discardedQuit;
+    expect(nativeReplies, <String>[
+      'cancelClose',
+      'allowClose',
+      'cancelTerminate',
+      'allowTerminate',
+    ]);
+    expect(recoveryDiscards, 2);
+
+    final savedQuit = requestNativeQuit();
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Save').last);
+    await tester.pumpAndSettle();
+    await savedQuit;
+    expect(engine.savedPath, '/tmp/current.inkproj');
+    expect(nativeReplies.last, 'allowTerminate');
+    expect(recoveryDiscards, 2);
+
+    engine.failSave = true;
+    final failedSaveQuit = requestNativeQuit();
+    await tester.pump();
+    await tester.tap(find.text('Save').last);
+    await tester.pumpAndSettle();
+    await failedSaveQuit;
+    expect(nativeReplies.last, 'cancelTerminate');
+    expect(engine.saveAttempts, 2);
+    expect(recoveryDiscards, 2);
+  });
+
+  testWidgets('native close stays open when edits arrive during Save', (
+    tester,
+  ) async {
+    const closeChannel = MethodChannel('org.projectink.studio/window_close_v1');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final nativeReplies = <String>[];
+    messenger.setMockMethodCallHandler(closeChannel, (call) async {
+      nativeReplies.add(call.method);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(closeChannel, null));
+
+    final engine = _RecordingEngine();
+    engine.beforeSaveCompletes = engine.clearSelection;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _Picker(),
+          activeDocumentPath: '/tmp/current.inkproj',
+          targetPlatform: TargetPlatform.macOS,
+          autosaveState: const AutosaveState(
+            dirty: false,
+            hasUnsavedChanges: true,
+            saving: false,
+            lastError: null,
+            hasSavedCheckpoint: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final request = messenger.handlePlatformMessage(
+      closeChannel.name,
+      closeChannel.codec.encodeMethodCall(const MethodCall('requestQuit')),
+      null,
+    );
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Save').last);
+    await tester.pumpAndSettle();
+    await request;
+
+    expect(engine.savedPath, '/tmp/current.inkproj');
+    expect(nativeReplies, <String>['cancelTerminate']);
+    expect(
+      find.text('New edits arrived while saving. Save again before closing.'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('new document validates and forwards canvas settings', (
     tester,
   ) async {
@@ -371,6 +602,53 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(created, (640, 480, 144.0));
+  });
+
+  testWidgets('New offers cancel and discard for unsaved recovery changes', (
+    tester,
+  ) async {
+    final engine = InMemoryEngineApi();
+    (int, int, double)? created;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.linux,
+          autosaveState: const AutosaveState(
+            dirty: false,
+            hasUnsavedChanges: true,
+            saving: false,
+            lastError: null,
+            hasSavedCheckpoint: true,
+          ),
+          onNewDocument: ({
+            required int widthPx,
+            required int heightPx,
+            required double dpi,
+          }) async {
+            created = (widthPx, heightPx, dpi);
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+
+    Future<void> requestNew() async {
+      await _invokeCommand(tester, 'New document');
+      await tester.tap(find.text('Create document'));
+      await tester.pumpAndSettle();
+    }
+
+    await requestNew();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await tester.pumpAndSettle();
+    expect(created, isNull);
+
+    await requestNew();
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+    expect(created, isNotNull);
   });
 
   testWidgets('replacing the engine keeps the canvas subtree valid', (
@@ -618,6 +896,14 @@ void main() {
           engine: engine,
           documentPicker: picker,
           targetPlatform: TargetPlatform.macOS,
+          activeDocumentPath: '/tmp/current.inkproj',
+          autosaveState: const AutosaveState(
+            dirty: false,
+            hasUnsavedChanges: true,
+            saving: false,
+            lastError: null,
+            hasSavedCheckpoint: true,
+          ),
           onOpenDocument: (_) async => openRequests++,
           onDocumentSaved: (_) async => savedNotifications++,
         ),
@@ -626,13 +912,101 @@ void main() {
     await tester.pump();
 
     await _invokeCommand(tester, 'Open project');
-    await _invokeCommand(tester, 'Save project');
     await _invokeCommand(tester, 'Save project as');
 
     expect(openRequests, 0);
-    expect(picker.saveRequests, 2);
+    expect(picker.saveRequests, 1);
     expect(engine.savedPath, isNull);
     expect(savedNotifications, 0);
+    final canvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
+    expect(canvas.activeDocumentPath, '/tmp/current.inkproj');
+    expect(canvas.autosaveState?.hasUnsavedChanges, isTrue);
+    expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
+  });
+
+  testWidgets('Open offers cancel and discard for unsaved recovery changes', (
+    tester,
+  ) async {
+    final engine = _RecordingEngine();
+    var openRequests = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _Picker(),
+          autosaveState: const AutosaveState(
+            dirty: false,
+            hasUnsavedChanges: true,
+            saving: false,
+            lastError: null,
+            hasSavedCheckpoint: true,
+          ),
+          targetPlatform: TargetPlatform.linux,
+          onOpenDocument: (_) async => openRequests++,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await _invokeCommand(tester, 'Open project');
+    expect(
+      find.text(
+        'Your recovery copy contains changes since the last explicit save. If you continue with Discard, the recovery copy and those changes will be removed. The last explicitly saved project will remain unchanged.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel').last);
+    await tester.pumpAndSettle();
+    expect(openRequests, 0);
+
+    await _invokeCommand(tester, 'Open project');
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+    expect(openRequests, 1);
+  });
+
+  testWidgets('PSD replacement offers cancel and discard for recovery edits', (
+    tester,
+  ) async {
+    final engine = _RecordingEngine();
+    String? importedPath;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _PsdPicker(),
+          autosaveState: const AutosaveState(
+            dirty: false,
+            hasUnsavedChanges: true,
+            saving: false,
+            lastError: null,
+            hasSavedCheckpoint: true,
+          ),
+          targetPlatform: TargetPlatform.macOS,
+          onOpenDocument: (path) async => importedPath = path,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    Future<void> importPsd() async {
+      await tester.tap(find.byTooltip('Menu menu'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Import PSD').last);
+      await tester.pumpAndSettle();
+    }
+
+    await importPsd();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await tester.pumpAndSettle();
+    expect(importedPath, isNull);
+
+    await importPsd();
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+    expect(importedPath, '/tmp/replacement.psd');
   });
 
   testWidgets('failed project open keeps canvas and explains likely cause', (
@@ -667,6 +1041,46 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('document replacement blocks new strokes until it completes', (
+    tester,
+  ) async {
+    final engine = _RecordingEngine();
+    final replacementStarted = Completer<void>();
+    final finishReplacement = Completer<void>();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _Picker(),
+          targetPlatform: TargetPlatform.macOS,
+          onOpenDocument: (_) async {
+            replacementStarted.complete();
+            await finishReplacement.future;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final revisionBeforeReplacement = engine.revision;
+
+    await _invokeCommand(tester, 'Open project');
+    await tester.pump();
+    expect(replacementStarted.isCompleted, isTrue);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.bySemanticsLabel('Drawing canvas')),
+      kind: PointerDeviceKind.stylus,
+    );
+    await gesture.moveBy(const Offset(30, 20));
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(engine.revision, revisionBeforeReplacement);
+
+    finishReplacement.complete();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('provider write-back waits for a successful local save', (
     tester,
   ) async {
@@ -687,6 +1101,37 @@ void main() {
 
     expect(engine.savedPath, '/tmp/staged.inkproj');
     expect(picker.committedPath, '/tmp/staged.inkproj');
+  });
+
+  testWidgets('failed provider write-back does not report a completed save', (
+    tester,
+  ) async {
+    final engine = _RecordingEngine();
+    final picker = _FailingWritebackPicker();
+    var savedPathNotification = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: picker,
+          activeDocumentPath: '/tmp/current.inkproj',
+          onDocumentSaved: (_) async => savedPathNotification = true,
+          targetPlatform: TargetPlatform.macOS,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await _invokeCommand(tester, 'Save project as');
+
+    expect(engine.savedPath, '/tmp/staged.inkproj');
+    expect(savedPathNotification, isFalse);
+    expect(
+      tester.widget<CanvasScreen>(find.byType(CanvasScreen)).activeDocumentPath,
+      '/tmp/current.inkproj',
+    );
+    expect(find.textContaining('Document action failed:'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(
@@ -909,7 +1354,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('brush import shows the compatibility report before install', (
+  testWidgets('brush import shows install summary before install', (
     tester,
   ) async {
     final engine = _ImportEngine();
@@ -926,14 +1371,14 @@ void main() {
 
     await _invokeCommand(tester, 'Brush library');
     await tester.pump();
-    await tester.tap(find.text('Import'));
+    await tester.tap(find.byTooltip('Import brush'));
     await tester.pump();
-    expect(find.text('Brush compatibility report'), findsOneWidget);
+    expect(find.text('Brush is ready to install'), findsOneWidget);
     expect(engine.inspectedPath, '/tmp/converted.kpp');
     expect(engine.convertedPath, '/tmp/converted.kpp');
     expect(engine.importedPath, isNull);
 
-    await tester.tap(find.text('Install converted brush'));
+    await tester.tap(find.text('Install brush'));
     await tester.pumpAndSettle();
     expect(engine.importedPath, '/tmp/converted.kpp');
 
@@ -949,14 +1394,117 @@ void main() {
     );
     expect(importedBrushLibrary.activeTagFilters, isEmpty);
     expect(importedBrushLibrary.selected?.id, 13);
-    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    final canvas = tester.getCenter(find.bySemanticsLabel('Drawing canvas'));
-    await gesture.moveTo(canvas);
-    await gesture.down(canvas);
-    await gesture.moveBy(const Offset(36, 12));
-    await gesture.up();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(engine.strokeBrushIds, contains(13));
+  });
+
+  testWidgets('guided recreation can create a brush from a tip image', (
+    tester,
+  ) async {
+    final engine = _GuidedImageImportEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _BrushPicker(),
+          targetPlatform: TargetPlatform.macOS,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await _invokeCommand(tester, 'Brush library');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Import brush'));
+    await tester.pump();
+
+    expect(find.text('Choose a tip image'), findsOneWidget);
+    expect(
+      find.textContaining('wasn’t converted or installed'),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Choose a tip image'),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    expect(engine.importedPath, isNull);
+
+    await tester.tap(find.text('Choose a tip image'));
+    await tester.pumpAndSettle();
+    expect(find.text('Brush tip image ready'), findsOneWidget);
+    expect(find.text('Create brush'), findsOneWidget);
+    expect(engine.convertedPath, '/tmp/tip.png');
+    expect(engine.importedPath, isNull);
+
+    await tester.tap(find.text('Create brush'));
+    await tester.pumpAndSettle();
+    expect(engine.importedPath, '/tmp/tip.png');
+  });
+
+  testWidgets('guided recreation can start from a Project Ink default', (
+    tester,
+  ) async {
+    final engine = _GuidedImageImportEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _BrushPicker(),
+          targetPlatform: TargetPlatform.macOS,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _invokeCommand(tester, 'Brush library');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Import brush'));
+    await tester.pumpAndSettle();
+    expect(find.text('More options'), findsOneWidget);
+    await tester.tap(find.text('More options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Start from a Project Ink brush'), findsOneWidget);
+
+    await tester.tap(find.text('Start from a Project Ink brush'));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose a starter brush'), findsOneWidget);
+    await tester.tap(find.text('Round tip'));
+    await tester.pumpAndSettle();
+
+    expect(engine.duplicatedBrushId, greaterThan(0));
+    expect(engine.renamedBrush, 'Recreated — converted');
+    expect(engine.importedPath, isNull);
+  });
+
+  testWidgets('guided recreation can explicitly create from extracted images', (
+    tester,
+  ) async {
+    final engine = _GuidedImageImportEngine()..includeExtractedAssets = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _BrushPicker(),
+          targetPlatform: TargetPlatform.macOS,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _invokeCommand(tester, 'Brush library');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Import brush'));
+    await tester.pumpAndSettle();
+    expect(find.text('Create brush from these images'), findsOneWidget);
+    expect(
+      find.textContaining('wasn’t converted or installed'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Create brush from these images'));
+    await tester.pumpAndSettle();
+    expect(engine.importedPath, '/tmp/converted.kpp');
   });
 
   testWidgets('Krita bundle import uses the transactional bundle operation', (
@@ -976,12 +1524,14 @@ void main() {
 
     await _invokeCommand(tester, 'Brush library');
     await tester.pump();
-    await tester.tap(find.text('Import'));
+    await tester.tap(find.byTooltip('Import brush'));
     await tester.pump();
-    expect(find.text('Brush compatibility report'), findsOneWidget);
+    expect(find.text('Brush is ready to install'), findsOneWidget);
+    await tester.tap(find.text('Import details'));
+    await tester.pumpAndSettle();
     expect(find.text('Brushes in pack: 2'), findsOneWidget);
 
-    await tester.tap(find.text('Install converted brush'));
+    await tester.tap(find.text('Install brush'));
     await tester.pump();
     expect(engine.bundleImportedPath, '/tmp/converted.kpp');
     expect(engine.importedPath, isNull);

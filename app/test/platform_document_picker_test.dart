@@ -117,6 +117,34 @@ void main() {
     expect(selector.lastSaveOptions.suggestedName, 'pencil');
   });
 
+  test('iOS brush import allows custom brush document types', () async {
+    final selector = _FakeFileSelector(selectedFile: XFile('/tmp/sample.sut'));
+    final picker = PlatformDocumentPicker(
+      selector: selector,
+      targetPlatform: TargetPlatform.iOS,
+    );
+
+    expect(await picker.openBrush(), '/tmp/sample.sut');
+    expect(selector.lastAcceptedTypeGroups, hasLength(1));
+    expect(selector.lastAcceptedTypeGroups!.single.uniformTypeIdentifiers, [
+      'public.data',
+    ]);
+  });
+
+  test('iOS brush tip picker filters for images', () async {
+    final selector = _FakeFileSelector(selectedFile: XFile('/tmp/tip.png'));
+    final picker = PlatformDocumentPicker(
+      selector: selector,
+      targetPlatform: TargetPlatform.iOS,
+    );
+
+    expect(await picker.openBrushTipImage(), '/tmp/tip.png');
+    expect(selector.lastAcceptedTypeGroups, hasLength(1));
+    expect(selector.lastAcceptedTypeGroups!.single.uniformTypeIdentifiers, [
+      'public.image',
+    ]);
+  });
+
   test('native cancellation remains cancellation', () async {
     final picker = PlatformDocumentPicker(
       selector: _FakeFileSelector(),
@@ -256,6 +284,7 @@ class _FakeFileSelector extends FileSelectorPlatform {
   final List<String?> directoryPrompts = [];
   final List<String?> directoryInitials = [];
   int openFileCalls = 0;
+  List<XTypeGroup>? lastAcceptedTypeGroups;
 
   @override
   Future<XFile?> openFile({
@@ -264,6 +293,7 @@ class _FakeFileSelector extends FileSelectorPlatform {
     String? confirmButtonText,
   }) async {
     openFileCalls++;
+    lastAcceptedTypeGroups = acceptedTypeGroups;
     return selectedFile;
   }
 

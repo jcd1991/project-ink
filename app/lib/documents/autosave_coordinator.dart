@@ -15,9 +15,11 @@ class AutosaveCoordinator {
     this.debounce = const Duration(seconds: 2),
     this.onStateChanged,
     bool hasSavedCheckpoint = false,
+    bool hasUnsavedChanges = false,
   }) : _engine = engine,
        _path = path,
-       _hasSavedCheckpoint = hasSavedCheckpoint;
+       _hasSavedCheckpoint = hasSavedCheckpoint,
+       _hasUnsavedChanges = hasUnsavedChanges;
 
   final EngineApi _engine;
   final String _path;
@@ -30,16 +32,19 @@ class AutosaveCoordinator {
   Object? _lastError;
   bool _dirty = false;
   bool _hasSavedCheckpoint;
+  bool _hasUnsavedChanges;
   bool _disposed = false;
   int _continuousEditCount = 0;
 
   bool get isDirty => _dirty;
+  bool get hasUnsavedChanges => _hasUnsavedChanges;
   bool get isSaving => _activeSave != null;
   Object? get lastError => _lastError;
   bool get autosaveDeferred => _continuousEditCount > 0;
 
   AutosaveState get state => AutosaveState(
     dirty: _dirty,
+    hasUnsavedChanges: _hasUnsavedChanges,
     saving: isSaving,
     lastError: _lastError,
     hasSavedCheckpoint: _hasSavedCheckpoint,
@@ -53,11 +58,23 @@ class AutosaveCoordinator {
   void markDirty({bool restartTimer = true}) {
     if (_disposed) return;
     _dirty = true;
+    _hasUnsavedChanges = true;
     _lastError = null;
     if (restartTimer || _timer == null) {
       _schedule();
     }
     _notify();
+  }
+
+  /// Mark the document explicitly saved only if the save covered the current
+  /// engine revision. Checkpoint completion intentionally does not call this:
+  /// a recovery copy is not the user's explicit save.
+  bool markExplicitlySaved({required int savedRevision}) {
+    if (_disposed || _engine.revision != savedRevision) return false;
+    _hasUnsavedChanges = false;
+    _hasSavedCheckpoint = true;
+    _notify();
+    return true;
   }
 
   /// Defer checkpoints while a continuous drawing/editing gesture is active.
@@ -118,6 +135,32 @@ class AutosaveCoordinator {
     _notify();
   }
 
+  /// Stop future checkpoints and wait for an already-started atomic save.
+  /// The caller may then remove the recovery copy after the user chooses
+  /// Discard. Any failure from an in-flight checkpoint is intentionally
+  /// swallowed here because Discard explicitly abandons that recovery copy.
+  Future<void> discard() async {
+    if (_disposed) return;
+    _disposed = true;
+    _timer?.cancel();
+    _timer = null;
+    _dirty = false;
+    _hasUnsavedChanges = false;
+    _notify();
+    final active = _activeSave;
+    if (active != null) {
+      try {
+        await active;
+      } catch (_) {
+        // Discard removes the recovery destination after the writer stops.
+      }
+    }
+    _dirty = false;
+    _hasUnsavedChanges = false;
+    _lastError = null;
+    _notify();
+  }
+
   void _schedule() {
     if (_continuousEditCount > 0) return;
     _timer?.cancel();
@@ -171,12 +214,14 @@ class AutosaveCoordinator {
 class AutosaveState {
   const AutosaveState({
     required this.dirty,
+    this.hasUnsavedChanges = false,
     required this.saving,
     required this.lastError,
     this.hasSavedCheckpoint = false,
   });
 
   final bool dirty;
+  final bool hasUnsavedChanges;
   final bool saving;
   final Object? lastError;
   final bool hasSavedCheckpoint;

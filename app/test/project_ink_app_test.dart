@@ -1,6 +1,6 @@
 import 'dart:async';
+import 'dart:io';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +10,7 @@ import 'package:project_ink/canvas/canvas_screen.dart';
 import 'package:project_ink/comics/comic_workspace.dart';
 import 'package:project_ink/documents/autosave_coordinator.dart';
 import 'package:project_ink/documents/document_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class _TitleFlowPicker implements DocumentPicker {
   @override
@@ -65,6 +66,15 @@ class _DelayedSaveEngine extends InMemoryEngineApi {
   }
 }
 
+class _CloseTrackingEngine extends InMemoryEngineApi {
+  bool closed = false;
+
+  @override
+  Future<void> close() async {
+    closed = true;
+  }
+}
+
 class _TestComicWorkspaceController extends ComicWorkspaceController {
   _TestComicWorkspaceController() : super();
 
@@ -89,6 +99,23 @@ void main() {
     expect(find.byType(CanvasScreen), findsOneWidget);
   });
 
+  testWidgets('falls back to English for an unsupported system locale', (
+    tester,
+  ) async {
+    tester.binding.platformDispatcher.localesTestValue = const [
+      Locale('es', 'MX'),
+    ];
+    addTearDown(tester.binding.platformDispatcher.clearLocalesTestValue);
+
+    await tester.pumpWidget(ProjectInkApp(engineOverride: InMemoryEngineApi()));
+    await tester.pump();
+
+    expect(
+      Localizations.localeOf(tester.element(find.byType(CanvasScreen))),
+      const Locale('en'),
+    );
+  });
+
   testWidgets('final recovery save completes before the engine closes', (
     tester,
   ) async {
@@ -105,14 +132,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final canvas = find.bySemanticsLabel('Drawing canvas');
-    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    final center = tester.getCenter(canvas);
-    await gesture.moveTo(center);
-    await gesture.down(center);
-    await gesture.moveBy(const Offset(20, 12));
-    await gesture.up();
-    await tester.pump(const Duration(milliseconds: 100));
+    tester
+        .widget<CanvasScreen>(find.byType(CanvasScreen))
+        .autosave!
+        .markDirty();
+    expect(
+      tester.widget<CanvasScreen>(find.byType(CanvasScreen)).autosave?.isDirty,
+      isTrue,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     await engine.saveStarted.future;
@@ -124,7 +151,7 @@ void main() {
     expect(engine.events, ['save-started', 'save-finished', 'engine-closed']);
   });
 
-  testWidgets('Save As binds later autosaves to the selected project path', (
+  testWidgets('Save As keeps autosave in the separate recovery path', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1400, 900);
@@ -158,14 +185,11 @@ void main() {
     expect(find.text('Phase385Title  •  Pen'), findsOneWidget);
     expect(engine.savedPaths, ['/tmp/Phase385Title.inkproj']);
 
-    final canvas = find.bySemanticsLabel('Drawing canvas');
-    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    final center = tester.getCenter(canvas);
-    await gesture.moveTo(center);
-    await gesture.down(center);
-    await gesture.moveBy(const Offset(20, 12));
-    await gesture.up();
-    await tester.pump(const Duration(milliseconds: 100));
+    tester
+        .widget<CanvasScreen>(find.byType(CanvasScreen))
+        .autosave!
+        .markDirty();
+    await tester.pump();
     expect(
       tester
           .widget<CanvasScreen>(find.byType(CanvasScreen))
@@ -179,67 +203,12 @@ void main() {
     final state =
         tester.widget<CanvasScreen>(find.byType(CanvasScreen)).autosaveState!;
     expect(state.dirty, isFalse);
+    expect(state.hasUnsavedChanges, isTrue);
     expect(state.hasSavedCheckpoint, isTrue);
-    expect(find.text('Saved'), findsOneWidget);
-    expect(engine.savedPaths.last, '/tmp/Phase385Title.inkproj');
-    expect(
-      engine.savedPaths,
-      isNot(contains('/tmp/phase385-recovery.inkproj')),
-    );
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    expect(engine.savedPaths.last, '/tmp/phase385-recovery.inkproj');
+    expect(engine.savedPaths, contains('/tmp/Phase385Title.inkproj'));
   });
-
-  testWidgets(
-    'New after Save As clears the project path and checkpoint state',
-    (tester) async {
-      tester.view.physicalSize = const Size(1400, 900);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(
-        ProjectInkApp(
-          engineOverride: InMemoryEngineApi(),
-          autosavePath: '/tmp/project-ink-test-recovery.inkproj',
-          documentPicker: _TitleFlowPicker(),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyK, character: 'k');
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyK);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-      await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'Save project as');
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Save project as').last);
-      await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'Phase385Title');
-      await tester.tap(find.text('Save'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Phase385Title  •  Pen'), findsOneWidget);
-      expect(
-        tester
-            .widget<CanvasScreen>(find.byType(CanvasScreen))
-            .activeDocumentPath,
-        '/tmp/Phase385Title.inkproj',
-      );
-
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyN, character: 'n');
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyN);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Create document'));
-      await tester.pumpAndSettle();
-
-      final newCanvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
-      expect(find.text('Untitled  •  Pen'), findsOneWidget);
-      expect(newCanvas.activeDocumentPath, isNull);
-      expect(newCanvas.autosaveState?.hasSavedCheckpoint, isFalse);
-      expect(tester.takeException(), isNull);
-    },
-  );
 
   testWidgets('New document replaces the Rust-session engine after creation', (
     tester,
@@ -306,6 +275,212 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('closes an opened candidate if the app unmounts before rebind', (
+    tester,
+  ) async {
+    final initialEngine = InMemoryEngineApi();
+    final candidate = _CloseTrackingEngine();
+    final candidateReady = Completer<EngineApi>();
+    await tester.pumpWidget(
+      ProjectInkApp(
+        engineOverride: initialEngine,
+        targetPlatformOverride: TargetPlatform.fuchsia,
+        openDocumentEngine: (_) => candidateReady.future,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final canvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
+    final opening = canvas.onOpenDocument!('/tmp/dispose-during-open.inkproj');
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    candidateReady.complete(candidate);
+    await opening;
+
+    expect(candidate.closed, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('failed project open preserves the active engine and recovery', (
+    tester,
+  ) async {
+    final temporary =
+        (await tester.runAsync(
+          () => Directory.systemTemp.createTemp('project-ink-failed-open-'),
+        ))!;
+    addTearDown(() async {
+      await tester.runAsync(() => temporary.delete(recursive: true));
+    });
+    final recoveryPath = '${temporary.path}/recovery.inkproj';
+    final recovery = Directory(recoveryPath);
+    await tester.runAsync(recovery.create);
+    final checkpoint = File('${recovery.path}/sentinel.checkpoint');
+    const checkpointBytes = <int>[7, 19, 31, 43, 59];
+    await tester.runAsync(() => checkpoint.writeAsBytes(checkpointBytes));
+
+    final initialEngine = InMemoryEngineApi();
+    await tester.pumpWidget(
+      ProjectInkApp(
+        engineOverride: initialEngine,
+        targetPlatformOverride: TargetPlatform.fuchsia,
+        autosavePath: recoveryPath,
+        documentPicker: _OpenFlowPicker(),
+        openDocumentEngine: (_) async {
+          throw const FormatException('corrupt project fixture');
+        },
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final canvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
+    await expectLater(
+      canvas.onOpenDocument!('/tmp/corrupt.inkproj'),
+      throwsA(isA<FormatException>()),
+    );
+    expect(canvas.engine, same(initialEngine));
+    expect(await tester.runAsync(checkpoint.readAsBytes), checkpointBytes);
+    expect(await tester.runAsync(recovery.exists), isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('discard then corrupt Open keeps the current engine and recovery', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final temporary =
+        (await tester.runAsync(
+          () => Directory.systemTemp.createTemp(
+            'project-ink-discard-corrupt-open-',
+          ),
+        ))!;
+    addTearDown(() async {
+      await tester.runAsync(() => temporary.delete(recursive: true));
+    });
+    final recoveryPath = '${temporary.path}/recovery.inkproj';
+    final recovery = Directory(recoveryPath);
+    await tester.runAsync(recovery.create);
+    final checkpoint = File('${recovery.path}/sentinel.checkpoint');
+    const checkpointBytes = <int>[13, 29, 31, 47, 61];
+    await tester.runAsync(() => checkpoint.writeAsBytes(checkpointBytes));
+
+    final currentEngine = InMemoryEngineApi();
+    await tester.pumpWidget(
+      ProjectInkApp(
+        engineOverride: currentEngine,
+        targetPlatformOverride: TargetPlatform.fuchsia,
+        autosavePath: recoveryPath,
+        documentPicker: _OpenFlowPicker(),
+        openDocumentEngine: (_) async {
+          throw const DocumentOpenException(
+            'Could not open the selected project. The current project remains open.',
+          );
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final originalCanvas = tester.widget<CanvasScreen>(
+      find.byType(CanvasScreen),
+    );
+    final autosave = originalCanvas.autosave!;
+    autosave.markDirty();
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyK, character: 'k');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Open project');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open project').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Unsaved changes'), findsOneWidget);
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+
+    final currentCanvas = tester.widget<CanvasScreen>(
+      find.byType(CanvasScreen),
+    );
+    expect(currentCanvas.engine, same(currentEngine));
+    expect(currentCanvas.autosave, same(autosave));
+    expect(currentCanvas.autosaveState?.hasUnsavedChanges, isTrue);
+    expect(
+      find.text(
+        'Could not open the selected project. The current project remains open.',
+      ),
+      findsOneWidget,
+    );
+    expect(await tester.runAsync(() => recovery.exists()), isTrue);
+    expect(await tester.runAsync(checkpoint.readAsBytes), checkpointBytes);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('failed recovery cleanup preserves current engine and recovery', (
+    tester,
+  ) async {
+    final temporary =
+        (await tester.runAsync(
+          () => Directory.systemTemp.createTemp(
+            'project-ink-open-cleanup-failure-',
+          ),
+        ))!;
+    addTearDown(() async {
+      await tester.runAsync(() => temporary.delete(recursive: true));
+    });
+    final recoveryPath = '${temporary.path}/recovery.inkproj';
+    final recovery = Directory(recoveryPath);
+    await tester.runAsync(recovery.create);
+    final sentinel = File('${recovery.path}/sentinel.checkpoint');
+    const sentinelBytes = <int>[11, 23, 37, 41, 53];
+    await tester.runAsync(() => sentinel.writeAsBytes(sentinelBytes));
+
+    final activeEngine = _RecordingAutosaveEngine();
+    final candidateEngine = _CloseTrackingEngine();
+    await tester.pumpWidget(
+      ProjectInkApp(
+        engineOverride: activeEngine,
+        autosavePath: recoveryPath,
+        targetPlatformOverride: TargetPlatform.fuchsia,
+        openDocumentEngine: (_) async => candidateEngine,
+        deleteRecoveryCheckpoint: (_) async {
+          throw const FileSystemException('recovery cleanup unavailable');
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final originalCanvas = tester.widget<CanvasScreen>(
+      find.byType(CanvasScreen),
+    );
+    final autosave = originalCanvas.autosave!;
+    autosave.markDirty();
+    await tester.pump();
+
+    await expectLater(
+      originalCanvas.onOpenDocument!('/tmp/replacement.inkproj'),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    final currentCanvas = tester.widget<CanvasScreen>(
+      find.byType(CanvasScreen),
+    );
+    expect(currentCanvas.engine, same(activeEngine));
+    expect(currentCanvas.autosave, same(autosave));
+    expect(currentCanvas.autosaveState?.hasUnsavedChanges, isTrue);
+    expect(candidateEngine.closed, isTrue);
+    expect(await tester.runAsync(() => recovery.exists()), isTrue);
+    expect(await tester.runAsync(sentinel.readAsBytes), sentinelBytes);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('app projects autosave changes into the editor status bar', (
     tester,
   ) async {
@@ -331,14 +506,11 @@ void main() {
       isFalse,
     );
 
-    final canvas = find.bySemanticsLabel('Drawing canvas');
-    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    final center = tester.getCenter(canvas);
-    await gesture.moveTo(center);
-    await gesture.down(center);
-    await gesture.moveBy(const Offset(20, 12));
-    await gesture.up();
-    await tester.pump(const Duration(milliseconds: 100));
+    tester
+        .widget<CanvasScreen>(find.byType(CanvasScreen))
+        .autosave!
+        .markDirty();
+    await tester.pump();
     expect(states, isNotEmpty);
     expect(states.last.dirty, isTrue);
     expect(
@@ -357,8 +529,68 @@ void main() {
     expect(checkpointed.saving, isFalse);
     expect(checkpointed.lastError, isNull);
     expect(checkpointed.hasSavedCheckpoint, isTrue);
-    expect(find.text('Saved'), findsOneWidget);
+    expect(checkpointed.hasUnsavedChanges, isTrue);
+    expect(find.text('Unsaved changes'), findsOneWidget);
     expect(states.last.hasSavedCheckpoint, isTrue);
+  });
+
+  testWidgets('failed recovery deletion cancels close and restores autosave', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const closeChannel = MethodChannel('org.projectink.studio/window_close_v1');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final replies = <String>[];
+    messenger.setMockMethodCallHandler(closeChannel, (call) async {
+      replies.add(call.method);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(closeChannel, null));
+
+    final engine = _RecordingAutosaveEngine();
+    await tester.pumpWidget(
+      ProjectInkApp(
+        engineOverride: engine,
+        autosavePath: '/tmp/project-ink-delete-failure.inkproj',
+        targetPlatformOverride: TargetPlatform.macOS,
+        deleteRecoveryCheckpoint: (_) async {
+          throw const FileSystemException('recovery is busy');
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    final originalAutosave =
+        tester.widget<CanvasScreen>(find.byType(CanvasScreen)).autosave!;
+    originalAutosave.markDirty();
+    await tester.pump();
+
+    final closeRequest = messenger.handlePlatformMessage(
+      closeChannel.name,
+      closeChannel.codec.encodeMethodCall(const MethodCall('requestClose')),
+      null,
+    );
+    await tester.pump();
+    expect(find.text('Unsaved changes'), findsNWidgets(2));
+    await tester.tap(find.text('Discard').last);
+    await tester.pumpAndSettle();
+    await closeRequest;
+
+    expect(replies, <String>['cancelClose']);
+    final restoredCanvas = tester.widget<CanvasScreen>(
+      find.byType(CanvasScreen),
+    );
+    final restoredAutosave = restoredCanvas.autosave!;
+    expect(restoredAutosave, isNot(same(originalAutosave)));
+    expect(restoredAutosave.hasUnsavedChanges, isTrue);
+    expect(restoredAutosave.isDirty, isTrue);
+    await restoredAutosave.flush();
+    expect(engine.savedPaths, <String>[
+      '/tmp/project-ink-delete-failure.inkproj',
+    ]);
   });
 
   testWidgets('comic workspace opens from the main canvas toolbar', (

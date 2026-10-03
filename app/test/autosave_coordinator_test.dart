@@ -29,9 +29,42 @@ void main() {
 
     expect(engine.savedPaths, ['/tmp/drawing.inkproj']);
     expect(autosave.isDirty, isFalse);
+    expect(autosave.hasUnsavedChanges, isTrue);
     expect(autosave.state.hasSavedCheckpoint, isTrue);
     await autosave.dispose(flush: false);
   });
+
+  test(
+    'explicit save clears unsaved state only for the saved revision',
+    () async {
+      final engine = _RecordingEngine();
+      final autosave = AutosaveCoordinator(
+        engine: engine,
+        path: '/tmp/explicit-save.inkproj',
+        debounce: Duration.zero,
+      );
+
+      autosave.markDirty();
+      await autosave.flush();
+      final savedRevision = engine.revision;
+      expect(
+        autosave.markExplicitlySaved(savedRevision: savedRevision),
+        isTrue,
+      );
+      expect(autosave.state.hasUnsavedChanges, isFalse);
+
+      autosave.markDirty();
+      final staleRevision = engine.revision;
+      await engine.beginStroke();
+      expect(
+        autosave.markExplicitlySaved(savedRevision: staleRevision),
+        isFalse,
+      );
+      expect(autosave.state.hasUnsavedChanges, isTrue);
+
+      await autosave.dispose(flush: false);
+    },
+  );
 
   test(
     'periodic packet notifications do not postpone the first checkpoint',
@@ -130,6 +163,33 @@ void main() {
     expect(autosave.isSaving, isFalse);
     await autosave.dispose(flush: false);
   });
+
+  test(
+    'discard waits for an in-flight recovery write before returning',
+    () async {
+      final engine = _DelayedEngine();
+      final autosave = AutosaveCoordinator(
+        engine: engine,
+        path: '/tmp/discard.inkproj',
+        debounce: Duration.zero,
+      );
+
+      autosave.markDirty();
+      await Future<void>.delayed(Duration.zero);
+      expect(autosave.isSaving, isTrue);
+      final discarding = autosave.discard();
+      var discarded = false;
+      unawaited(discarding.then((_) => discarded = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(discarded, isFalse);
+
+      engine.completeSave();
+      await discarding;
+      expect(discarded, isTrue);
+      expect(autosave.isDirty, isFalse);
+      expect(autosave.hasUnsavedChanges, isFalse);
+    },
+  );
 }
 
 class _FailingEngine extends InMemoryEngineApi {
