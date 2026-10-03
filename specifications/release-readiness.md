@@ -648,6 +648,10 @@ evidence remain separate hardware gates.
   The six-choice AppKit automation remains unverified. The recorded manual
   real-app matrix remains passed. Current free space is 10.3 GiB, below the
   physical-device run's 18 GiB minimum; no iPad build or install was started.
+  A read-only signing check found one valid code-signing identity but no
+  installed provisioning profile containing the connected iPad's UDID. A
+  signed install may require Xcode to register the device; no registration was
+  attempted.
 - Recheck after the acceptance commits on 2026-10-03: the iPad remains connected
   and the macOS runner preflight passes with no Project Ink process. Free disk
   is 10.5 GiB, still below the physical-device run's 18 GiB minimum. The
