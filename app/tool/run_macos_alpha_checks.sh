@@ -8,18 +8,20 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: run_macos_alpha_checks.sh [--unit-only | --workflows-only | --full | --native-live-texture | --preflight-only]
+Usage: run_macos_alpha_checks.sh [--unit-only | --workflows-only | --appkit-only | --full | --native-live-texture | --preflight-only]
 
   --unit-only      Run Flutter analysis and the complete unit/widget suite.
   --workflows-only Also run Rust-backed disk journeys and build the app, but skip XCUITest.
+  --appkit-only    Run only the real-app AppKit close/quit XCUITest matrix.
   --full           Also run Rust-backed document workflows and real-app AppKit close/quit checks.
   --native-live-texture Run the foreground macOS Rust/Metal/Flutter texture smoke test.
   --preflight-only Report toolchain, disk, and app-process state without tests.
 
-The default is --full. Full mode requires at least 6 GiB free and refuses to
-rebuild while any Project Ink macOS process is running. It never deletes build
-outputs, caches, or app data. The AppKit suite drives the actual app; macOS may
-need to allow Xcode UI automation before that stage can run.
+The default is --full. Build and AppKit modes require at least 6 GiB free and
+refuse to rebuild while any Project Ink macOS process is running. The runner
+never deletes build outputs, caches, or app data. The AppKit suite drives the
+actual app; macOS may need to allow Xcode UI automation before that stage can
+run.
 EOF
 }
 
@@ -32,6 +34,7 @@ case "${1:-}" in
   '') ;;
   --unit-only) mode=unit ;;
   --workflows-only) mode=workflows ;;
+  --appkit-only) mode=appkit ;;
   --full) mode=full ;;
   --native-live-texture) mode=native ;;
   --preflight-only) mode=preflight ;;
@@ -64,7 +67,7 @@ if [[ "$mode" == preflight ]]; then
   exit 0
 fi
 
-if [[ "$mode" == full || "$mode" == workflows || "$mode" == native ]]; then
+if [[ "$mode" == full || "$mode" == workflows || "$mode" == appkit || "$mode" == native ]]; then
   min_free_mib="${PROJECT_INK_MACOS_BUILD_MIN_FREE_MIB:-6144}"
   [[ "$min_free_mib" =~ ^[0-9]+$ ]] || fail 'minimum free-space setting must be an integer MiB value'
   (( free_mib >= min_free_mib )) || \
@@ -100,7 +103,7 @@ run_check() {
   fi
 }
 
-if [[ "$mode" != native ]]; then
+if [[ "$mode" == unit || "$mode" == workflows || "$mode" == full ]]; then
   run_check flutter_analyze flutter analyze
   run_check flutter_unit_and_widget_tests flutter test
 fi
@@ -161,6 +164,17 @@ if [[ "$mode" == full || "$mode" == workflows ]]; then
       -resultBundlePath "$result_bundle"
   fi
 
+fi
+
+if [[ "$mode" == appkit ]]; then
+  result_bundle="$results_dir/NativeDocumentSafety-$(date +%Y%m%d-%H%M%S)-$$.xcresult"
+  run_check macos_native_document_safety \
+    xcodebuild test -quiet \
+    -workspace "$app_dir/macos/Runner.xcworkspace" \
+    -scheme Acceptance \
+    -destination 'platform=macOS' \
+    -derivedDataPath "$app_dir/build/macos-acceptance-derived" \
+    -resultBundlePath "$result_bundle"
 fi
 
 if [[ "$mode" == native ]]; then

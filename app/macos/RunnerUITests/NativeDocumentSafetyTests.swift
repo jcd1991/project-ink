@@ -41,7 +41,8 @@ final class NativeDocumentSafetyTests: XCTestCase {
 
     XCTAssertEqual(app.state, .runningForeground)
     XCTAssertTrue(drawingCanvas.waitForExistence(timeout: 5))
-    XCTAssertEqual(projectSnapshot(project.url), project.baseline)
+    let unchangedProject = try projectSnapshot(project.url)
+    XCTAssertEqual(unchangedProject, project.baseline)
     XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryProject.path))
     attachScreenshot("red-close-cancel-keeps-document")
   }
@@ -52,7 +53,8 @@ final class NativeDocumentSafetyTests: XCTestCase {
     chooseUnsavedAction("Discard")
 
     XCTAssertTrue(app.wait(for: .notRunning, timeout: 20))
-    XCTAssertEqual(projectSnapshot(project.url), project.baseline)
+    let unchangedProject = try projectSnapshot(project.url)
+    XCTAssertEqual(unchangedProject, project.baseline)
     XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryProject.path))
 
     app.launch()
@@ -67,7 +69,12 @@ final class NativeDocumentSafetyTests: XCTestCase {
     chooseUnsavedAction("Save")
 
     XCTAssertTrue(app.wait(for: .notRunning, timeout: 30))
-    XCTAssertNotEqual(projectSnapshot(project.url), project.baseline)
+    let savedProject = try projectSnapshot(project.url)
+    XCTAssertNotEqual(savedProject, project.baseline)
+    XCTAssertTrue(
+      containsChangedTile(in: savedProject, comparedWith: project.baseline),
+      "Save changed package metadata but did not persist a canvas tile"
+    )
     XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryProject.path))
   }
 
@@ -78,7 +85,8 @@ final class NativeDocumentSafetyTests: XCTestCase {
 
     XCTAssertEqual(app.state, .runningForeground)
     XCTAssertTrue(drawingCanvas.waitForExistence(timeout: 5))
-    XCTAssertEqual(projectSnapshot(project.url), project.baseline)
+    let unchangedProject = try projectSnapshot(project.url)
+    XCTAssertEqual(unchangedProject, project.baseline)
     XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryProject.path))
     attachScreenshot("command-q-cancel-keeps-document")
   }
@@ -89,7 +97,8 @@ final class NativeDocumentSafetyTests: XCTestCase {
     chooseUnsavedAction("Discard")
 
     XCTAssertTrue(app.wait(for: .notRunning, timeout: 20))
-    XCTAssertEqual(projectSnapshot(project.url), project.baseline)
+    let unchangedProject = try projectSnapshot(project.url)
+    XCTAssertEqual(unchangedProject, project.baseline)
     XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryProject.path))
 
     app.launch()
@@ -104,7 +113,12 @@ final class NativeDocumentSafetyTests: XCTestCase {
     chooseUnsavedAction("Save")
 
     XCTAssertTrue(app.wait(for: .notRunning, timeout: 30))
-    XCTAssertNotEqual(projectSnapshot(project.url), project.baseline)
+    let savedProject = try projectSnapshot(project.url)
+    XCTAssertNotEqual(savedProject, project.baseline)
+    XCTAssertTrue(
+      containsChangedTile(in: savedProject, comparedWith: project.baseline),
+      "Save changed package metadata but did not persist a canvas tile"
+    )
     XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryProject.path))
   }
 
@@ -130,7 +144,7 @@ final class NativeDocumentSafetyTests: XCTestCase {
 
     let projectURL = projectDirectory.appendingPathComponent("\(projectName).inkproj", isDirectory: true)
     XCTAssertTrue(waitForPath(projectURL, timeout: 20), "Save did not publish \(projectURL.path)")
-    let baseline = try XCTUnwrap(projectSnapshot(projectURL))
+    let baseline = try projectSnapshot(projectURL)
 
     let canvas = drawingCanvas
     let start = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.26, dy: 0.31))
@@ -181,22 +195,38 @@ final class NativeDocumentSafetyTests: XCTestCase {
     return FileManager.default.fileExists(atPath: url.path)
   }
 
-  private func projectSnapshot(_ url: URL) -> [String: Data]? {
+  private func projectSnapshot(_ url: URL) throws -> [String: Data] {
+    var enumerationError: Error?
     guard let files = FileManager.default.enumerator(
       at: url,
       includingPropertiesForKeys: [.isRegularFileKey],
-      options: [.skipsHiddenFiles]
-    ) else { return nil }
+      options: [.skipsHiddenFiles],
+      errorHandler: { _, error in
+        enumerationError = error
+        return false
+      }
+    ) else {
+      throw CocoaError(.fileReadUnknown)
+    }
 
     var snapshot: [String: Data] = [:]
     for case let fileURL as URL in files {
-      guard
-        (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
-        let data = try? Data(contentsOf: fileURL)
-      else { continue }
+      let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey])
+      guard values.isRegularFile == true else { continue }
+      let data = try Data(contentsOf: fileURL)
       snapshot[String(fileURL.path.dropFirst(url.path.count + 1))] = data
     }
+    if let enumerationError { throw enumerationError }
     return snapshot
+  }
+
+  private func containsChangedTile(
+    in current: [String: Data],
+    comparedWith baseline: [String: Data]
+  ) -> Bool {
+    current.contains { entry in
+      entry.key.hasPrefix("tiles/") && baseline[entry.key] != entry.value
+    }
   }
 
   private func attachScreenshot(_ title: String) {

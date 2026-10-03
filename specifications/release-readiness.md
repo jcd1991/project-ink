@@ -534,6 +534,11 @@ evidence remain separate hardware gates.
   confirms that layer rename reloads the Rust-backed layer projection; this
   fixed both layer and comic callbacks that had been wired to brush projection
   loading. This run does not establish comic UI acceptance.
+- Shutdown preservation check: the Flutter-built macOS app restored an
+  unnamed blank-document recovery checkpoint on launch. Cmd-Q displayed the
+  unsaved prompt; choosing Save, naming the project, and confirming the native
+  project folder saved the document and exited the app. Package hashes are in
+  `alpha-shutdown-preserved.sha256`; no Discard action was used.
 - Added `app/tool/run_macos_alpha_checks.sh --workflows-only` to rerun analysis,
   Flutter tests, disk-backed Rust bridge journeys, and the macOS app build
   without entering the OS UI automation stage. It reports explicitly that the
@@ -545,6 +550,15 @@ evidence remain separate hardware gates.
   The runner exited successfully and records each result in
   `app/build/macos-alpha-checks/summary.txt`. As designed, this run skipped
   XCUITest; it does not replace the separate visible AppKit evidence.
+- Current working-tree macOS unit gate: `app/tool/run_macos_alpha_checks.sh
+  --unit-only` passed Flutter analysis and all 597 unit/widget tests. Native
+  AppKit snapshot collection now throws on package enumeration or file-read
+  errors, so a missing snapshot cannot satisfy the Save-changed assertion.
+  Added `--appkit-only` to rerun the AppKit exit matrix without repeating the
+  Rust-backed journeys. Shell syntax and Swift parsing passed. The native test
+  target was not built or run: disk availability during this gate was 2.7 GiB,
+  below the runner's 6 GiB build threshold. The runner's full preflight must
+  pass before attempting it.
 - The paired physical iPad Pro (11-inch, 3rd generation; iPadOS 27.0) is
   currently visible to Flutter and `devicectl`. The acceptance preflight
   reported 19.9 GiB free before the macOS workflow rerun. That rerun used disk;

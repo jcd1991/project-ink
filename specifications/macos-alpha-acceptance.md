@@ -10,7 +10,12 @@ red-close/Cmd-Q Save, Discard, and Cancel choices. `run_macos_alpha_checks.sh
 --full` runs that suite after the Rust-backed document workflows. Use
 `--workflows-only` to repeat Flutter analysis/tests, disk-backed document
 journeys, and the macOS app build when Xcode UI automation is unavailable; this
-mode does not claim native close/quit acceptance. The UI tests
+mode does not claim native close/quit acceptance. Use `--appkit-only` to rerun
+the real-app close/quit matrix after changing the UI tests or granting Xcode UI
+automation, without rerunning the Rust-backed workflows. It still needs 6 GiB
+free for Xcode build products and refuses to run while Project Ink is open.
+`--unit-only` runs analysis and Flutter unit/widget tests without the build
+space threshold. The UI tests
 launch with a unique documents path inside the app sandbox and compare the
 named project's package files before and after the exit choice. Xcode must be
 allowed to use macOS UI automation; if the test runner cannot enable
