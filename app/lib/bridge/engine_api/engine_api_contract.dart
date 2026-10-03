@@ -35,6 +35,12 @@ abstract interface class EngineApi {
     required int blue,
     required int alpha,
   });
+  Future<void> setActiveBrushColor({
+    required int red,
+    required int green,
+    required int blue,
+    required int alpha,
+  });
   Future<void> updateBrushSettings({
     required int brushId,
     required double diameter,

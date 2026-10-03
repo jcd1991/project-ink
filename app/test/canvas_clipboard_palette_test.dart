@@ -45,7 +45,7 @@ void main() {
 
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Paste brush color'));
+    await tester.tap(find.text('Paste main color'));
     await tester.pumpAndSettle();
 
     expect(selected, CanvasClipboardPaletteAction.pasteBrushColor);
@@ -87,7 +87,7 @@ void main() {
 
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Paste brush color'));
+    await tester.tap(find.text('Paste main color'));
     await tester.pumpAndSettle();
 
     expect(appliedColor, const Color(0xff1a2b3c));

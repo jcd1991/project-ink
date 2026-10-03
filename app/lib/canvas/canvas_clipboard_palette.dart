@@ -24,7 +24,7 @@ Future<void> showCanvasClipboardPalette({
   if (color != null) await applyPastedColor(color);
 }
 
-/// Small command sheet for copying or pasting the active brush color.
+/// Small command sheet for copying or pasting the shared main color.
 class CanvasClipboardPalette extends StatelessWidget {
   const CanvasClipboardPalette({super.key});
 
@@ -34,7 +34,7 @@ class CanvasClipboardPalette extends StatelessWidget {
       children: [
         ListTile(
           leading: const Icon(Icons.copy),
-          title: const Text('Copy brush color'),
+          title: const Text('Copy main color'),
           onTap:
               () => Navigator.of(
                 context,
@@ -42,7 +42,7 @@ class CanvasClipboardPalette extends StatelessWidget {
         ),
         ListTile(
           leading: const Icon(Icons.content_paste),
-          title: const Text('Paste brush color'),
+          title: const Text('Paste main color'),
           onTap:
               () => Navigator.of(
                 context,

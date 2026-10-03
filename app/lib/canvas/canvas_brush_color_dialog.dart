@@ -36,7 +36,7 @@ class _CanvasBrushColorDialogState extends State<CanvasBrushColorDialog> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Semantics(
-            label: 'Selected brush color',
+            label: 'Selected main color',
             value:
                 '#${(_hsv.toColor().r * 255).round().toRadixString(16).padLeft(2, '0')}${(_hsv.toColor().g * 255).round().toRadixString(16).padLeft(2, '0')}${(_hsv.toColor().b * 255).round().toRadixString(16).padLeft(2, '0')}',
             child: CanvasColorWheel(

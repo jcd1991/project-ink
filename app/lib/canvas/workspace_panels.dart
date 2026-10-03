@@ -110,7 +110,7 @@ class InkToolPropertiesPanel extends StatelessWidget {
                 child: InkToolButton(
                   onPressed: onBrushColor,
                   icon: Icons.palette_outlined,
-                  label: 'Choose brush color',
+                  label: 'Choose main color',
                 ),
               ),
             ),

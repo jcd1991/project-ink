@@ -7269,6 +7269,78 @@ fn brush_color_update_is_rust_owned_and_persisted() {
 }
 
 #[test]
+fn active_brush_color_is_session_state_and_does_not_edit_presets() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(83), spec).expect("valid doc");
+    let color = Rgba8 {
+        r: 18,
+        g: 171,
+        b: 52,
+        a: 255,
+    };
+    doc.set_active_brush_color(color);
+
+    assert_eq!(
+        doc.revision(),
+        0,
+        "a foreground color is not a document edit"
+    );
+    assert!(
+        doc.snapshot().brushes.is_empty(),
+        "built-in brushes remain unmodified"
+    );
+    let layer = doc.layers()[0].id;
+    let stroke = ink_model::StrokeId::from_u128(84);
+    doc.dispatch(EditorCommand::BeginStroke {
+        stroke,
+        layer,
+        brush: BrushId::from_u128(1),
+    })
+    .expect("begin stroke with shared color");
+    assert_eq!(
+        lock_recover(&doc.state)
+            .active_stroke
+            .as_ref()
+            .expect("active legacy stroke")
+            .brush
+            .color,
+        color
+    );
+    doc.dispatch(EditorCommand::EndStroke { stroke })
+        .expect("end legacy stroke");
+
+    let compiled_stroke = ink_model::StrokeId::from_u128(85);
+    doc.dispatch(EditorCommand::BeginStroke {
+        stroke: compiled_stroke,
+        layer,
+        brush: BrushId::from_u128(6),
+    })
+    .expect("begin compiled stroke with shared color");
+    let state = lock_recover(&doc.state);
+    let compiled = state
+        .active_stroke
+        .as_ref()
+        .expect("active compiled stroke")
+        .compiled_brush
+        .as_ref()
+        .expect("compiled brush");
+    let compiled_color = match &compiled.paint {
+        PaintBehavior::Solid(value) => value.color,
+        PaintBehavior::Glaze(value) => value.color,
+        PaintBehavior::Marker(value) => value.color,
+        PaintBehavior::ColorPickup(value) => value.color,
+        PaintBehavior::DigitalWatercolor(value) => value.color,
+    };
+    assert_eq!(compiled_color, color);
+}
+
+#[test]
 fn brush_library_edit_uses_shared_undo_redo_commands() {
     let spec = DocumentSpec {
         width_px: 256,

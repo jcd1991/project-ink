@@ -51,6 +51,7 @@ class CanvasViewportSurface extends StatelessWidget {
     required this.canvasKey,
     required this.paintState,
     required this.strokePreview,
+    required this.hoverPosition,
     required this.livePreviewSurface,
     required this.isIpad,
     required this.onPointerEvent,
@@ -65,6 +66,7 @@ class CanvasViewportSurface extends StatelessWidget {
   final GlobalKey canvasKey;
   final CanvasViewportPaintState paintState;
   final ValueListenable<LiveStrokePreview?> strokePreview;
+  final ValueListenable<Offset?> hoverPosition;
   final LivePreviewController? livePreviewSurface;
   final bool isIpad;
   final ValueChanged<PointerEvent> onPointerEvent;
@@ -131,6 +133,25 @@ class CanvasViewportSurface extends StatelessWidget {
                     rulerStart: paintState.rulerStart,
                     rulerEnd: paintState.rulerEnd,
                   ),
+                ),
+                ValueListenableBuilder<Offset?>(
+                  valueListenable: hoverPosition,
+                  builder: (context, position, child) {
+                    if (position == null) return const SizedBox.shrink();
+                    return IgnorePointer(
+                      child: CustomPaint(
+                        painter: PencilHoverCrosshairPainter(
+                          pan: transform.pan,
+                          scale: transform.scale,
+                          rotation: transform.rotation,
+                          mirrored: paintState.mirrored,
+                          documentWidth: paintState.documentWidth,
+                          documentHeight: paintState.documentHeight,
+                          position: position,
+                        ),
+                      ),
+                    );
+                  },
                 ),
                 ValueListenableBuilder<LiveStrokePreview?>(
                   valueListenable: strokePreview,

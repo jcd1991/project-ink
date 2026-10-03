@@ -24,6 +24,42 @@ class PreparedNativePointerPacket {
 /// source because those belong to the active canvas session, not the platform
 /// packet format.
 class NativePointerPacketAdapter {
+  bool containsHoverSample(Uint8List packet) {
+    if (packet.length < 4) return false;
+    final data = ByteData.sublistView(packet);
+    final count = data.getUint16(2, Endian.little);
+    for (var index = 0; index < count; index++) {
+      final offset = 4 + index * 48;
+      if (offset + 48 > packet.length) break;
+      if (data.getUint16(offset + 4, Endian.little) & inkPointerHover != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Offset? hoverPosition(Uint8List packet) {
+    if (packet.length < 4) return null;
+    final data = ByteData.sublistView(packet);
+    final count = data.getUint16(2, Endian.little);
+    Offset? latest;
+    for (var index = 0; index < count; index++) {
+      final offset = 4 + index * 48;
+      if (offset + 48 > packet.length) break;
+      final flags = data.getUint16(offset + 4, Endian.little);
+      final phase = data.getUint8(offset + 7);
+      if (flags & inkPointerHover == 0 ||
+          phase == InkPointerPhase.cancel.index) {
+        continue;
+      }
+      latest = Offset(
+        data.getFloat32(offset + 8, Endian.little),
+        data.getFloat32(offset + 12, Endian.little),
+      );
+    }
+    return latest;
+  }
+
   Offset? lastConfirmedPosition(Uint8List packet) {
     if (packet.length < 4) return null;
     final data = ByteData.sublistView(packet);

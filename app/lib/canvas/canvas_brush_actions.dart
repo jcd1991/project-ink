@@ -18,10 +18,6 @@ class CanvasBrushActionHost {
     required this.setState,
     required this.activeBrushId,
     required this.setActiveBrushId,
-    required this.activeColor,
-    required this.setActiveColor,
-    required this.brushColor,
-    required this.cacheBrushColor,
     required this.finishDanglingStrokeBeforeBrushEdit,
     required this.endStaleStroke,
     required this.loadPhase2Projections,
@@ -37,10 +33,6 @@ class CanvasBrushActionHost {
   final void Function(VoidCallback callback) setState;
   final int Function() activeBrushId;
   final ValueChanged<int> setActiveBrushId;
-  final Color Function() activeColor;
-  final ValueChanged<Color> setActiveColor;
-  final Color? Function(int brushId) brushColor;
-  final void Function(int brushId, Color color) cacheBrushColor;
   final Future<void> Function() finishDanglingStrokeBeforeBrushEdit;
   final Future<void> Function() endStaleStroke;
   final Future<void> Function() loadPhase2Projections;
@@ -190,53 +182,23 @@ class CanvasBrushActions {
   }
 
   Future<void> activateBrush(BrushPresetView preset) async {
-    final cachedColor = host.brushColor(preset.id);
     host.setState(() {
       host.setActiveBrushId(preset.id);
-      if (cachedColor != null) host.setActiveColor(cachedColor);
     });
-    try {
-      final brushes = await engine.builtinBrushes();
-      final selected = brushes.where((brush) => brush.id == preset.id);
-      if (selected.isEmpty ||
-          !host.mounted() ||
-          host.activeBrushId() != preset.id) {
-        return;
-      }
-      final rgba = selected.first.colorRgba;
-      host.setState(() {
-        final color = Color.fromARGB(
-          rgba & 0xff,
-          (rgba >> 24) & 0xff,
-          (rgba >> 16) & 0xff,
-          (rgba >> 8) & 0xff,
-        );
-        host.setActiveColor(color);
-        host.cacheBrushColor(preset.id, color);
-      });
-    } catch (error, stack) {
-      debugPrint(
-        'Project Ink selected brush color read failed: $error\n$stack',
-      );
-    }
   }
 
-  /// Persists the active brush color and updates its session projection.
-  Future<bool> updateActiveBrushColor(Color color) async {
-    final brushId = host.activeBrushId();
+  /// Applies the shared foreground color to strokes without editing a preset.
+  Future<bool> setActivePaintColor(Color color) async {
     try {
-      await engine.updateBrushColor(
-        brushId: brushId,
+      await engine.setActiveBrushColor(
         red: (color.r * 255).round().clamp(0, 255),
         green: (color.g * 255).round().clamp(0, 255),
         blue: (color.b * 255).round().clamp(0, 255),
         alpha: (color.a * 255).round().clamp(0, 255),
       );
-      host.cacheBrushColor(brushId, color);
-      host.markDirty();
       return true;
     } catch (error, stack) {
-      debugPrint('Project Ink brush color update failed: $error\n$stack');
+      debugPrint('Project Ink active color update failed: $error\n$stack');
       return false;
     }
   }

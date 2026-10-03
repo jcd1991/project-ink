@@ -59,6 +59,8 @@ class CanvasWorkspaceLayoutActions {
     List<QuickAccessSet>? quickAccessSets,
     String? activeQuickAccessSetId,
     List<String>? recentColors,
+    int? activeColorArgb,
+    int? subColorArgb,
     Map<String, List<String>>? commandBarOverrides,
     Map<String, WorkspaceLayout>? workspaceOverrides,
   }) {
@@ -77,6 +79,8 @@ class CanvasWorkspaceLayoutActions {
         quickAccessSets: quickAccessSets,
         activeQuickAccessSetId: activeQuickAccessSetId,
         recentColors: recentColors,
+        activeColorArgb: activeColorArgb,
+        subColorArgb: subColorArgb,
         commandBarOverrides: commandBarOverrides,
         workspaceOverrides: workspaceOverrides,
       ),

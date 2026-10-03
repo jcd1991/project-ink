@@ -5,6 +5,28 @@ import 'package:project_ink/canvas/live_stroke_coordinator.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('live preview uses the selected brush pressure curve', () {
+    final preview = LiveStrokePreview(
+      color: Colors.black,
+      width: 10,
+      pressureSize: 0.5,
+      pressureCurvePoints: const <double>[0, 0, 0.2, 0.32, 0.5, 0.68, 1, 1],
+      documentWidth: 100,
+      documentHeight: 100,
+      legacyTechnicalPen: false,
+      eraser: false,
+      points: <LiveStrokePreviewPoint>[],
+      chunks: <LiveStrokePreviewChunk>[],
+    );
+
+    final width = liveStrokePreviewWidthAt(
+      preview,
+      const LiveStrokePreviewPoint(Offset.zero, 0.2),
+    );
+
+    expect(width, closeTo(8.2, 0.001));
+  });
+
   test('confirmed source gaps map to ordered preview coverage and chunks', () {
     final coordinator = LiveStrokeCoordinator();
     final preview = LiveStrokePreview(

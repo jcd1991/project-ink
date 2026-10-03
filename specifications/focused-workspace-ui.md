@@ -14,6 +14,7 @@ The reference provides several concrete interaction patterns:
 | --- | --- |
 | Tools expose additional settings; both modes offer size/opacity and a mode switch. | Keep essentials directly reachable and give the selected tool an explicit settings entry. |
 | Simple mode has separate main, sub, and transparent color roles. | Show each role and retain the chosen brush when painting transparently. |
+| Procreate keeps Paint, Smudge, and Erase as visible modes; Clip Studio exposes an Eraser tool and a temporary shortcut. | Keep the selected foreground color shared across brushes, and expose a direct, selected-state Eraser toggle in Studio. Preset color remains the brush's base/dynamic input. |
 | Small Tool Slider palettes replace full sliders with pop-ups. | Adapt quick controls to available height and text size. |
 | Palette docks support collapse, icon views, resizing, and rearrangement. | Define tablet palette states and restoration explicitly. |
 | Saved workspaces can be reloaded or reset. | Separate session restoration, saved layout, and reset behavior. |
@@ -24,6 +25,8 @@ Sources: [Tablet interface](https://help.clip-studio.com/en-us/manual_en/090_tab
 [Tool Sliders](https://help.clip-studio.com/en-us/manual_en/240_brushes/Tool_Sliders_palette.htm),
 [Palettes](https://help.clip-studio.com/en-us/manual_en/690_interface/Palettes.htm),
 and [Workspaces](https://help.clip-studio.com/en-us/manual_en/690_interface/Register_and_manage_your_workspace.htm).
+For shared brush-mode patterns, see Procreate's [Paint, Smudge, and Erase](https://help.procreate.com/procreate/handbook/brushes/paint-smudge-erase)
+and Clip Studio's [Tool Shortcuts](https://help.clip-studio.com/en-us/manual_en/780_shortcuts/Tool_Shortcuts.htm).
 
 Focus is a Project Ink design proposal. The linked tablet overview establishes
 Simple/Studio behavior; it does not specify this proposed Focus interaction.
@@ -43,7 +46,7 @@ shows:
 | `toggleInterface` and four-finger tap already hide/show chrome. | Reuse this action for Focus, add a visible exit and consistent restoration. |
 | Touch tools, brushes, layers, and comics overlays are built outside the `_interfaceHidden` checks. | Include all workspace overlays in Focus suppression; existing hide flags do not suppress all panels. |
 | Escape calls `_closeTransientPanels`, which does not restore a hidden interface. | Define Escape/Back precedence and an explicit Focus exit. |
-| Transparent color callbacks currently route through `toggleEraser`. | Audit whether this preserves brush identity/settings; implement a separate paint-role state if equivalence fails. |
+| Transparent color callbacks currently route through `toggleEraser`. | Keep transparent drawing independent; the Studio command bar also offers a direct eraser toggle that preserves the selected brush and its settings. |
 | Studio has a 48-point rail and command bar; touch palettes use positioned fixed-width panels. | Specify adaptive tablet docking and verify complete palette access through visible controls. |
 | Desktop supports richer layout/customization structures. | Prove tablet access and persistence before treating desktop support as tablet parity. |
 

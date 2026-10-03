@@ -152,6 +152,7 @@ class CanvasTopBar extends StatelessWidget {
     required this.onToggleFocus,
     required this.onToggleTransparent,
     required this.transparentColorActive,
+    this.eraserActive = false,
     required this.onEditSubColor,
     required this.workspaceId,
     required this.onWorkspaceSelected,
@@ -200,6 +201,7 @@ class CanvasTopBar extends StatelessWidget {
   final VoidCallback onToggleFocus;
   final VoidCallback onToggleTransparent;
   final bool transparentColorActive;
+  final bool eraserActive;
   final VoidCallback onEditSubColor;
   final String workspaceId;
   final ValueChanged<String> onWorkspaceSelected;
@@ -431,8 +433,16 @@ class CanvasTopBar extends StatelessWidget {
                 ),
                 InkCommandButton(
                   icon: Icons.palette_outlined,
-                  label: 'Brush color',
+                  label: 'Color',
                   onPressed: onBrushColor,
+                  hitSize: 48,
+                ),
+                InkCommandButton(
+                  icon: Icons.cleaning_services_outlined,
+                  label: eraserActive ? 'Return to brush' : 'Eraser',
+                  selected: eraserActive,
+                  onPressed:
+                      () => onActionDispatch(EditorActionId.toggleEraser),
                   hitSize: 48,
                 ),
                 InkCommandButton(
@@ -536,7 +546,7 @@ class CanvasTopBar extends StatelessWidget {
   }
 
   String _commandBarLabel(EditorActionId action) => switch (action) {
-    EditorActionId.showColorPicker => 'Brush color',
+    EditorActionId.showColorPicker => 'Color',
     EditorActionId.showBrushes => 'Brush library',
     EditorActionId.showComics => 'Comic workspace',
     _ => action.label,
@@ -600,7 +610,7 @@ class CanvasTopBar extends StatelessWidget {
           ),
           InkCommandButton(
             icon: Icons.palette_outlined,
-            label: 'Brush color',
+            label: 'Color',
             onPressed: onBrushColor,
             hitSize: 48,
           ),

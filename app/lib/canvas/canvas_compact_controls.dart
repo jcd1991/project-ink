@@ -326,7 +326,7 @@ class _FocusQuickControlsState extends State<CanvasFocusQuickControls> {
               icon: const Icon(Icons.brush),
             ),
             IconButton.filledTonal(
-              tooltip: 'Brush color',
+              tooltip: 'Main color',
               onPressed: widget.onColor,
               icon: Icon(Icons.circle, color: widget.color),
             ),
@@ -453,7 +453,7 @@ class CanvasQuickMenu extends StatelessWidget {
               ),
               IconButton.filledTonal(
                 onPressed: onColor,
-                tooltip: 'Brush color',
+                tooltip: 'Main color',
                 icon: Icon(Icons.circle, color: color),
               ),
               IconButton.filledTonal(

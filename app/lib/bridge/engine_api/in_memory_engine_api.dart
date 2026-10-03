@@ -14,6 +14,7 @@ class InMemoryEngineApi implements EngineApi {
   InMemoryEngineApi();
 
   int _revision = 0;
+  int? activeBrushColorRgba;
   int _nextOpacityEditId = 1;
   int _nextBrushDraft = 1;
   final Set<int> _brushDrafts = <int>{};
@@ -62,6 +63,19 @@ class InMemoryEngineApi implements EngineApi {
       throw ArgumentError('invalid brush color');
     }
     _revision++;
+  }
+
+  @override
+  Future<void> setActiveBrushColor({
+    required int red,
+    required int green,
+    required int blue,
+    required int alpha,
+  }) async {
+    if ([red, green, blue, alpha].any((value) => value < 0 || value > 255)) {
+      throw ArgumentError('invalid active brush color');
+    }
+    activeBrushColorRgba = (red << 24) | (green << 16) | (blue << 8) | alpha;
   }
 
   @override

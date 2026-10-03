@@ -8,6 +8,59 @@ import 'package:project_ink/tools/illustration_tools.dart';
 
 void main() {
   test(
+    'hover packets update the pointer without entering the stroke queue',
+    () async {
+      Offset? hover;
+      var serialPacketCount = 0;
+      final coordinator = NativePencilInputCoordinator(
+        NativePencilInputHost(
+          documentReplacementInProgress: () => false,
+          disposed: () => false,
+          activeTool: () => IllustrationTool.brush,
+          diagnostics: CanvasDiagnosticRecorder.instance,
+          discardConcurrentTouchGesture: () {},
+          beginStrokeAutosaveHold: () {},
+          markPacketReceived: (_) {},
+          transformPosition: (position, _) => position,
+          transformHoverPosition: (position) => position + const Offset(2, 3),
+          updateHoverPosition: (position) => hover = position,
+          nextSequence: () => 0,
+          appendPreviewBatch: (_, {required beginsStroke}) {},
+          schedulePreviewFrameDiagnostic: () {},
+          previewIndexForSequence: (_) => null,
+          strokeConstraintMode: () => 'none',
+          setStylusLastPosition: (_) {},
+          recordInputArrival: (_) {},
+          armDrawAndHold: (_) {},
+          handleSerialPacket: (_) async => serialPacketCount++,
+          abortStrokeAfterPacketError: () async {},
+          scheduleDrain: () {},
+          onQueueIdle: () {},
+        ),
+      );
+
+      coordinator.handlePacket(
+        encodePointerPacket(
+          pointerId: 1,
+          device: InkPointerDevice.stylus,
+          phase: InkPointerPhase.move,
+          x: 10,
+          y: 20,
+          pressure: 0,
+          timestampNs: 1,
+          sequence: 1,
+          flags: inkPointerActual | inkPointerHover,
+        ),
+      );
+
+      expect(hover, const Offset(12, 23));
+      expect(coordinator.pendingPacketCount, 0);
+      await coordinator.drainQueue();
+      expect(serialPacketCount, 0);
+    },
+  );
+
+  test(
     'a failed native packet is recovered and does not stop the drain',
     () async {
       var packetCount = 0;

@@ -382,6 +382,8 @@ class WorkspacePreferences {
     this.quickAccessSets = defaultQuickAccessSets,
     this.activeQuickAccessSetId = 'default',
     this.recentColors = const [],
+    this.activeColorArgb,
+    this.subColorArgb,
     this.commandBarOverrides = const {},
     this.workspaceOverrides = const {},
   });
@@ -400,6 +402,8 @@ class WorkspacePreferences {
   final List<QuickAccessSet> quickAccessSets;
   final String activeQuickAccessSetId;
   final List<String> recentColors;
+  final int? activeColorArgb;
+  final int? subColorArgb;
   final Map<String, List<String>> commandBarOverrides;
   final Map<String, WorkspaceLayout> workspaceOverrides;
 
@@ -419,6 +423,8 @@ class WorkspacePreferences {
     List<QuickAccessSet>? quickAccessSets,
     String? activeQuickAccessSetId,
     List<String>? recentColors,
+    int? activeColorArgb,
+    int? subColorArgb,
     Map<String, List<String>>? commandBarOverrides,
     Map<String, WorkspaceLayout>? workspaceOverrides,
   }) => WorkspacePreferences(
@@ -438,6 +444,8 @@ class WorkspacePreferences {
     activeQuickAccessSetId:
         activeQuickAccessSetId ?? this.activeQuickAccessSetId,
     recentColors: recentColors ?? this.recentColors,
+    activeColorArgb: activeColorArgb ?? this.activeColorArgb,
+    subColorArgb: subColorArgb ?? this.subColorArgb,
     commandBarOverrides: commandBarOverrides ?? this.commandBarOverrides,
     workspaceOverrides: workspaceOverrides ?? this.workspaceOverrides,
   );
@@ -466,6 +474,8 @@ class WorkspacePreferences {
         .toList(growable: false),
     'active_quick_access_set': activeQuickAccessSetId,
     'recent_colors': recentColors.take(24).toList(growable: false),
+    if (activeColorArgb != null) 'active_color_argb': activeColorArgb,
+    if (subColorArgb != null) 'sub_color_argb': subColorArgb,
     'command_bar_overrides': {
       for (final entry in commandBarOverrides.entries.take(3))
         entry.key: entry.value.take(48).toList(growable: false),
@@ -659,11 +669,16 @@ class WorkspacePreferences {
               ? activeQuickSet
               : safeQuickSets.first.id,
       recentColors: recentColors,
+      activeColorArgb: _validatedArgb(value['active_color_argb']),
+      subColorArgb: _validatedArgb(value['sub_color_argb']),
       commandBarOverrides: commandBarOverrides,
       workspaceOverrides: workspaceOverrides,
     );
   }
 }
+
+int? _validatedArgb(Object? value) =>
+    value is int && value >= 0 && value <= 0xffffffff ? value : null;
 
 class WorkspacePreferencesStore {
   const WorkspacePreferencesStore();

@@ -10,7 +10,6 @@ class CanvasBrushProjectionHost {
     required this.engineGeneration,
     required this.mounted,
     required this.library,
-    required this.brushColors,
     required this.activeBrushId,
     required this.setActiveBrushId,
     required this.setActiveColor,
@@ -21,7 +20,6 @@ class CanvasBrushProjectionHost {
   final int Function() engineGeneration;
   final bool Function() mounted;
   final BrushLibraryModel Function() library;
-  final Map<int, Color> Function() brushColors;
   final int Function() activeBrushId;
   final ValueChanged<int> setActiveBrushId;
   final ValueChanged<Color> setActiveColor;
@@ -52,9 +50,7 @@ class CanvasBrushProjection {
       final brushes = await engine.builtinBrushes();
       if (!isCurrent()) return;
       final library = host.library();
-      final colors = host.brushColors();
       for (final brush in brushes) {
-        colors[brush.id] = _colorFromRgba(brush.colorRgba);
         library.upsert(
           BrushPresetView(
             id: brush.id,

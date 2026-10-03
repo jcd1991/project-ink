@@ -21,6 +21,8 @@ class NativePencilInputHost {
     required this.beginStrokeAutosaveHold,
     required this.markPacketReceived,
     required this.transformPosition,
+    this.transformHoverPosition,
+    this.updateHoverPosition,
     required this.nextSequence,
     required this.appendPreviewBatch,
     required this.schedulePreviewFrameDiagnostic,
@@ -43,6 +45,8 @@ class NativePencilInputHost {
   final VoidCallback beginStrokeAutosaveHold;
   final void Function(Uint8List packet) markPacketReceived;
   final Offset Function(Offset position, bool isDownSample) transformPosition;
+  final Offset Function(Offset position)? transformHoverPosition;
+  final ValueChanged<Offset?>? updateHoverPosition;
   final int Function() nextSequence;
   final void Function(
     List<LiveStrokePreviewPoint> samples, {
@@ -93,6 +97,16 @@ class NativePencilInputCoordinator {
       'ios_event_channel',
       packet,
     );
+
+    if (_packetAdapter.containsHoverSample(packet)) {
+      final position = _packetAdapter.hoverPosition(packet);
+      host.updateHoverPosition?.call(
+        position == null
+            ? null
+            : (host.transformHoverPosition ?? (value) => value)(position),
+      );
+      return;
+    }
 
     if (host.documentReplacementInProgress()) {
       try {

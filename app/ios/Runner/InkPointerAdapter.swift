@@ -41,6 +41,27 @@ final class InkPointerAdapter {
         return InkPointerPacketV1.encode(samples)
     }
 
+    func hoverPacket(at point: CGPoint?) -> [Data]? {
+        let phase: UInt8 = point == nil ? 3 : 1
+        let location = point ?? .zero
+        let sample = InkPointerSampleV1(
+            pointerID: 0,
+            flags: (1 << 0) | (1 << 5),
+            deviceKind: 1,
+            phase: phase,
+            canvasX: Float(location.x),
+            canvasY: Float(location.y),
+            pressure: 0,
+            tiltX: 0,
+            tiltY: 0,
+            azimuth: 0,
+            twist: 0,
+            timestampNS: UInt64(max(0, ProcessInfo.processInfo.systemUptime) * 1_000_000_000),
+            sequence: nextSequence()
+        )
+        return InkPointerPacketV1.encode([sample])
+    }
+
     private func sample(_ touch: UITouch, in view: UIView, phase: UInt8, flags: UInt16) -> InkPointerSampleV1 {
         let point = touch.preciseLocation(in: view)
         let maximumForce = max(touch.maximumPossibleForce, 1)

@@ -15,11 +15,11 @@ void main() {
         subColor: () => Colors.white,
         recentColors: () => const [],
         finishDanglingStroke: () async => events.add('drain'),
-        publishColors: ({mainColor, subColor, cacheMainColor = false}) {
+        publishColors: ({mainColor, subColor}) {
           events.add('publish:${mainColor?.toARGB32()}');
         },
         persistRecentColors: (_) => events.add('persist'),
-        updateRustBrushColor: (color) async {
+        setRustActiveColor: (color) async {
           events.add('rust:${color.toARGB32()}');
           return true;
         },
@@ -47,19 +47,18 @@ void main() {
 
     expect(events, [
       'drain',
+      'rust:${Colors.blue.toARGB32()}',
       'publish:${Colors.blue.toARGB32()}',
       'persist',
-      'rust:${Colors.blue.toARGB32()}',
     ]);
   });
 
   test(
-    'main color drains input, publishes and persists, then updates Rust',
+    'main color drains input, updates Rust, then publishes and persists',
     () async {
       final events = <String>[];
       List<String>? persisted;
       Color? publishedMain;
-      var cachedMain = false;
       final actions = CanvasBrushColorActions(
         CanvasBrushColorActionsHost(
           isMounted: () => true,
@@ -67,16 +66,15 @@ void main() {
           subColor: () => Colors.white,
           recentColors: () => ['#FF112233', '#AABBCC80'],
           finishDanglingStroke: () async => events.add('drain'),
-          publishColors: ({mainColor, subColor, cacheMainColor = false}) {
+          publishColors: ({mainColor, subColor}) {
             events.add('publish');
             publishedMain = mainColor;
-            cachedMain = cacheMainColor;
           },
           persistRecentColors: (colors) {
             events.add('persist');
             persisted = colors;
           },
-          updateRustBrushColor: (color) async {
+          setRustActiveColor: (color) async {
             events.add('rust');
             return true;
           },
@@ -85,9 +83,8 @@ void main() {
 
       await actions.applyMainColor(const Color(0xff112233));
 
-      expect(events, ['drain', 'publish', 'persist', 'rust']);
+      expect(events, ['drain', 'rust', 'publish', 'persist']);
       expect(publishedMain, const Color(0xff112233));
-      expect(cachedMain, isTrue);
       expect(persisted, ['#FF112233', '#AABBCC80']);
     },
   );
@@ -101,11 +98,11 @@ void main() {
         subColor: () => Colors.white,
         recentColors: () => const [],
         finishDanglingStroke: () async => events.add('unexpected drain'),
-        publishColors: ({mainColor, subColor, cacheMainColor = false}) {
+        publishColors: ({mainColor, subColor}) {
           events.add('publish');
         },
         persistRecentColors: (_) => events.add('unexpected persist'),
-        updateRustBrushColor: (_) async {
+        setRustActiveColor: (_) async {
           events.add('rust');
           return false;
         },
@@ -129,12 +126,11 @@ void main() {
           subColor: () => Colors.white,
           recentColors: () => ['#FFFFFFFF'],
           finishDanglingStroke: () async {},
-          publishColors: ({mainColor, subColor, cacheMainColor = false}) {
+          publishColors: ({mainColor, subColor}) {
             publishedSubColor = subColor ?? publishedSubColor;
           },
           persistRecentColors: (colors) => persisted = colors,
-          updateRustBrushColor:
-              (_) async => fail('Unexpected Rust brush write'),
+          setRustActiveColor: (_) async => fail('Unexpected Rust brush write'),
         ),
       );
 
@@ -145,7 +141,7 @@ void main() {
     },
   );
 
-  test('swap and reset publish colors before bridge writes', () async {
+  test('swap and reset publish colors after bridge writes', () async {
     Color projectedMainColor = Colors.blue;
     Color projectedSubColor = Colors.orange;
     final writes = <Color>[];
@@ -156,12 +152,12 @@ void main() {
         subColor: () => projectedSubColor,
         recentColors: () => const [],
         finishDanglingStroke: () async {},
-        publishColors: ({mainColor, subColor, cacheMainColor = false}) {
+        publishColors: ({mainColor, subColor}) {
           projectedMainColor = mainColor ?? projectedMainColor;
           projectedSubColor = subColor ?? projectedSubColor;
         },
         persistRecentColors: (_) {},
-        updateRustBrushColor: (color) async {
+        setRustActiveColor: (color) async {
           writes.add(color);
           return true;
         },
@@ -186,9 +182,9 @@ void main() {
         subColor: () => Colors.white,
         recentColors: () => const [],
         finishDanglingStroke: () async {},
-        publishColors: ({mainColor, subColor, cacheMainColor = false}) {},
+        publishColors: ({mainColor, subColor}) {},
         persistRecentColors: (_) {},
-        updateRustBrushColor: (_) async {
+        setRustActiveColor: (_) async {
           updateCount++;
           return true;
         },

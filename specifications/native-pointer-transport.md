@@ -38,6 +38,11 @@ double-tap callback and the iOS 17.5+ `UIPencilInteraction` tap/squeeze
 callbacks publish the discrete command channel. The EventChannels are
 registered from the implicit engine delegate.
 
+`UIHoverGestureRecognizer` publishes Pencil hover positions on the same packet
+channel with the `hover` flag. Hover samples update only the transient canvas
+crosshair; they are filtered before stroke queueing and never reach Rust as
+drawing input. Hover end/cancel clears the crosshair.
+
 ## Android
 
 `MainActivity` intercepts stylus and eraser `MotionEvent`s only; ordinary touch

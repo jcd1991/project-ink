@@ -7,6 +7,7 @@ final class InkFlutterViewController: FlutterViewController, UIPencilInteraction
     private let pointerAdapter = InkPointerAdapter()
     private var pencilInteraction: UIPencilInteraction?
     private var pencilInputRecognizer: InkPencilGestureRecognizer?
+    private var pencilHoverRecognizer: UIHoverGestureRecognizer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -23,6 +24,13 @@ final class InkFlutterViewController: FlutterViewController, UIPencilInteraction
         }
         view.addGestureRecognizer(pencilRecognizer)
         pencilInputRecognizer = pencilRecognizer
+
+        let hoverRecognizer = UIHoverGestureRecognizer(
+            target: self,
+            action: #selector(handlePencilHover(_:))
+        )
+        view.addGestureRecognizer(hoverRecognizer)
+        pencilHoverRecognizer = hoverRecognizer
     }
 
     override func gestureRecognizer(
@@ -30,13 +38,32 @@ final class InkFlutterViewController: FlutterViewController, UIPencilInteraction
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
         if gestureRecognizer === pencilInputRecognizer ||
-            otherGestureRecognizer === pencilInputRecognizer {
+            otherGestureRecognizer === pencilInputRecognizer ||
+            gestureRecognizer === pencilHoverRecognizer ||
+            otherGestureRecognizer === pencilHoverRecognizer {
             return true
         }
         return super.gestureRecognizer(
             gestureRecognizer,
             shouldRecognizeSimultaneouslyWith: otherGestureRecognizer
         )
+    }
+
+    @objc private func handlePencilHover(_ recognizer: UIHoverGestureRecognizer) {
+        let point: CGPoint?
+        switch recognizer.state {
+        case .began, .changed:
+            guard recognizer.zOffset > 0 else { return }
+            point = recognizer.location(in: view)
+        case .ended, .cancelled, .failed:
+            point = nil
+        default:
+            return
+        }
+        guard let packets = pointerAdapter.hoverPacket(at: point) else { return }
+        for packet in packets {
+            _ = InkPointerEventStream.shared.publish(packet)
+        }
     }
 
     private func publishStylus(_ touches: Set<UITouch>, event: UIEvent?, phase: UInt8) -> Bool {

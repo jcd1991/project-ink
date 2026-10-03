@@ -1680,6 +1680,21 @@ Future<BigInt> updateBrushColor({
   alpha: alpha,
 );
 
+/// Set the shared foreground color for strokes in the current document session.
+Future<void> setActiveBrushColor({
+  required DocumentHandle handle,
+  required int red,
+  required int green,
+  required int blue,
+  required int alpha,
+}) => RustLib.instance.api.crateApiSetActiveBrushColor(
+  handle: handle,
+  red: red,
+  green: green,
+  blue: blue,
+  alpha: alpha,
+);
+
 /// Begin a temporary brush editor transaction owned by Rust.
 Future<BigInt> beginBrushDraft({
   required DocumentHandle handle,

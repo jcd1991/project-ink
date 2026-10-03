@@ -16,6 +16,7 @@ class CanvasStrokePreviewHost {
     required this.color,
     required this.width,
     required this.pressureSize,
+    this.pressureCurvePoints = _identityPressureCurve,
     required this.legacyTechnicalPen,
     required this.eraser,
     required this.previewStoppedAtPageEdge,
@@ -37,6 +38,7 @@ class CanvasStrokePreviewHost {
   final Color Function() color;
   final double Function() width;
   final double Function() pressureSize;
+  final List<double> Function() pressureCurvePoints;
   final bool Function() legacyTechnicalPen;
   final bool Function() eraser;
   final bool Function() previewStoppedAtPageEdge;
@@ -48,6 +50,8 @@ class CanvasStrokePreviewHost {
   final void Function() clearLastAcknowledgement;
   final CanvasDiagnosticRecorder diagnostics;
 }
+
+List<double> _identityPressureCurve() => const <double>[0, 0, 1, 1];
 
 /// The acknowledgement operations needed by CPU tile publication.
 abstract interface class CanvasTilePreviewActions {
@@ -98,6 +102,7 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       color: host.color(),
       width: host.width(),
       pressureSize: host.pressureSize(),
+      pressureCurvePoints: host.pressureCurvePoints(),
       documentWidth: host.documentWidth(),
       documentHeight: host.documentHeight(),
       legacyTechnicalPen: host.legacyTechnicalPen(),

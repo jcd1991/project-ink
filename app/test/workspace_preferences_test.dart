@@ -51,6 +51,18 @@ void main() {
     expect(restored.leftDockWidth, 312);
   });
 
+  test('workspace active colors round trip as shared foreground settings', () {
+    const preferences = WorkspacePreferences(
+      activeColorArgb: 0xff12ab34,
+      subColorArgb: 0xfffedcba,
+    );
+
+    final restored = WorkspacePreferences.fromJson(preferences.toJson());
+
+    expect(restored.activeColorArgb, 0xff12ab34);
+    expect(restored.subColorArgb, 0xfffedcba);
+  });
+
   test('v2 workspace layout validation rejects excessive structure', () {
     final layout = WorkspaceLayout.fromJson({
       'id': 'layout',

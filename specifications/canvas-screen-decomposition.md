@@ -209,15 +209,16 @@ hosts or values:
   `CanvasLayerPresentationState` applies that result and owns the associated
   layer, selection, solo, and generation state. The screen publishes changes
   and queues persistence when stored state needs repair.
-- Active brush color mutation and dirty marking:
-  `CanvasBrushActions.updateActiveBrushColor`. `CanvasBrushColorActions` owns
-  picker result handling, UI color command sequencing, and recent-color policy
-  through explicit host callbacks. Callers pass `BuildContext` for each picker
-  invocation; the screen owns visible color projections.
+- Session-wide foreground color: `CanvasBrushActions.setActivePaintColor`
+  sends the shared color to Rust without mutating saved presets or document
+  history. `CanvasBrushColorActions` owns picker result handling, UI color
+  command sequencing, and recent-color policy through explicit host callbacks.
+  Callers pass `BuildContext` for each picker invocation; the screen owns
+  visible color projections.
 - Sampled-color transaction: `CanvasColorSamplingCoordinator` maps a pointer
   location through the current viewport, samples the current tile projection,
-  applies the color through `CanvasBrushActions`, and publishes the UI color
-  only after the Rust-backed update succeeds and the route remains mounted.
+  applies the shared color through `CanvasBrushActions`, and publishes the UI
+  color only after the Rust-backed update succeeds and the route remains mounted.
   Pixel decoding stays pure in `CanvasColorSampler`; the screen supplies the
   current document, cache, coordinate transform, and lifecycle callbacks.
 

@@ -279,8 +279,9 @@ in a disposable app session and record Save, Discard, and Cancel outcomes.
   `CanvasWorkspaceEditorActions` owns workspace rename, deletion, save-as,
   reset, and command-bar editing workflows through an explicit host; dock
   presentation state remains screen-owned.
-  `CanvasBrushActions` owns active-brush color writes to Rust and marks the
-  recovery state dirty after successful bridge updates.
+  `CanvasBrushActions` owns the session-wide foreground color sent to Rust for
+  subsequent strokes; changing it does not edit a brush preset or dirty the
+  document. Brush preset colors remain available as their saved base values.
   `CanvasBrushColorActions` sequences selection, clipboard paste, swap, reset,
   and recent-color policy through explicit callbacks and routes swap/reset
   editor commands, and owns picker result handling with `BuildContext` supplied

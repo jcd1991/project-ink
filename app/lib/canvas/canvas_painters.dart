@@ -296,3 +296,64 @@ class CanvasOverlayPainter extends CustomPainter {
       rulerStart != oldDelegate.rulerStart ||
       rulerEnd != oldDelegate.rulerEnd;
 }
+
+/// Shows the Apple Pencil's projected tip position without changing the
+/// document or competing with the active stroke preview.
+class PencilHoverCrosshairPainter extends CustomPainter {
+  const PencilHoverCrosshairPainter({
+    required this.pan,
+    required this.scale,
+    required this.rotation,
+    required this.mirrored,
+    required this.documentWidth,
+    required this.documentHeight,
+    required this.position,
+  });
+
+  final Offset pan;
+  final double scale;
+  final double rotation;
+  final bool mirrored;
+  final int documentWidth;
+  final int documentHeight;
+  final Offset position;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final centered = position - Offset(documentWidth / 2, documentHeight / 2);
+    final rotated = Offset(
+      centered.dx * math.cos(rotation) - centered.dy * math.sin(rotation),
+      centered.dx * math.sin(rotation) + centered.dy * math.cos(rotation),
+    );
+    final tip =
+        Offset(size.width / 2, size.height / 2) +
+        pan +
+        Offset(mirrored ? -rotated.dx : rotated.dx, rotated.dy) * scale;
+    for (final (color, strokeWidth) in <(Color, double)>[
+      (Colors.white, 3),
+      (Colors.black, 1),
+    ]) {
+      final paint =
+          Paint()
+            ..color = color.withValues(alpha: 0.9)
+            ..strokeWidth = strokeWidth
+            ..style = PaintingStyle.stroke
+            ..isAntiAlias = true;
+      canvas.drawCircle(tip, 5, paint);
+      canvas.drawLine(tip.translate(-9, 0), tip.translate(-3, 0), paint);
+      canvas.drawLine(tip.translate(3, 0), tip.translate(9, 0), paint);
+      canvas.drawLine(tip.translate(0, -9), tip.translate(0, -3), paint);
+      canvas.drawLine(tip.translate(0, 3), tip.translate(0, 9), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(PencilHoverCrosshairPainter oldDelegate) =>
+      pan != oldDelegate.pan ||
+      scale != oldDelegate.scale ||
+      rotation != oldDelegate.rotation ||
+      mirrored != oldDelegate.mirrored ||
+      position != oldDelegate.position ||
+      documentWidth != oldDelegate.documentWidth ||
+      documentHeight != oldDelegate.documentHeight;
+}

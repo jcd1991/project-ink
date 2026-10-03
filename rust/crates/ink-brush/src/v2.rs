@@ -1594,7 +1594,18 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
         target,
         base: 1.0,
         sensor: SensorId::Pressure,
-        curve: ResponseCurve::identity(),
+        // Apple Pencil force varies across users and grip styles. This gentle
+        // early lift makes light-to-medium pressure useful while preserving
+        // the full-pressure endpoint; each brush's amount still controls how
+        // strongly pressure changes its parameter.
+        curve: ResponseCurve {
+            points: vec![
+                CurvePoint { x: 0.0, y: 0.0 },
+                CurvePoint { x: 0.2, y: 0.32 },
+                CurvePoint { x: 0.5, y: 0.68 },
+                CurvePoint { x: 1.0, y: 1.0 },
+            ],
+        },
         amount,
         combine: CombineOp::Multiply,
     }
@@ -2107,6 +2118,21 @@ mod tests {
             light[0].radius_x < firm[0].radius_x,
             "firm pressure should produce a wider technical-pen mark"
         );
+    }
+
+    #[test]
+    fn starter_pen_pressure_profile_responds_earlier_than_linear() {
+        let preset = builtin_library().remove(0);
+        let binding = preset
+            .dynamics
+            .iter()
+            .find(|binding| {
+                binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+            })
+            .expect("starter pen pressure binding");
+
+        assert!(binding.curve.evaluate(0.2) > 0.2);
+        assert!((binding.curve.evaluate(1.0) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

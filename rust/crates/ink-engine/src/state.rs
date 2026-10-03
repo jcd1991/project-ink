@@ -1,7 +1,7 @@
 use super::{
     Arc, AtomicU64, BTreeMap, BrushDab, BrushId, BrushPreset, BrushPresetV2, CompiledBrush,
-    CompiledBrushState, Dab, EngineEvent, History, Layer, LayerId, Mutex, SelectionMask, TileStore,
-    TimeLapseRecording, VecDeque, VectorStroke,
+    CompiledBrushState, Dab, EngineEvent, History, Layer, LayerId, Mutex, Rgba8, SelectionMask,
+    TileStore, TimeLapseRecording, VecDeque, VectorStroke,
 };
 use ink_storage::LayerPanelState;
 
@@ -193,6 +193,9 @@ pub(super) struct EngineState {
     /// User edits to presets are kept in the Rust engine. Built-ins remain
     /// immutable until an explicit override is created by the editor.
     pub(super) brush_overrides: BTreeMap<ink_model::BrushId, BrushPresetV2>,
+    /// Shared foreground color for the current document session. It is
+    /// applied to brush copies at stroke start and is not part of presets.
+    pub(super) active_brush_color: Option<Rgba8>,
     /// The most recent brush-library edit participates in the same Undo/Redo
     /// command path as canvas edits. It is intentionally session-scoped; the
     /// durable brush override itself is persisted with the document.

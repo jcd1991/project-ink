@@ -4602,6 +4602,23 @@ pub fn update_brush_color(
     )
 }
 
+/// Set the shared foreground color for strokes in the current document session.
+pub fn set_active_brush_color(
+    handle: &mut DocumentHandle,
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+) -> Result<(), EngineError> {
+    document_mut(handle)?.set_active_brush_color(Rgba8 {
+        r: red,
+        g: green,
+        b: blue,
+        a: alpha,
+    });
+    Ok(())
+}
+
 /// Begin a temporary brush editor transaction owned by Rust.
 pub fn begin_brush_draft(handle: &mut DocumentHandle, brush_id: u128) -> Result<u64, EngineError> {
     document_mut(handle)?.begin_brush_draft(BrushId::from_u128(brush_id))

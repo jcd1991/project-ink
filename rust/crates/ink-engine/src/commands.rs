@@ -3011,22 +3011,33 @@ pub(super) fn dispatch_state(
                     "strokes require a raster or mask layer".into(),
                 ));
             }
-            let preset = BrushPreset::starters()
+            let mut preset = BrushPreset::starters()
                 .into_iter()
                 .find(|candidate| candidate.id == *brush)
                 .unwrap_or_else(|| BrushPreset::starters()[0]);
+            if let Some(color) = state.active_brush_color {
+                preset.color = color;
+            }
             let compiled_brush = if let Some(override_preset) = state.brush_overrides.get(brush) {
+                let mut brush_copy = override_preset.clone();
+                if let Some(color) = state.active_brush_color {
+                    crate::brushes::set_brush_paint_color(&mut brush_copy.paint, color);
+                }
                 Some(
-                    override_preset
+                    brush_copy
                         .compile()
                         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?,
                 )
             } else if brush.0 > 5 {
+                let mut brush_copy = builtin_library()
+                    .into_iter()
+                    .find(|candidate| candidate.id == *brush)
+                    .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
+                if let Some(color) = state.active_brush_color {
+                    crate::brushes::set_brush_paint_color(&mut brush_copy.paint, color);
+                }
                 Some(
-                    builtin_library()
-                        .into_iter()
-                        .find(|candidate| candidate.id == *brush)
-                        .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?
+                    brush_copy
                         .compile()
                         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?,
                 )

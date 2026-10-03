@@ -30,6 +30,7 @@ class _BrushSettingsCall {
 class _RecordingBrushEngine extends InMemoryEngineApi {
   final settings = <_BrushSettingsCall>[];
   final colorBrushIds = <int>[];
+  final activeBrushColorUpdates = <int>[];
   final packets = <Uint8List>[];
 
   @override
@@ -58,6 +59,22 @@ class _RecordingBrushEngine extends InMemoryEngineApi {
     colorBrushIds.add(brushId);
     await super.updateBrushColor(
       brushId: brushId,
+      red: red,
+      green: green,
+      blue: blue,
+      alpha: alpha,
+    );
+  }
+
+  @override
+  Future<void> setActiveBrushColor({
+    required int red,
+    required int green,
+    required int blue,
+    required int alpha,
+  }) async {
+    activeBrushColorUpdates.add((red << 24) | (green << 16) | (blue << 8) | alpha);
+    await super.setActiveBrushColor(
       red: red,
       green: green,
       blue: blue,
@@ -263,19 +280,21 @@ void main() {
     expect(engine.settings.last.brushId, 2);
     expect(engine.settings.last.opacity, lessThan(1));
 
+    engine.activeBrushColorUpdates.clear();
     await tester.tap(find.byTooltip('Sub color'));
     await tester.pumpAndSettle();
     expect(find.text('Sub color'), findsOneWidget);
     await tester.tap(find.text('Apply'));
     await tester.pump(const Duration(milliseconds: 100));
-    expect(engine.colorBrushIds, isEmpty);
+    expect(engine.activeBrushColorUpdates, isEmpty);
 
     await tester.tap(find.byTooltip('Main color'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Apply'));
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(engine.colorBrushIds, contains(2));
+    expect(engine.activeBrushColorUpdates, isNotEmpty);
+    expect(engine.activeBrushColorRgba, isNotNull);
     expect(tester.takeException(), isNull);
   });
 

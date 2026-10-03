@@ -250,6 +250,26 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<void> setActiveBrushColor({
+    required int red,
+    required int green,
+    required int blue,
+    required int alpha,
+  }) async {
+    _requireOpen();
+    if ([red, green, blue, alpha].any((value) => value < 0 || value > 255)) {
+      throw ArgumentError('invalid active brush color');
+    }
+    await rust.setActiveBrushColor(
+      handle: _handle,
+      red: red,
+      green: green,
+      blue: blue,
+      alpha: alpha,
+    );
+  }
+
+  @override
   Future<void> transformVectorStroke({
     required int layerId,
     required int strokeId,

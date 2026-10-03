@@ -196,6 +196,11 @@ Size, opacity, flow, density, spacing, rotation, scatter, grain strength,
 pickup, smudge, color shift, and other configurable values share one mapping
 system.
 
+Starter pressure-to-diameter bindings use a gentle concave response that gives
+light-to-medium Apple Pencil force more visible range while retaining the full
+pressure endpoint. The binding amount remains brush-specific and the brush
+editor's pressure size and response-curve controls tune each brush independently.
+
 ```rust
 pub struct ParameterBinding {
     pub target: ParameterId,

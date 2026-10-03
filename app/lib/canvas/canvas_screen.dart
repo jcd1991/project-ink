@@ -384,6 +384,15 @@ class _CanvasScreenState extends State<CanvasScreen>
                       : _activeColor,
           width: () => _brushLibrary.selected?.size ?? 8,
           pressureSize: () => _brushLibrary.selected?.pressureSize ?? 0,
+          pressureCurvePoints:
+              () => [
+                for (final point
+                    in _brushLibrary.selected?.pressureCurvePoints ??
+                        const <BrushCurvePointView>[]) ...<double>[
+                  point.x,
+                  point.y,
+                ],
+              ],
           legacyTechnicalPen: () => _activeBrushId == 1,
           eraser: () => _eraserActive || _transparentColorActive,
           previewStoppedAtPageEdge: () => _previewStoppedAtPageEdge,
@@ -672,6 +681,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 ),
                 hasDown: isDownSample,
               ),
+          transformHoverPosition: _canvasPosition,
+          updateHoverPosition: (value) {
+            if (_pencilHoverPosition.value != value) {
+              _pencilHoverPosition.value = value;
+            }
+          },
           nextSequence: _nextPointerSequence,
           appendPreviewBatch: _appendNativePreviewBatch,
           schedulePreviewFrameDiagnostic: _scheduleLivePreviewFrameDiagnostic,
@@ -758,9 +773,14 @@ class _CanvasScreenState extends State<CanvasScreen>
   bool _colorSamplerArmed = false;
   final _strokeConstraintController = CanvasStrokeConstraintController();
   Offset? _stylusLastPosition;
+  final ValueNotifier<Offset?> _pencilHoverPosition = ValueNotifier<Offset?>(
+    null,
+  );
   int _lastNativeInputArrivalUs = 0;
   Color _activeColor = const Color(0xff202124);
   Color _subColor = Colors.white;
+  bool _activeColorInitialized = false;
+  bool _hasUserSelectedColor = false;
   final CanvasInputSettingsController _inputSettings =
       CanvasInputSettingsController();
   bool _documentActionRunning = false;
@@ -833,9 +853,8 @@ class _CanvasScreenState extends State<CanvasScreen>
   Rect? _selectionGeometry;
   IllustrationTool? _selectionGeometryTool;
   int _activeBrushId = 1;
-  // UI color projection stays with the screen; brush edit drafts and preview
-  // caching are owned by CanvasBrushActions.
-  final Map<int, Color> _brushColors = <int, Color>{};
+  // The selected drawing color is workspace-wide. Rust applies it to a
+  // temporary brush copy when each stroke begins.
   late final BrushLibraryModel _brushLibrary = BrushLibraryModel(const []);
   late final CanvasBrushActions _brushActions = CanvasBrushActions(
     CanvasBrushActionHost(
@@ -846,10 +865,6 @@ class _CanvasScreenState extends State<CanvasScreen>
       setState: setState,
       activeBrushId: () => _activeBrushId,
       setActiveBrushId: (value) => _activeBrushId = value,
-      activeColor: () => _activeColor,
-      setActiveColor: (value) => _activeColor = value,
-      brushColor: (id) => _brushColors[id],
-      cacheBrushColor: (id, color) => _brushColors[id] = color,
       finishDanglingStrokeBeforeBrushEdit: _finishDanglingStrokeBeforeBrushEdit,
       endStaleStroke: () async {
         await widget.engine.endStroke();
@@ -871,9 +886,9 @@ class _CanvasScreenState extends State<CanvasScreen>
           documentInfo: () => widget.engine.documentInfo,
           tiles: () => _tileBytes,
           documentPosition: _canvasPosition,
-          applyActiveBrushColor: _brushActions.updateActiveBrushColor,
+          applyActiveBrushColor: _brushActions.setActivePaintColor,
           isMounted: () => mounted,
-          publishColor: (color) => setState(() => _activeColor = color),
+          publishColor: _publishActiveColor,
         ),
       );
   late final CanvasBrushColorActions
@@ -885,21 +900,26 @@ class _CanvasScreenState extends State<CanvasScreen>
       recentColors:
           () => widget.workspacePreferences?.recentColors ?? const <String>[],
       finishDanglingStroke: _finishDanglingStrokeBeforeBrushEdit,
-      publishColors: ({mainColor, subColor, cacheMainColor = false}) {
+      publishColors: ({mainColor, subColor}) {
         setState(() {
           if (mainColor != null) {
             _activeColor = mainColor;
-            if (cacheMainColor) {
-              _brushColors[_activeBrushId] = mainColor;
-            }
+            _activeColorInitialized = true;
+            _hasUserSelectedColor = true;
           }
           if (subColor != null) _subColor = subColor;
         });
+        if (mainColor != null || subColor != null) {
+          _workspaceLayoutActions.persistPreferences(
+            activeColorArgb: mainColor?.toARGB32(),
+            subColorArgb: subColor?.toARGB32(),
+          );
+        }
       },
       persistRecentColors:
           (colors) =>
               _workspaceLayoutActions.persistPreferences(recentColors: colors),
-      updateRustBrushColor: _brushActions.updateActiveBrushColor,
+      setRustActiveColor: _brushActions.setActivePaintColor,
     ),
   );
   late final CanvasBrushProjection _brushProjection = CanvasBrushProjection(
@@ -908,10 +928,14 @@ class _CanvasScreenState extends State<CanvasScreen>
       engineGeneration: () => _engineGeneration,
       mounted: () => mounted,
       library: () => _brushLibrary,
-      brushColors: () => _brushColors,
       activeBrushId: () => _activeBrushId,
       setActiveBrushId: (value) => _activeBrushId = value,
-      setActiveColor: (value) => _activeColor = value,
+      setActiveColor: (value) {
+        if (_activeColorInitialized) return;
+        _activeColor = value;
+        _activeColorInitialized = true;
+        unawaited(_brushActions.setActivePaintColor(value));
+      },
       refreshLayerProjection: _refreshLayerProjection,
     ),
   );
@@ -935,6 +959,7 @@ class _CanvasScreenState extends State<CanvasScreen>
               _soloLayerId = null;
             }
             await engine.rebindDocument(handle);
+            await _restoreActiveBrushColor();
             if (mounted) {
               _layerPresentationState.resetPanelStateGeneration();
               _layerSelection.clear();
@@ -953,6 +978,7 @@ class _CanvasScreenState extends State<CanvasScreen>
               _soloLayerId = null;
             }
             engine.bindStudioProject(project);
+            await _restoreActiveBrushColor();
             _layerPresentationState.resetPanelStateGeneration();
             _layerSelection.clear();
             await _loadPhase2Projections();
@@ -1384,6 +1410,16 @@ class _CanvasScreenState extends State<CanvasScreen>
   @override
   void initState() {
     super.initState();
+    final preferences = widget.workspacePreferences;
+    if (preferences?.activeColorArgb case final activeColor?) {
+      _activeColor = Color(activeColor);
+      _activeColorInitialized = true;
+      _hasUserSelectedColor = true;
+    }
+    if (preferences?.subColorArgb case final subColor?) {
+      _subColor = Color(subColor);
+    }
+    if (_activeColorInitialized) unawaited(_restoreActiveBrushColor());
     if (!kIsWeb &&
         (widget.targetPlatform ?? defaultTargetPlatform) ==
             TargetPlatform.macOS) {
@@ -1412,7 +1448,6 @@ class _CanvasScreenState extends State<CanvasScreen>
               .first
               .devicePixelRatio,
     });
-    final preferences = widget.workspacePreferences;
     _workspaceDockState.initialize(
       preferences: preferences,
       fallbackRightWidth: widget.workspaceDockWidth,
@@ -1540,6 +1575,14 @@ class _CanvasScreenState extends State<CanvasScreen>
         previous: oldWidget.workspacePreferences,
         current: widget.workspacePreferences,
       );
+      final savedColor = widget.workspacePreferences?.activeColorArgb;
+      if (savedColor != null &&
+          savedColor != oldWidget.workspacePreferences?.activeColorArgb &&
+          !_hasUserSelectedColor) {
+        _activeColor = Color(savedColor);
+        _activeColorInitialized = true;
+        unawaited(_restoreActiveBrushColor());
+      }
     }
     if (oldWidget.engine != widget.engine) {
       if (_layerActions.hasActiveOpacityEdit) {
@@ -1563,6 +1606,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       _vectorActions.clearStrokes();
       _selectionGeometry = null;
       _selectionGeometryTool = null;
+      if (_activeColorInitialized) unawaited(_restoreActiveBrushColor());
       _toolEventCoordinator.resetTransientState();
       unawaited(_comicWorkspace.republishEngineBindings());
       unawaited(_loadPhase2Projections());
@@ -1645,6 +1689,23 @@ class _CanvasScreenState extends State<CanvasScreen>
     setState(() => _transparentColorActive = !_transparentColorActive);
   }
 
+  void _publishActiveColor(Color color) {
+    if (!mounted) return;
+    setState(() {
+      _activeColor = color;
+      _activeColorInitialized = true;
+      _hasUserSelectedColor = true;
+    });
+    _workspaceLayoutActions.persistPreferences(
+      activeColorArgb: color.toARGB32(),
+    );
+  }
+
+  Future<void> _restoreActiveBrushColor() async {
+    if (!mounted || !_activeColorInitialized) return;
+    await _brushActions.setActivePaintColor(_activeColor);
+  }
+
   @override
   void dispose() {
     if (_nativeWindowCloseHandlerInstalled) {
@@ -1655,6 +1716,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     _finishStrokeAutosaveHold(reason: 'canvas_disposed');
     _disposed = true;
+    _pencilHoverPosition.dispose();
     _tileSynchronization.dispose();
     _canvasDiagnostics.record('canvas.session_ended', <String, Object?>{
       'engineRevision': widget.engine.revision,
@@ -2233,6 +2295,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                     rulerEnd: _toolEventCoordinator.ruler.end,
                   ),
                   strokePreview: _strokePreview,
+                  hoverPosition: _pencilHoverPosition,
                   livePreviewSurface: _livePreviewSurface,
                   isIpad: platform == TargetPlatform.iOS,
                   onPointerEvent: _handlePointer,
@@ -2337,6 +2400,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                     mirrored: _viewportController.mirrored,
                     tabletSimpleMode: tabletSimpleMode,
                     tabletStudioMode: tabletStudioMode,
+                    eraserActive: _eraserActive,
                     onToggleTabletMode: _toggleTabletWorkspaceMode,
                     onToggleFocus: _toggleFocusMode,
                     onToggleTransparent: _toggleTransparentColor,

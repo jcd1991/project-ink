@@ -15,7 +15,6 @@ void main() {
   test('maps Rust summaries and applies the current active brush', () async {
     final engine = InMemoryEngineApi();
     final library = BrushLibraryModel(const []);
-    final colors = <int, Color>{};
     var activeBrushId = 7;
     Color? activeColor;
     var refreshCount = 0;
@@ -25,7 +24,6 @@ void main() {
         engineGeneration: () => 1,
         mounted: () => true,
         library: () => library,
-        brushColors: () => colors,
         activeBrushId: () => activeBrushId,
         setActiveBrushId: (value) => activeBrushId = value,
         setActiveColor: (value) => activeColor = value,
@@ -40,7 +38,6 @@ void main() {
     expect(library.selected?.id, 7);
     expect(library.selected?.family, BrushFamily.paint);
     expect(activeBrushId, 7);
-    expect(colors[7], const Color(0xff202124));
     expect(activeColor, const Color(0xff202124));
     expect(refreshCount, 1);
   });
@@ -56,7 +53,6 @@ void main() {
         engineGeneration: () => 1,
         mounted: () => true,
         library: () => library,
-        brushColors: () => <int, Color>{},
         activeBrushId: () => activeBrushId,
         setActiveBrushId: (value) => activeBrushId = value,
         setActiveColor: (_) {},

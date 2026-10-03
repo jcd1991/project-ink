@@ -38,8 +38,7 @@ class _GestureEngine extends InMemoryEngineApi {
   }
 
   @override
-  Future<void> updateBrushColor({
-    required int brushId,
+  Future<void> setActiveBrushColor({
     required int red,
     required int green,
     required int blue,
@@ -47,8 +46,7 @@ class _GestureEngine extends InMemoryEngineApi {
   }) async {
     colorUpdateCount++;
     lastAppliedColor = <int>[red, green, blue, alpha];
-    await super.updateBrushColor(
-      brushId: brushId,
+    await super.setActiveBrushColor(
       red: red,
       green: green,
       blue: blue,
@@ -604,10 +602,11 @@ void main() {
   ) async {
     final engine = _GestureEngine();
     await _pumpCanvas(tester, engine);
+    final initialColorUpdateCount = engine.colorUpdateCount;
 
-    await tester.tap(_toolbarCommand('Brush color'));
+    await tester.tap(_toolbarCommand('Color'));
     await tester.pumpAndSettle();
-    expect(find.text('Brush color'), findsOneWidget);
+    expect(find.text('Main color'), findsOneWidget);
     expect(find.text('Red'), findsOneWidget);
     expect(find.text('Green'), findsOneWidget);
     expect(find.text('Blue'), findsOneWidget);
@@ -617,8 +616,8 @@ void main() {
 
     await tester.tap(find.text('Apply'));
     await tester.pumpAndSettle();
-    expect(engine.colorUpdateCount, 1);
-    expect(find.text('Brush color'), findsNothing);
+    expect(engine.colorUpdateCount, initialColorUpdateCount + 1);
+    expect(find.text('Main color'), findsNothing);
   });
 
   testWidgets('C opens the brush color selector', (tester) async {
@@ -627,7 +626,7 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
     await tester.pumpAndSettle();
 
-    expect(find.text('Brush color'), findsOneWidget);
+    expect(find.text('Main color'), findsOneWidget);
     expect(find.text('Red'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

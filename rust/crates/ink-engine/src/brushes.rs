@@ -431,6 +431,12 @@ impl Document {
         Ok(revision)
     }
 
+    /// Set the shared foreground color used by subsequent strokes in this
+    /// document session. This does not edit or persist any brush preset.
+    pub fn set_active_brush_color(&mut self, color: Rgba8) {
+        lock_recover(&self.state).active_brush_color = Some(color);
+    }
+
     /// Rename a user-owned brush copy without changing its rendering data.
     pub fn rename_brush(&mut self, brush_id: BrushId, name: &str) -> Result<u64, EngineError> {
         self.flush_input()?;
@@ -1010,7 +1016,7 @@ fn apply_brush_draft_to_preset(
         .map_err(|error| EngineError::InvalidCommand(error.to_string()))
 }
 
-fn set_brush_paint_color(paint: &mut PaintBehavior, color: ink_model::Rgba8) {
+pub(crate) fn set_brush_paint_color(paint: &mut PaintBehavior, color: ink_model::Rgba8) {
     match paint {
         PaintBehavior::Solid(value) => value.color = color,
         PaintBehavior::Glaze(value) => value.color = color,

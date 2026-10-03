@@ -15,7 +15,7 @@ class CanvasBrushColorActionsHost {
     required this.finishDanglingStroke,
     required this.publishColors,
     required this.persistRecentColors,
-    required this.updateRustBrushColor,
+    required this.setRustActiveColor,
   });
 
   final bool Function() isMounted;
@@ -23,10 +23,9 @@ class CanvasBrushColorActionsHost {
   final Color Function() subColor;
   final List<String> Function() recentColors;
   final Future<void> Function() finishDanglingStroke;
-  final void Function({Color? mainColor, Color? subColor, bool cacheMainColor})
-  publishColors;
+  final void Function({Color? mainColor, Color? subColor}) publishColors;
   final void Function(List<String> colors) persistRecentColors;
-  final Future<bool> Function(Color color) updateRustBrushColor;
+  final Future<bool> Function(Color color) setRustActiveColor;
 }
 
 /// Owns brush color workflows while leaving presentation and Rust state with
@@ -48,7 +47,7 @@ class CanvasBrushColorActions {
       builder:
           (_) => CanvasBrushColorDialog(
             initialColor: editSubColor ? host.subColor() : host.mainColor(),
-            title: editSubColor ? 'Sub color' : 'Brush color',
+            title: editSubColor ? 'Sub color' : 'Main color',
             recentColors: host.recentColors(),
           ),
     );
@@ -74,26 +73,25 @@ class CanvasBrushColorActions {
     }
   }
 
-  /// Flushes a native pointer-up before publishing the selection or editing
-  /// the Rust brush. This order prevents a queued stroke terminal from racing
-  /// the brush-color command.
+  /// Finishes accepted input before changing the shared color used by future
+  /// strokes. Existing strokes retain the color they started with.
   Future<void> applyMainColor(Color selected) async {
     await host.finishDanglingStroke();
+    if (!await host.setRustActiveColor(selected) || !host.isMounted()) return;
     final updatedRecentColors = _recentColorsWith(
       selected,
       host.recentColors(),
     );
     if (host.isMounted()) {
-      host.publishColors(mainColor: selected, cacheMainColor: true);
+      host.publishColors(mainColor: selected);
       host.persistRecentColors(updatedRecentColors);
     }
-    await host.updateRustBrushColor(selected);
   }
 
   /// Clipboard paste preserves its existing behavior: update Rust first and
   /// publish the UI color only after the bridge accepts it.
   Future<void> applyPastedColor(Color color) async {
-    if (await host.updateRustBrushColor(color) && host.isMounted()) {
+    if (await host.setRustActiveColor(color) && host.isMounted()) {
       host.publishColors(mainColor: color);
     }
   }
@@ -115,15 +113,19 @@ class CanvasBrushColorActions {
   Future<void> swapColors() async {
     final previousMainColor = host.mainColor();
     final nextMainColor = host.subColor();
-    host.publishColors(mainColor: nextMainColor, subColor: previousMainColor);
-    await host.updateRustBrushColor(nextMainColor);
+    await host.finishDanglingStroke();
+    if (await host.setRustActiveColor(nextMainColor) && host.isMounted()) {
+      host.publishColors(mainColor: nextMainColor, subColor: previousMainColor);
+    }
   }
 
   Future<void> resetColors() async {
     const mainColor = Colors.black;
     const subColor = Colors.white;
-    host.publishColors(mainColor: mainColor, subColor: subColor);
-    await host.updateRustBrushColor(mainColor);
+    await host.finishDanglingStroke();
+    if (await host.setRustActiveColor(mainColor) && host.isMounted()) {
+      host.publishColors(mainColor: mainColor, subColor: subColor);
+    }
   }
 
   static List<String> _recentColorsWith(

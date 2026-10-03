@@ -189,11 +189,34 @@ double liveStrokePreviewWidthAt(
   LiveStrokePreviewPoint point,
 ) {
   final pressure = point.pressure.clamp(0.0, 1.0);
+  final mappedPressure = _evaluatePressureCurve(
+    preview.pressureCurvePoints,
+    pressure,
+  );
   final pressureScale =
       preview.legacyTechnicalPen
           ? 0.2 + 2.8 * math.pow(pressure, 1.5).toDouble()
-          : 1 - preview.pressureSize + 2 * preview.pressureSize * pressure;
+          : 1 -
+              preview.pressureSize +
+              2 * preview.pressureSize * mappedPressure;
   return math.max(0.75, preview.width * pressureScale).toDouble();
+}
+
+double _evaluatePressureCurve(List<double> points, double pressure) {
+  if (points.length < 4 || points.length.isOdd) return pressure;
+  for (var index = 0; index + 3 < points.length; index += 2) {
+    final leftX = points[index];
+    final leftY = points[index + 1];
+    final rightX = points[index + 2];
+    final rightY = points[index + 3];
+    if (pressure <= rightX) {
+      final span = rightX - leftX;
+      if (span <= 0) return rightY;
+      final progress = ((pressure - leftX) / span).clamp(0.0, 1.0);
+      return leftY + (rightY - leftY) * progress;
+    }
+  }
+  return points.last;
 }
 
 class LiveStrokePreview {
@@ -204,6 +227,7 @@ class LiveStrokePreview {
     required this.documentWidth,
     required this.documentHeight,
     required this.legacyTechnicalPen,
+    this.pressureCurvePoints = const <double>[0, 0, 1, 1],
     required this.eraser,
     required this.points,
     required this.chunks,
@@ -218,6 +242,7 @@ class LiveStrokePreview {
   final int documentWidth;
   final int documentHeight;
   final bool legacyTechnicalPen;
+  final List<double> pressureCurvePoints;
   final bool eraser;
   final List<LiveStrokePreviewPoint> points;
   final List<LiveStrokePreviewChunk> chunks;
@@ -242,6 +267,7 @@ class LiveStrokePreview {
     documentWidth: documentWidth,
     documentHeight: documentHeight,
     legacyTechnicalPen: legacyTechnicalPen,
+    pressureCurvePoints: pressureCurvePoints,
     eraser: eraser,
     points: points ?? this.points,
     chunks: chunks ?? this.chunks,
