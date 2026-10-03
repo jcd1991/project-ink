@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../canvas/canvas_screen.dart';
+import '../canvas/live_preview_controller.dart';
 import '../canvas/performance_trace.dart';
 import '../bridge/engine_api.dart';
 import '../comics/comic_workspace.dart';
@@ -27,6 +28,7 @@ class ProjectInkApp extends StatefulWidget {
     this.onAutosaveStateChanged,
     this.onPerformanceSnapshot,
     this.performanceTracePath,
+    @visibleForTesting this.livePreviewControllerFactory,
     @visibleForTesting this.comicWorkspaceController,
   });
 
@@ -69,6 +71,12 @@ class ProjectInkApp extends StatefulWidget {
   /// Optional newline-delimited JSON path for local Phase 1 trace capture.
   /// No file is created when this is omitted.
   final String? performanceTracePath;
+
+  /// Optional renderer seam for integration tests that focus on document
+  /// persistence rather than the native texture lifecycle.
+  @visibleForTesting
+  final LivePreviewController Function(EngineApi engine)?
+  livePreviewControllerFactory;
 
   /// Isolates document-session tests from sample comic loading and page binds.
   @visibleForTesting
@@ -504,6 +512,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
           engine: engine,
           comicWorkspaceController: widget.comicWorkspaceController,
           targetPlatform: widget.targetPlatformOverride,
+          livePreviewControllerFactory: widget.livePreviewControllerFactory,
           autosave: _autosaveFor(engine),
           autosaveState: _autosaveState,
           documentPicker: widget.documentPicker,

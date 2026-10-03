@@ -154,7 +154,7 @@ class CanvasScreen extends StatefulWidget
     @visibleForTesting this.nativePointerReadyOverride,
     @visibleForTesting this.nativePencilCommandsOverride,
     @visibleForTesting this.nativeCanvasDiagnosticEventsOverride,
-    @visibleForTesting this.livePreviewControllerFactory,
+    this.livePreviewControllerFactory,
   }) : engine = engine ?? InMemoryEngineApi();
   @override
   final EngineApi engine;

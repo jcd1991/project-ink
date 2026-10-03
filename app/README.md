@@ -96,13 +96,26 @@ Run the first-release validation suite on macOS from any directory:
 ```
 
 The script requires Flutter 3.47.5 and runs analysis, the Flutter test suite,
-Rust-bridge disk-backed drawing/layer/brush/comic round trips, and the macOS
-native live-texture lifecycle test. Logs and a pass/fail summary go under
+and Rust-bridge disk-backed drawing/layer/brush/comic round trips. Logs and a
+pass/fail summary go under
 `app/build/macos-alpha-checks/` by default; override the location with
-`PROJECT_INK_MACOS_ALPHA_RESULTS_DIR`. It does not automate the AppKit red
-window button or Cmd-Q with a dirty named project. Those interactions still
-need manual acceptance in a disposable app profile, including Save, Discard,
-and Cancel behavior.
+`PROJECT_INK_MACOS_ALPHA_RESULTS_DIR`. Use `--unit-only` to run analysis and
+all Flutter unit/widget tests without rebuilding the desktop app,
+`--native-live-texture` to run the separate Rust/Metal/Flutter texture smoke
+test, or `--preflight-only` to inspect the toolchain, free disk space, and live
+app processes. Full mode requires 6 GiB free by default and stops if a Project
+Ink macOS process is running; it does not remove build outputs, caches, or app
+data. Test project files go under a unique directory in the app's sandbox
+container. The separate native texture test requires an available Metal
+adapter; run it on a foreground macOS session. Override the free-space
+threshold only when the machine has been reviewed for the planned build.
+
+The integration suite includes pixel and layer save/reopen/undo/redo, edited
+brush import, multi-page comic export, corrupt Open, and disk-backed failed
+Save, recovery-write, and brush-import cases. It does not automate the AppKit
+red window button or Cmd-Q with a dirty named project. Follow
+[`specifications/macos-alpha-acceptance.md`](../specifications/macos-alpha-acceptance.md)
+in a disposable app session and record Save, Discard, and Cancel outcomes.
 
 ## Code ownership and lifecycle
 

@@ -45,6 +45,11 @@ release-supported.
   write-back through the production Rust bridge using disk-backed fixtures.
   Storage subprocess tests do not simulate power loss or prove provider
   behavior.
+- [x] Verify failed Save As, failed recovery writes, corrupt Open, and damaged
+  brush import through the production Rust bridge with disk-backed fixtures.
+  The tests preserve the active engine/recovery bytes, dirty state, source
+  bytes, and destination blockers; provider write-back and migration failures
+  remain open.
 - [ ] Repeat failed/cancelled Save As, Open, comic Open, and import flows with
   disk-backed fixtures and compare source hashes before and after.
 
@@ -203,6 +208,36 @@ acceptance are separate evidence classes. Do not substitute one for another.
   checksum against the downloaded artifact.
 
 ## Current evidence snapshot
+
+- This validation pass fixed `.inkproj` layer-label persistence. New saves use
+  the storage reader's canonical four-channel array, while the reader also
+  accepts older object-shaped labels so projects saved before the fix remain
+  openable. The focused storage compatibility and engine layer-presentation
+  save/reopen tests pass.
+- The Flutter analysis reports no issues and the complete unit/widget suite
+  passes all 592 tests. Isolated macOS Rust-bridge journeys pass for layer
+  presentation with undo/redo, custom brush edit/export/import, damaged brush
+  source preservation, multi-page comic save/reopen/export, and pixel
+  draw/save/reopen/undo/redo with corrupt Open and recovery preservation. App
+  shell checks also pass for failed Save As/corrupt Open and a failed recovery
+  write keeping the dirty Rust document. These are same-process debug
+  integration runs; fresh-process, provider, and device acceptance remain
+  open.
+- `app/tool/run_macos_alpha_checks.sh` now offers preflight, unit-only, full
+  workflow, and separate native-live-texture modes. Preflight found 1,302 MiB
+  free, below the runner's 6 GiB rebuild threshold, so full mode correctly
+  stopped before starting a rebuild. The native texture integration test now
+  follows the Rust/Metal/Flutter device-handle handoff, but surface creation
+  did not return in this integration-test session and the run was stopped. Do
+  not count native texture acceptance as passed.
+- The attached iPad Pro 11-inch (3rd generation, iOS 27.0) is visible to
+  Flutter, but this pass did not deploy or run the updated app on it. Direct
+  Apple Pencil pressure, tilt, hover, latency, long-stroke recovery, and
+  physical document workflows remain open.
+- `specifications/macos-alpha-acceptance.md` now records the isolated-profile
+  manual matrix for real AppKit red-close and Cmd-Q Save/Discard/Cancel, source
+  hashes, damaged Open/Save/import, and recovery outcomes. Those AppKit actions
+  were not exercised in this pass.
 
 - `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 flutter run -d macos --debug
   --dart-define=PROJECT_INK_TEST_DOCUMENTS_PATH=<sandbox-temp-path>` built and

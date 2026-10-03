@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:project_ink/bridge/engine_api.dart';
 
 const _channel = MethodChannel('org.projectink.studio/live_texture_v1');
 
@@ -13,15 +14,49 @@ void main() {
   testWidgets('desktop native live texture completes a frame lifecycle', (
     tester,
   ) async {
-    final created = await _channel.invokeMapMethod<String, Object?>(
-      'create',
-      <String, Object>{'width': 64, 'height': 64},
+    final engine = await FrbEngineApi.create(
+      widthPx: 64,
+      heightPx: 64,
+      dpi: 144,
     );
-    final textureId = created?['textureId'];
-    expect(textureId, isA<int>());
-    final id = textureId! as int;
+    final surface = await engine.createLiveSurface(
+      physicalWidth: 64,
+      physicalHeight: 64,
+      scaleMilli: 1000,
+    );
+    int? textureId;
 
     try {
+      final deviceHandle = await engine.liveSurfaceNativeDeviceHandle(surface);
+      final created = await _channel.invokeMapMethod<String, Object?>(
+        'create',
+        <String, Object>{
+          'deviceHandle': deviceHandle.toInt(),
+          'width': 64,
+          'height': 64,
+        },
+      );
+      expect(created?['textureId'], isA<int>());
+      textureId = created!['textureId']! as int;
+      final nativeTextureHandle = await _channel.invokeMethod<int>(
+        'takeMetalTextureHandle',
+        <String, Object>{'textureId': textureId},
+      );
+      expect(nativeTextureHandle, isPositive);
+      await engine.attachLiveSurfaceNativeTexture(
+        surface,
+        BigInt.from(nativeTextureHandle!),
+      );
+      await engine.attachLiveSurface(surface);
+      await engine.setLiveViewport(surface, const <double>[
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+      ], 1);
+
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
@@ -29,7 +64,7 @@ void main() {
               child: SizedBox(
                 width: 64,
                 height: 64,
-                child: Texture(textureId: id),
+                child: Texture(textureId: textureId),
               ),
             ),
           ),
@@ -37,35 +72,38 @@ void main() {
       );
       await tester.pump();
 
-      await _channel.invokeMethod<void>('setViewport', <String, Object>{
-        'textureId': id,
-        'matrix': <double>[1, 0, 0, 1, 0, 0],
-        'generation': 1,
-      });
-      await _channel.invokeMethod<void>('renderDabs', <String, Object>{
-        'textureId': id,
-        'packet': _oneConfirmedDab(),
+      await engine.renderLiveDabPacket(surface, _oneConfirmedDab());
+      await _channel.invokeMethod<void>('frameAvailable', <String, Object>{
+        'textureId': textureId,
       });
       await tester.pump(const Duration(milliseconds: 16));
       expect(find.byType(Texture), findsOneWidget);
       expect(tester.takeException(), isNull);
 
-      await _channel.invokeMethod<void>('acknowledge', <String, Object>{
-        'textureId': id,
-        'strokeId': '00000000000000000000000000000001',
-        'sequence': 1,
-      });
+      await engine.acknowledgeLiveSurface(surface, BigInt.one, 1);
       await tester.pump(const Duration(milliseconds: 16));
       expect(tester.takeException(), isNull);
     } finally {
-      await _channel.invokeMethod<void>('dispose', <String, Object>{
-        'textureId': id,
-      });
+      await tester.pumpWidget(const SizedBox.shrink());
+      try {
+        await engine.detachLiveSurface(surface);
+      } catch (_) {}
+      try {
+        await engine.disposeLiveSurface(surface);
+      } catch (_) {}
+      if (textureId != null) {
+        try {
+          await _channel.invokeMethod<void>('dispose', <String, Object>{
+            'textureId': textureId,
+          });
+        } catch (_) {}
+      }
+      await engine.close();
     }
 
     await expectLater(
-      _channel.invokeMethod<void>('cancelAll', <String, Object>{
-        'textureId': id,
+      _channel.invokeMethod<void>('frameAvailable', <String, Object>{
+        'textureId': textureId,
       }),
       throwsA(isA<PlatformException>()),
     );

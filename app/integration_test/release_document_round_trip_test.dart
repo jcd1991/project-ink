@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:project_ink/bridge/engine_api.dart';
 import 'package:project_ink/app/project_ink_app.dart';
 import 'package:project_ink/canvas/canvas_screen.dart';
+import 'package:project_ink/canvas/live_preview_controller.dart';
 import 'package:project_ink/comics/comic_workspace.dart';
 import 'package:project_ink/documents/document_picker.dart';
 import 'package:project_ink/tools/brush_library.dart' show BrushCurvePointView;
@@ -17,11 +19,19 @@ void main() {
   testWidgets('Rust bridge persists a representative layer workflow on disk', (
     tester,
   ) async {
-    final temporary = await Directory.systemTemp.createTemp(
+    final temporary = await _createAlphaTemporaryDirectory(
       'project-ink-layer-alpha-',
     );
+    const preserveFixtures = bool.fromEnvironment(
+      'PROJECT_INK_PRESERVE_ALPHA_FIXTURES',
+    );
     addTearDown(() async {
-      if (await temporary.exists()) await temporary.delete(recursive: true);
+      if (!await temporary.exists()) return;
+      if (preserveFixtures) {
+        debugPrint('Preserved alpha layer fixture: ${temporary.path}');
+      } else {
+        await temporary.delete(recursive: true);
+      }
     });
     final engine = await FrbEngineApi.create(
       widthPx: 512,
@@ -41,6 +51,7 @@ void main() {
       await engine.setLayersVisibility(layerIds: [layerId], visible: false);
       final projectPath = '${temporary.path}/layers.inkproj';
       await engine.saveAs(projectPath);
+      debugPrint('Alpha layer project saved at: $projectPath');
       await engine.close();
       reopened = await FrbEngineApi.open(projectPath);
 
@@ -48,6 +59,33 @@ void main() {
       final persistedLayer = layers.singleWhere((layer) => layer.id == layerId);
       expect(persistedLayer.name, 'Alpha Ink Layer');
       expect(persistedLayer.visible, isFalse);
+      await reopened.setLayersVisibility(layerIds: [layerId], visible: true);
+      await reopened.undo();
+      expect(
+        (await reopened.layerSummaries())
+            .singleWhere((layer) => layer.id == layerId)
+            .visible,
+        isFalse,
+        reason: 'Undo restores the saved hidden state',
+      );
+      await reopened.redo();
+      expect(
+        (await reopened.layerSummaries())
+            .singleWhere((layer) => layer.id == layerId)
+            .visible,
+        isTrue,
+        reason: 'Redo restores the visibility edit',
+      );
+      await reopened.saveAs(projectPath);
+      await reopened.close();
+      reopened = await FrbEngineApi.open(projectPath);
+      expect(
+        (await reopened.layerSummaries())
+            .singleWhere((layer) => layer.id == layerId)
+            .visible,
+        isTrue,
+        reason: 'the redone layer edit survives another save and reopen',
+      );
       expect(tester.takeException(), isNull);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
@@ -59,7 +97,7 @@ void main() {
   testWidgets(
     'Rust bridge persists edited and re-imported custom brush settings',
     (tester) async {
-      final temporary = await Directory.systemTemp.createTemp(
+      final temporary = await _createAlphaTemporaryDirectory(
         'project-ink-brush-alpha-',
       );
       addTearDown(() async {
@@ -124,10 +162,60 @@ void main() {
     },
   );
 
+  testWidgets('failed disk-backed brush import preserves source and document', (
+    tester,
+  ) async {
+    final temporary = await _createAlphaTemporaryDirectory(
+      'project-ink-failed-brush-import-',
+    );
+    addTearDown(() async {
+      if (await temporary.exists()) await temporary.delete(recursive: true);
+    });
+    final source = File('${temporary.path}/damaged.inkbrush');
+    const sourceBytes = <int>[
+      80,
+      75,
+      3,
+      4,
+      110,
+      111,
+      116,
+      45,
+      97,
+      45,
+      122,
+      105,
+      112,
+    ];
+    await source.writeAsBytes(sourceBytes);
+    final engine = await FrbEngineApi.create(
+      widthPx: 512,
+      heightPx: 512,
+      dpi: 144,
+    );
+    try {
+      final revisionBefore = engine.revision;
+      final brushIdsBefore =
+          (await engine.builtinBrushes()).map((brush) => brush.id).toSet();
+      await expectLater(engine.importBrush(source.path), throwsA(anything));
+      expect(await source.readAsBytes(), sourceBytes);
+      expect(engine.revision, revisionBefore);
+      expect(
+        (await engine.builtinBrushes()).map((brush) => brush.id).toSet(),
+        brushIdsBefore,
+        reason: 'a failed import does not install a partial brush',
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await engine.close();
+    }
+  });
+
   testWidgets(
     'Rust comic workflow saves, reopens, and exports multiple pages',
     (tester) async {
-      final temporary = await Directory.systemTemp.createTemp(
+      final temporary = await _createAlphaTemporaryDirectory(
         'project-ink-comic-alpha-',
       );
       addTearDown(() async {
@@ -136,10 +224,21 @@ void main() {
       final comicPath = '${temporary.path}/alpha-comic.inkproj';
       final exportPath = '${temporary.path}/exported-pages';
       await Directory(exportPath).create();
+      final bridgeBootstrap = await FrbEngineApi.create(
+        widthPx: 64,
+        heightPx: 64,
+        dpi: 144,
+      );
+      await bridgeBootstrap.close();
       final comic = ComicWorkspaceController();
       final reopenedComic = ComicWorkspaceController();
       try {
         await comic.createTemplate(1);
+        expect(
+          comic.snapshot,
+          isNotNull,
+          reason: 'comic template creation failed: ${comic.error}',
+        );
         await comic.addPanel();
         await comic.addBalloon();
         final balloon = comic.snapshot!.pages.first.balloons.first;
@@ -180,7 +279,7 @@ void main() {
   testWidgets(
     'Rust bridge round-trip preserves pixels and recovery on corrupt Open',
     (tester) async {
-      final temporary = await Directory.systemTemp.createTemp(
+      final temporary = await _createAlphaTemporaryDirectory(
         'project-ink-release-round-trip-',
       );
       addTearDown(() async {
@@ -200,6 +299,7 @@ void main() {
             home: CanvasScreen(
               engine: engine,
               targetPlatform: TargetPlatform.macOS,
+              livePreviewControllerFactory: (_) => _NoopLivePreviewController(),
               comicWorkspaceController: ComicWorkspaceController(),
             ),
           ),
@@ -317,10 +417,14 @@ void main() {
   testWidgets(
     'ProjectInkApp keeps Rust recovery and active engine after corrupt Open',
     (tester) async {
-      final temporary = await Directory.systemTemp.createTemp(
+      final temporary = await _createAlphaTemporaryDirectory(
         'project-ink-app-recovery-',
       );
       final comicWorkspace = ComicWorkspaceController();
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       final recoveryPath = '${temporary.path}/recovery.inkproj';
       final corruptPath = '${temporary.path}/corrupt.inkproj';
       final blockedParent = File('${temporary.path}/not-a-directory');
@@ -340,6 +444,7 @@ void main() {
             autosavePath: recoveryPath,
             documentPicker: _FailingSavePicker(failedSavePath),
             targetPlatformOverride: TargetPlatform.macOS,
+            livePreviewControllerFactory: (_) => _NoopLivePreviewController(),
             comicWorkspaceController: comicWorkspace,
           ),
         );
@@ -353,7 +458,14 @@ void main() {
         await autosave.flush();
         expect(await Directory(recoveryPath).exists(), isTrue);
 
-        await tester.tap(find.byTooltip('Save project'));
+        final saveCommand = find.byTooltip('Save project');
+        if (saveCommand.evaluate().isNotEmpty) {
+          await tester.tap(saveCommand);
+        } else {
+          await tester.tap(find.byTooltip('More commands'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Save project'));
+        }
         await tester.pumpAndSettle();
         final afterFailedSave = tester.widget<CanvasScreen>(
           find.byType(CanvasScreen),
@@ -415,6 +527,101 @@ void main() {
       }
     },
   );
+
+  testWidgets('failed disk-backed recovery write keeps dirty Rust document', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final temporary = await _createAlphaTemporaryDirectory(
+      'project-ink-failed-recovery-write-',
+    );
+    final blocker = File('${temporary.path}/not-a-directory');
+    const blockerBytes = 'preserve recovery destination blocker';
+    await blocker.writeAsString(blockerBytes);
+    final engine = await FrbEngineApi.create(
+      widthPx: 512,
+      heightPx: 512,
+      dpi: 144,
+    );
+    final comicWorkspace = ComicWorkspaceController();
+    try {
+      await engine.addLayer(kind: 'Raster');
+      await tester.pumpWidget(
+        ProjectInkApp(
+          engineOverride: engine,
+          autosavePath: '${blocker.path}/recovery.inkproj',
+          targetPlatformOverride: TargetPlatform.macOS,
+          livePreviewControllerFactory: (_) => _NoopLivePreviewController(),
+          comicWorkspaceController: comicWorkspace,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final canvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
+      canvas.autosave!.markDirty();
+      await expectLater(canvas.autosave!.flush(), throwsA(anything));
+      final currentCanvas = tester.widget<CanvasScreen>(
+        find.byType(CanvasScreen),
+      );
+
+      expect(currentCanvas.engine, same(engine));
+      expect(currentCanvas.autosaveState?.hasUnsavedChanges, isTrue);
+      expect(await blocker.readAsString(), blockerBytes);
+      expect(
+        await Directory('${blocker.path}/recovery.inkproj').exists(),
+        isFalse,
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await engine.close();
+      if (await temporary.exists()) await temporary.delete(recursive: true);
+    }
+  });
+}
+
+class _NoopLivePreviewController implements LivePreviewController {
+  final ValueNotifier<int?> _textureId = ValueNotifier<int?>(null);
+  final ValueNotifier<bool> _gpuFrameReady = ValueNotifier<bool>(false);
+
+  @override
+  ValueListenable<int?> get textureId => _textureId;
+
+  @override
+  ValueListenable<bool> get gpuFrameReady => _gpuFrameReady;
+
+  @override
+  void markInputPending({bool strokeStart = false}) {}
+
+  @override
+  void synchronizeViewport({
+    required Size viewportSize,
+    required double devicePixelRatio,
+    required Offset pan,
+    required double scale,
+    required double rotation,
+    required bool mirrored,
+    required int documentWidth,
+    required int documentHeight,
+  }) {}
+
+  @override
+  void pump() {}
+
+  @override
+  Future<void> acknowledge(StrokeAcknowledgement acknowledgement) async {}
+
+  @override
+  Future<void> cancelAllStrokes() async {}
+
+  @override
+  Future<void> dispose() async {
+    _textureId.dispose();
+    _gpuFrameReady.dispose();
+  }
 }
 
 int _fnv1a32(List<int> bytes) {
@@ -423,6 +630,16 @@ int _fnv1a32(List<int> bytes) {
     hash = ((hash ^ byte) * 0x01000193) & 0xffffffff;
   }
   return hash;
+}
+
+Future<Directory> _createAlphaTemporaryDirectory(String prefix) async {
+  const configuredRoot = String.fromEnvironment(
+    'PROJECT_INK_TEST_DOCUMENTS_PATH',
+  );
+  if (configuredRoot.isEmpty) return Directory.systemTemp.createTemp(prefix);
+  final root = Directory(configuredRoot);
+  await root.create(recursive: true);
+  return root.createTemp(prefix);
 }
 
 class _FailingSavePicker implements DocumentPicker {
