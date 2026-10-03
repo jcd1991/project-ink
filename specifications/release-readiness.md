@@ -606,10 +606,20 @@ evidence remain separate hardware gates.
   testRedCloseCancelKeepsDirtyNamedProjectOpen` reproduced the same diagnosed
   permission failure in five seconds and retained
   `NativeDocumentSafety-testRedCloseCancelKeepsDirtyNamedProjectOpen-20261003-165216-91732.xcresult`.
-  A manual app launch exposes the canvas to desktop accessibility. The manual
-  matrix now covers all six Save/Discard/Cancel outcomes, but the automated
-  XCUITest matrix remains unverified. Resolve Xcode's macOS UI
-  automation/accessibility access before claiming automated acceptance.
+  A manual app launch exposes the canvas to desktop accessibility. After
+  enabling Accessibility for both Xcode.app and Xcode Helper.app from the
+  active Xcode 27 installation, then restarting Xcode, the focused test still
+  failed. Running it from Xcode's GUI produced the same result: XCTest reports
+  the Project Ink application/window as disabled and sees only native window
+  chrome, with no Flutter canvas node. The app itself is visible in the test
+  recording. This points to a Flutter macOS accessibility-tree problem rather
+  than an ungranted Xcode permission; a similar childless FlutterView group is
+  reported in upstream issue
+  https://github.com/flutter/flutter/issues/189683, though that report used a
+  different Flutter/macOS combination and does not prove the same root cause.
+  The manual matrix covers all six Save/Discard/Cancel outcomes. Keep the
+  automated XCUITest matrix marked unverified until Flutter exposes the target
+  semantics to XCTest or a reliable native test-driver workaround is in place.
 - Real-app macOS manual safety follow-up on the built debug app: the native
   accessibility tree exposed `Drawing canvas`, and a saved stroke changed the
   package including tile files. Cmd-Q Cancel and red-close Cancel kept the
@@ -672,3 +682,13 @@ evidence remain separate hardware gates.
   registry retains one surface at most and the Dart controller falls back to
   CPU preview. Result log:
   `app/build/macos-alpha-checks/macos_native_live_texture.log`.
+- iPad preflight recheck on 2026-10-03: the physical iPad Pro 11-inch (3rd
+  generation, iPadOS 27.0) is connected and visible to both Flutter and
+  `devicectl`; the Acceptance scheme resolves with Flutter 3.47.5 and Xcode
+  27.0. The previously approved inactive macOS build products were removed
+  after confirming no process held them. The runner now reports 9.5 GiB free,
+  still below its 18 GiB device-run threshold, so no iPad build or install was
+  started. The existing signing preflight found no provisioning profile for
+  this iPad's UDID; if signing requires device registration, obtain explicit
+  approval before allowing Xcode to register it. Pencil, latency, memory,
+  recovery, offline, and physical document acceptance remain open.
