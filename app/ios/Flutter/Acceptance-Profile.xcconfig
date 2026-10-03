@@ -1,0 +1,4 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.profile-acceptance.xcconfig"
+#include "Generated.xcconfig"
+PRODUCT_BUNDLE_IDENTIFIER = org.projectink.studio.acceptance
+PROJECT_INK_DISPLAY_NAME = Project Ink Acceptance

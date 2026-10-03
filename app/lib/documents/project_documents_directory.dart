@@ -10,8 +10,16 @@ import 'package:path_provider/path_provider.dart';
 /// recovery and diagnostic files during desktop acceptance. Release builds
 /// always use the platform documents directory.
 Future<Directory> projectDocumentsDirectory() async {
-  const testPath = String.fromEnvironment('PROJECT_INK_TEST_DOCUMENTS_PATH');
-  final normalizedTestPath = testPath.trim();
+  const compileTimeTestPath = String.fromEnvironment(
+    'PROJECT_INK_TEST_DOCUMENTS_PATH',
+  );
+  final runtimeTestPath =
+      kDebugMode ? Platform.environment['PROJECT_INK_TEST_DOCUMENTS_PATH'] : null;
+  final normalizedTestPath =
+      (runtimeTestPath?.trim().isNotEmpty == true
+              ? runtimeTestPath!
+              : compileTimeTestPath)
+          .trim();
   if (kDebugMode && normalizedTestPath.isNotEmpty) {
     if (!path.isAbsolute(normalizedTestPath)) {
       throw ArgumentError.value(

@@ -65,6 +65,17 @@ The production entry point has an opt-in convenience path for device runs:
 timestamped JSONL file under the app Documents `phase1-traces/` directory.
 Normal builds keep this disabled and do not create trace files.
 
+For repeatable local iOS acceptance, use
+specifications/ios-acceptance.md. The Acceptance Xcode scheme uses its own
+bundle identifier and app container. Runner logs, traces, and XCTest results
+use a local per-run folder; Flutter iOS build products use app/build/ios.
+From the repository root, run app/tool/run_ios_acceptance.sh with
+--preflight, --simulator, --device DEVICE_UDID, --pencil DEVICE_UDID, or
+--full DEVICE_UDID. The full run pauses for human Apple Pencil steps and keeps
+traces and artwork on the Mac. Simulated or injected stylus packets verify the
+adapter/rendering path; only physical Pencil input completes the hardware
+acceptance checks.
+
 For a repeatable physical-iPad brush rendering check, pass the Procreate and
 Clip Studio brush fixtures to `tool/run_brush_device_gallery.sh` from `app/`:
 

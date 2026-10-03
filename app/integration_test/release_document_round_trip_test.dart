@@ -467,6 +467,7 @@ void main() {
           await tester.tap(find.text('Save project'));
         }
         await tester.pumpAndSettle();
+        await tester.pumpAndSettle();
         final afterFailedSave = tester.widget<CanvasScreen>(
           find.byType(CanvasScreen),
         );
@@ -526,6 +527,9 @@ void main() {
         if (await temporary.exists()) await temporary.delete(recursive: true);
       }
     },
+    // The fixture forces desktop workspace behavior; iPad app-level recovery
+    // remains a separate physical acceptance check.
+    skip: Platform.isIOS,
   );
 
   testWidgets('failed disk-backed recovery write keeps dirty Rust document', (

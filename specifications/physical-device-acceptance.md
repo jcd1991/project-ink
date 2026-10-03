@@ -1,5 +1,9 @@
 # Phase 5 physical-device acceptance
 
+For local iOS automation plus the guided physical Pencil flow, use
+specifications/ios-acceptance.md. The Acceptance scheme has a separate bundle
+identifier and app data container; disposable files belong in that app.
+
 This runbook validates the parts that simulator and host builds cannot prove:
 stylus delivery, coalesced/history samples, visible-update latency, and process
 RSS. It is intentionally deferred until Phase 5, after the implementation is
