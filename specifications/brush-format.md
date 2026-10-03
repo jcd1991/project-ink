@@ -491,7 +491,20 @@ outside the active layer or selection.
 ## Built-in brush library
 
 Phase 2 ships a deliberately small, high-quality library rather than hundreds
-of near-duplicates. Every built-in has a golden stroke fixture and a clear use.
+of near-duplicates. Factory brush identity is independent of document-local
+custom IDs: the original 12 brush IDs remain stable, and additional starter
+brushes use the reserved ID range beginning at `4_000_000_000_000_001` so
+projects created by earlier versions cannot mistake a saved custom brush for
+a new factory preset. The list currently contains 20 tuned originals:
+
+- Technical Pen, HB Sketch Pencil, Opaque Round, Soft Airbrush, Marker, G-Pen,
+  Dry Gouache, Digital Watercolor Wash, Watercolor Blender, Ink Spatter,
+  Ribbon Chain, and Acrylic Rake;
+- Soft Graphite, Charcoal, Brush Pen, Dry Ink, Flat Paint, Soft Blender,
+  Hard Eraser, and Soft Eraser.
+
+Every built-in has a clear use and remains subject to golden-stroke and device
+review as its settings evolve.
 
 ### Sketch
 
@@ -639,9 +652,15 @@ The UI has compact and advanced views.
 Compact view:
 
 - size, opacity, flow, color, stabilization, and favorite;
-- recent brushes and category/tag search;
+- recent brushes, category/tag search, and device-local user brush sets;
 - duplicate, reset, export, and delete-user-copy actions;
 - live pressure-aware scratch pad.
+
+User brush sets are local library metadata, separate from artwork state. They
+support create, rename, delete, membership changes, and filtering. Their
+membership key must identify the same brush definition across document
+libraries; a document-local numeric ID alone is not a durable cross-artwork
+identity. Deleting a set never deletes its brushes.
 
 Advanced view groups settings as:
 
@@ -673,6 +692,16 @@ Rust remains authoritative for:
 - all dynamic evaluation, dab/particle generation, paint state, pixels, and
   deterministic previews;
 - import conversion and compatibility reports.
+
+Brush thumbnails and editor scratchpad strokes use the bounded Rust preview
+renderer. The scratchpad sends normalized stylus points to a disposable render
+request; it must not advance the document revision, write document tiles, or
+add history. Preview requests are limited to 256×256 pixels and 1,024 points.
+The document-backed preview path uses the production brush-dab rasterizer and
+exports straight-alpha RGBA pixels; deterministic tests compare its output to
+the committed raster path for identical preset and pointer samples.
+The UI may debounce requests while the pointer is moving, but must never await
+preview work from the pointer callback.
 
 Flutter owns:
 

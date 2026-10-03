@@ -200,13 +200,15 @@ An experimental `.sut` or `.tos` decoder may be added only after:
 - proof that the decoder does not bypass encryption, licensing, or marketplace controls;
 - UI language that distinguishes conversion from exact compatibility.
 
-Project Ink must never redistribute proprietary marketplace brush resources without permission.
+For `.sut`, Project Ink may reuse a referenced ordinary PNG material thumbnail as a low-resolution guided tip or texture when the SQLite reference and TAR member can be matched without decoding proprietary payloads. It must not decrypt, decode, or bypass Clip Studio's opaque C2F material format. A thumbnail is an approximation, not the source material. Extracted user-provided assets stay inside that user's document/library; Project Ink must never redistribute proprietary marketplace brush resources without permission.
 
 ## Procreate `.brush`, `.brushset`, and `.brushlibrary`
 
 Procreate's Brush Studio documents the user-facing behavior categories, including stroke path, stabilization, taper, shape, grain, rendering, wet mix, color dynamics, Apple Pencil response, and dual brushes. Those categories are valuable mapping guidance, but they do not make the files a stable public interchange format.
 
-Phase 2 uses the same guided recreation policy as Clip Studio. Imported, user-owned tip and grain images can be used to create a Project Ink brush, but the result is marked recreated.
+Phase 2 uses guided recreation rather than source-setting conversion. For a user-selected `.brush` archive, the importer may reuse ordinary `Shape.png` and `Grain.png` members after bounded ZIP and image validation. It normalizes monochrome shape luminance into tip coverage and applies Project Ink grain defaults. Brush Studio settings remain uninterpreted, and the result is marked recreated.
+
+When a guided report includes supported image resources, the report offers an explicit **Create from extracted images** action. This is a user-confirmed creation of a new Project Ink brush, not automatic conversion or installation. The report identifies source settings and rendering behavior that were not carried across.
 
 An experimental decoder has the same prerequisites as the Clip Studio decoder. It must additionally handle unknown keyed-archive classes as inert data, never instantiate source-named runtime classes, and enforce object-graph depth and object-count limits.
 

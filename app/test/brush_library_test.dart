@@ -1,10 +1,30 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:project_ink/design_system/ink_components.dart';
+import 'package:project_ink/bridge/engine_api/in_memory_engine_api.dart';
 import 'package:project_ink/tools/brush_library.dart';
 import 'package:project_ink/tools/brush_library_panel.dart';
 
 void main() {
+  test('selection requested before projection is applied when it arrives', () {
+    final library = BrushLibraryModel(const <BrushPresetView>[]);
+    library.selectWhenAvailable(13);
+
+    library.upsert(
+      const BrushPresetView(
+        id: 13,
+        name: 'Imported brush',
+        family: BrushFamily.ink,
+      ),
+    );
+
+    expect(library.selected?.id, 13);
+  });
+
+  TestWidgetsFlutterBinding.ensureInitialized();
+  SharedPreferences.setMockInitialValues(<String, Object>{});
   test('brush library supports favorites and bounded configurable drafts', () {
     final library = BrushLibraryModel(<BrushPresetView>[
       const BrushPresetView(id: 7, name: 'G-Pen', family: BrushFamily.ink),
@@ -89,6 +109,99 @@ void main() {
     expect(notifications, 3);
   });
 
+  test('family filters and recents compose with search and favorites', () {
+    final library = BrushLibraryModel(<BrushPresetView>[
+      const BrushPresetView(
+        id: 1,
+        name: 'G-Pen',
+        family: BrushFamily.ink,
+        isBuiltin: true,
+      ),
+      const BrushPresetView(
+        id: 2,
+        name: 'Graphite',
+        family: BrushFamily.sketch,
+      ),
+    ]);
+
+    library.select(2);
+    library.setBrowserFilter(BrushBrowserFilter.recent);
+    expect(library.filteredPresets.map((preset) => preset.id), <int>[2]);
+    library.setFamilyFilter(BrushFamily.ink);
+    expect(library.filteredPresets, isEmpty);
+    library.setFamilyFilter(null);
+    library.setSearchQuery('graph');
+    expect(library.filteredPresets.map((preset) => preset.id), <int>[2]);
+  });
+
+  test(
+    'favorites and recent brushes restore across library instances',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final presets = <BrushPresetView>[
+        const BrushPresetView(
+          id: 1,
+          name: 'Technical Pen',
+          family: BrushFamily.ink,
+          isBuiltin: true,
+        ),
+      ];
+      final first = BrushLibraryModel(presets)..select(1);
+      first.toggleFavorite(1);
+      await first.persistLocalState();
+
+      final reopened = BrushLibraryModel(presets);
+      await reopened.restoreLocalState();
+      reopened.setBrowserFilter(BrushBrowserFilter.recent);
+      expect(reopened.filteredPresets.map((preset) => preset.id), <int>[1]);
+      expect(reopened.favorites.single.id, 1);
+    },
+  );
+
+  test('device-local brush sets filter and restore their membership', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final presets = <BrushPresetView>[
+      const BrushPresetView(
+        id: 1,
+        name: 'Technical Pen',
+        family: BrushFamily.ink,
+      ),
+      const BrushPresetView(
+        id: 2,
+        name: 'Graphite',
+        family: BrushFamily.sketch,
+      ),
+    ];
+    final first = BrushLibraryModel(presets)..select(1);
+    final setId = first.createSet('Line work');
+    first.addSelectedToSet(setId);
+    first.toggleFavorite(1);
+    first.updateDraft(first.selected!.copyWith(size: 18));
+    await first.persistLocalState();
+
+    // A copy stored in another artwork may receive a different local ID.
+    final reopened = BrushLibraryModel(<BrushPresetView>[
+      const BrushPresetView(
+        id: 99,
+        name: 'Technical Pen',
+        family: BrushFamily.ink,
+        size: 18,
+      ),
+      const BrushPresetView(
+        id: 100,
+        name: 'Graphite',
+        family: BrushFamily.sketch,
+      ),
+    ]);
+    await reopened.restoreLocalState();
+    reopened.selectSet(setId);
+    expect(reopened.sets.single.name, 'Line work');
+    expect(reopened.filteredPresets.map((preset) => preset.id), <int>[99]);
+    expect(reopened.favorites.single.id, 99);
+    reopened.setBrowserFilter(BrushBrowserFilter.recent);
+    expect(reopened.filteredPresets.map((preset) => preset.id), <int>[99]);
+  });
+
   testWidgets('brush favorites can be marked and filtered in the panel', (
     tester,
   ) async {
@@ -122,12 +235,108 @@ void main() {
     expect(library.filteredPresets.map((preset) => preset.id), <int>[1]);
   });
 
+  testWidgets('brush thumbnail asks the engine API for preview pixels', (
+    tester,
+  ) async {
+    final engine = InMemoryEngineApi();
+    var previewCalls = 0;
+    final library = BrushLibraryModel(<BrushPresetView>[
+      const BrushPresetView(
+        id: 1,
+        name: 'Technical Pen',
+        family: BrushFamily.ink,
+        isBuiltin: true,
+      ),
+    ]);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushLibraryPanel(
+            library: library,
+            renderPreview: (id, width, height, points) async {
+              previewCalls++;
+              return engine.renderBrushPreview(
+                brushId: id,
+                width: width,
+                height: height,
+                points: points,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(previewCalls, 1);
+    expect(find.byType(Image), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scratchpad forwards stylus samples to the preview renderer', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = InMemoryEngineApi();
+    var scratchSamples = 0;
+    final library = BrushLibraryModel(<BrushPresetView>[
+      const BrushPresetView(id: 13, name: 'Ink Copy', family: BrushFamily.ink),
+    ])..select(13);
+    library.toggleEditor();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushLibraryPanel(
+            library: library,
+            renderPreview: (id, width, height, points) {
+              if (height == 120) scratchSamples = points.length;
+              return engine.renderBrushPreview(
+                brushId: id,
+                width: width,
+                height: height,
+                points: points,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    final pad = find.bySemanticsLabel('Brush test pad');
+    expect(pad, findsOneWidget);
+    // The semantics node marks the pad's actionable region.
+    final center = tester.getRect(pad).center;
+    final gesture = await tester.startGesture(
+      center.translate(-24, 0),
+      kind: PointerDeviceKind.stylus,
+    );
+    await gesture.moveTo(center, timeStamp: const Duration(milliseconds: 20));
+    await gesture.moveTo(
+      center.translate(24, 4),
+      timeStamp: const Duration(milliseconds: 40),
+    );
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(scratchSamples, greaterThanOrEqualTo(3));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('custom brush rename action is only enabled for user brushes', (
     tester,
   ) async {
     var renameCount = 0;
     final library = BrushLibraryModel(<BrushPresetView>[
-      const BrushPresetView(id: 1, name: 'G-Pen', family: BrushFamily.ink),
+      const BrushPresetView(
+        id: 1,
+        name: 'G-Pen',
+        family: BrushFamily.ink,
+        isBuiltin: true,
+      ),
       const BrushPresetView(
         id: 13,
         name: 'G-Pen Copy',
@@ -145,12 +354,30 @@ void main() {
         ),
       ),
     );
-    final renameButton = find.byKey(const ValueKey('rename-brush'));
-    expect(tester.widget<OutlinedButton>(renameButton).onPressed, isNull);
+    await tester.tap(find.byTooltip('Brush actions'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<PopupMenuItem<String>>(
+            find.byType(PopupMenuItem<String>).last,
+          )
+          .enabled,
+      isFalse,
+    );
+    await tester.tapAt(const Offset(10, 10));
     library.select(13);
     await tester.pump();
-    expect(tester.widget<OutlinedButton>(renameButton).onPressed, isNotNull);
-    await tester.tap(renameButton);
+    await tester.tap(find.byTooltip('Brush actions'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<PopupMenuItem<String>>(
+            find.byType(PopupMenuItem<String>).last,
+          )
+          .enabled,
+      isTrue,
+    );
+    await tester.tap(find.text('Rename brush').last);
     expect(renameCount, 1);
   });
 
@@ -159,6 +386,10 @@ void main() {
   ) async {
     var commitCount = 0;
     var cancelCount = 0;
+    tester.view.physicalSize = const Size(1000, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     final library = BrushLibraryModel(<BrushPresetView>[
       const BrushPresetView(
         id: 13,
@@ -182,7 +413,7 @@ void main() {
 
     final saveButton = find.byKey(const ValueKey('commit-brush-edit'));
     final cancelButton = find.byKey(const ValueKey('cancel-brush-edit'));
-    expect(tester.widget<OutlinedButton>(saveButton).onPressed, isNotNull);
+    expect(tester.widget<FilledButton>(saveButton).onPressed, isNotNull);
     expect(tester.widget<OutlinedButton>(cancelButton).onPressed, isNotNull);
     await tester.tap(saveButton);
     await tester.tap(cancelButton);
@@ -196,7 +427,43 @@ void main() {
         ),
       ),
     );
-    expect(tester.widget<OutlinedButton>(saveButton).onPressed, isNull);
+    expect(saveButton, findsNothing);
+  });
+
+  testWidgets('advanced custom brush size stays inside the draft boundary', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var onSizeChangeEndCalls = 0;
+    var onChangedCalls = 0;
+    final library = BrushLibraryModel(<BrushPresetView>[
+      const BrushPresetView(id: 13, name: 'Ink Copy', family: BrushFamily.ink),
+    ])..select(13);
+    final originalSize = library.selected!.size;
+    library.toggleEditor();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushLibraryPanel(
+            library: library,
+            onChanged: (_) => onChangedCalls++,
+            onSizeChangeEnd: (_) => onSizeChangeEndCalls++,
+          ),
+        ),
+      ),
+    );
+    final sizeSlider = find.byType(Slider).first;
+    await tester.ensureVisible(sizeSlider);
+    await tester.drag(sizeSlider, const Offset(48, 0));
+    await tester.pumpAndSettle();
+
+    expect(onChangedCalls, greaterThan(0));
+    expect(onSizeChangeEndCalls, 0);
+    expect(library.selected!.size, isNot(originalSize));
   });
 
   testWidgets('brush rename dialog returns edited text and disposes safely', (
@@ -252,6 +519,8 @@ void main() {
         textureScale: 64,
       ),
     ])..select(99);
+    library.toggleEditor();
+    library.selectEditorSection(BrushEditorSection.tip);
 
     await tester.pumpWidget(
       MaterialApp(home: Scaffold(body: BrushLibraryPanel(library: library))),
@@ -314,6 +583,8 @@ void main() {
         textureScale: 64,
       ),
     ])..select(99);
+    library.toggleEditor();
+    library.selectEditorSection(BrushEditorSection.tip);
 
     await tester.pumpWidget(
       MaterialApp(home: Scaffold(body: BrushLibraryPanel(library: library))),
@@ -329,6 +600,9 @@ void main() {
     // match the label within that composed string.
     expect(find.bySemanticsLabel(RegExp('Texture scale')), findsOneWidget);
     expect(find.bySemanticsLabel(RegExp('Tip hardness')), findsOneWidget);
+    await tester.ensureVisible(find.text('Paint'));
+    await tester.tap(find.text('Paint'));
+    await tester.pumpAndSettle();
     expect(find.bySemanticsLabel(RegExp('Wetness')), findsOneWidget);
     semantics.dispose();
   });

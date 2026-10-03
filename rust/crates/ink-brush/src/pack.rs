@@ -22,6 +22,9 @@ const MAX_INSPECTION_BYTES: usize = 64 * 1024;
 const MAX_COMPRESSION_RATIO: u64 = 100;
 const MAX_RESOURCE_BYTES: usize = 96 * 1024 * 1024;
 const MAX_RESOURCE_LIBRARY_BYTES: u64 = 256 * 1024 * 1024;
+// Multi-brush reports own copies of referenced resources. Keep their total
+// below one library's bound so shared images cannot amplify memory per brush.
+const MAX_PACK_REPORT_RESOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RESOURCE_DIMENSION: u32 = 16_384;
 
 /// External brush formats known to the inspector.
@@ -189,6 +192,7 @@ pub enum BrushPackError {
     Json(serde_json::Error),
     Cbor(ciborium::de::Error<std::io::Error>),
     CborEncode(ciborium::ser::Error<std::io::Error>),
+    Sqlite(rusqlite::Error),
     Validation(BrushValidationError),
     UnsafeArchive(&'static str),
     InvalidManifest(String),
@@ -203,6 +207,7 @@ impl fmt::Display for BrushPackError {
             Self::Json(error) => error.fmt(f),
             Self::Cbor(error) => error.fmt(f),
             Self::CborEncode(error) => error.fmt(f),
+            Self::Sqlite(error) => error.fmt(f),
             Self::Validation(error) => error.fmt(f),
             Self::UnsafeArchive(message) => write!(f, "unsafe brush archive: {message}"),
             Self::InvalidManifest(message) => write!(f, "invalid brush manifest: {message}"),
@@ -225,6 +230,11 @@ impl From<ZipError> for BrushPackError {
 impl From<serde_json::Error> for BrushPackError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
+    }
+}
+impl From<rusqlite::Error> for BrushPackError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
     }
 }
 impl From<BrushValidationError> for BrushPackError {
@@ -462,6 +472,7 @@ pub fn import_inkbrushpack(path: &Path) -> Result<Vec<BrushImportReport>, BrushP
     }
     let mut reports = Vec::with_capacity(manifest.brushes.len());
     let mut indexes = HashSet::with_capacity(manifest.brushes.len());
+    let mut report_resource_bytes = 0_u64;
     for member in &manifest.brushes {
         if !indexes.insert(member.index) {
             return Err(BrushPackError::InvalidManifest(
@@ -481,9 +492,21 @@ pub fn import_inkbrushpack(path: &Path) -> Result<Vec<BrushImportReport>, BrushP
                 "pack member identity differs from its manifest".into(),
             ));
         }
-        let member_resources = resource_hashes_for_preset(&preset)
+        let member_resource_refs = resource_hashes_for_preset(&preset)
             .into_iter()
-            .filter_map(|hash| resources.get(&hash).cloned())
+            .filter_map(|hash| resources.get(&hash))
+            .collect::<Vec<_>>();
+        let member_resource_bytes = member_resource_refs
+            .iter()
+            .try_fold(0_u64, |total, resource| total.checked_add(resource.bytes))
+            .ok_or(BrushPackError::UnsafeArchive(
+                "multi-brush member resource size overflows",
+            ))?;
+        report_resource_bytes =
+            add_pack_report_resource_bytes(report_resource_bytes, member_resource_bytes)?;
+        let member_resources = member_resource_refs
+            .into_iter()
+            .cloned()
             .collect::<Vec<_>>();
         if let Some(hash) = tip_resource_hash(&preset)
             && !resources.contains_key(&hash)
@@ -751,7 +774,7 @@ fn detect_external_format(path: &Path) -> Result<ExternalBrushFormat, BrushPackE
         ));
     }
     let hint = inspect_external_format(path);
-    let raw = read_bounded_file(path, MAX_INSPECTION_BYTES as u64)?;
+    let raw = read_file_prefix(path, MAX_INSPECTION_BYTES as u64)?;
     if raw.starts_with(b"PK") {
         if let Ok(format) = classify_native_archive(path) {
             return Ok(format);
@@ -759,6 +782,15 @@ fn detect_external_format(path: &Path) -> Result<ExternalBrushFormat, BrushPackE
         if hint == ExternalBrushFormat::KritaBundle {
             validate_zip_file(path)?;
             return Ok(ExternalBrushFormat::KritaBundle);
+        }
+        if matches!(
+            hint,
+            ExternalBrushFormat::ProcreateBrush
+                | ExternalBrushFormat::ProcreateBrushset
+                | ExternalBrushFormat::ProcreateBrushlibrary
+        ) {
+            validate_zip_file(path)?;
+            return Ok(hint);
         }
         return Err(BrushPackError::UnsafeArchive(
             "ZIP brush source has no recognized native manifest",
@@ -909,6 +941,334 @@ pub fn guided_recreation_report(path: &Path) -> Result<BrushImportReport, BrushP
     })
 }
 
+/// Stage the ordinary PNG shape and grain assets in a user-owned Procreate
+/// brush archive. Brush.archive settings remain intentionally uninterpreted.
+fn import_procreate_brush_assets(path: &Path) -> Result<BrushImportReport, BrushPackError> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_ARCHIVE_BYTES {
+        return Err(BrushPackError::UnsafeArchive(
+            "source exceeds import size limit",
+        ));
+    }
+    let source_sha256 = hash_file(path)?;
+    let file = File::open(path)?;
+    let mut archive = ZipArchive::new(file)?;
+    if archive.is_empty() || archive.len() > MAX_ENTRIES {
+        return Err(BrushPackError::UnsafeArchive(
+            "entry count is outside limits",
+        ));
+    }
+    validate_archive_entries(&mut archive, metadata.len())?;
+    let mut resources = Vec::new();
+    for (name, kind) in [("Shape.png", "tip"), ("Grain.png", "grain")] {
+        let candidate = [name.to_owned(), format!("Reset/{name}")]
+            .into_iter()
+            .find(|candidate| archive.file_names().any(|entry| entry == candidate));
+        let Some(candidate) = candidate else { continue };
+        let bytes = read_entry(&mut archive, &candidate, MAX_RESOURCE_BYTES)?;
+        let (width, height) = image_dimensions(&bytes)?;
+        let mut rgba = decode_image_rgba8(&bytes, width, height)?;
+        if kind == "tip" {
+            normalize_monochrome_tip_alpha(&mut rgba);
+        }
+        resources.push(ImportedResource {
+            name: candidate,
+            kind: kind.into(),
+            sha256: sha256(&rgba),
+            bytes: u64::try_from(rgba.len()).unwrap_or(u64::MAX),
+            data: rgba,
+            width,
+            height,
+        });
+    }
+    if resources.is_empty() {
+        return guided_recreation_report(path);
+    }
+    guided_report_from_assets(
+        path,
+        source_sha256,
+        ExternalBrushFormat::ProcreateBrush,
+        resources,
+    )
+}
+
+/// Extract only ordinary PNG thumbnails from Clip Studio's SQLite/TAR wrapper.
+/// The encrypted C2F material payload is never decoded or decrypted.
+fn import_clip_studio_sut_assets(path: &Path) -> Result<BrushImportReport, BrushPackError> {
+    use rusqlite::OpenFlags;
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_ARCHIVE_BYTES {
+        return Err(BrushPackError::UnsafeArchive(
+            "source exceeds import size limit",
+        ));
+    }
+    let source_sha256 = hash_file(path)?;
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let references = sut_image_references(&connection)?;
+    let mut statement =
+        connection.prepare("SELECT OriginalPath, FileData FROM MaterialFile LIMIT 64")?;
+    let materials = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+        ))
+    })?;
+    let mut resources = Vec::new();
+    for material in materials {
+        let (Some(original_path), Some(tar)) = material? else {
+            continue;
+        };
+        if tar.len() > MAX_RESOURCE_BYTES {
+            continue;
+        }
+        let role = sut_material_role(&references, &original_path);
+        let Some(role) = role else { continue };
+        let Some(png) = tar_thumbnail(&tar)? else {
+            continue;
+        };
+        let Ok((width, height)) = image_dimensions(&png) else {
+            continue;
+        };
+        let Ok(mut rgba) = decode_image_rgba8(&png, width, height) else {
+            continue;
+        };
+        if role == "tip" {
+            normalize_monochrome_tip_alpha(&mut rgba);
+        }
+        if role == "grain" && !image_has_texture(&rgba) {
+            continue;
+        }
+        resources.push(ImportedResource {
+            name: format!("Clip Studio {role} thumbnail.png"),
+            kind: role.into(),
+            sha256: sha256(&rgba),
+            bytes: u64::try_from(rgba.len()).unwrap_or(u64::MAX),
+            data: rgba,
+            width,
+            height,
+        });
+        if resources.len() == 2 {
+            break;
+        }
+    }
+    if resources.is_empty() {
+        return guided_recreation_report(path);
+    }
+    guided_report_from_assets(
+        path,
+        source_sha256,
+        ExternalBrushFormat::ClipStudioSut,
+        resources,
+    )
+}
+
+struct SutImageReferences {
+    texture: Option<Vec<u8>>,
+    pattern: Option<Vec<u8>>,
+}
+
+fn sut_image_references(
+    connection: &rusqlite::Connection,
+) -> Result<SutImageReferences, BrushPackError> {
+    use rusqlite::OptionalExtension;
+    let (texture, pattern) = connection
+        .query_row(
+            "SELECT TextureImage, BrushPatternImageArray FROM Variant LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<Vec<u8>>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or((None, None));
+    Ok(SutImageReferences { texture, pattern })
+}
+
+fn sut_material_role(references: &SutImageReferences, original_path: &str) -> Option<&'static str> {
+    let path_utf16: Vec<u8> = original_path
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let matches_reference = |bytes: &[u8]| contains_bytes(bytes, &path_utf16);
+    if references.pattern.as_deref().is_some_and(matches_reference) {
+        Some("tip")
+    } else if references.texture.as_deref().is_some_and(matches_reference) {
+        Some("grain")
+    } else {
+        None
+    }
+}
+
+fn guided_report_from_assets(
+    path: &Path,
+    source_sha256: [u8; 32],
+    source_format: ExternalBrushFormat,
+    resources: Vec<ImportedResource>,
+) -> Result<BrushImportReport, BrushPackError> {
+    let mut preset = crate::builtin_library()
+        .into_iter()
+        .find(|brush| brush.metadata.name == "Opaque Round")
+        .ok_or_else(|| {
+            BrushPackError::InvalidManifest("built-in conversion base is missing".into())
+        })?;
+    preset.id = BrushId::from_u128(u128::from_le_bytes(
+        source_sha256[..16].try_into().expect("hash slice"),
+    ));
+    preset.metadata.name = format!(
+        "Recreated — {}",
+        path.file_stem().and_then(|n| n.to_str()).unwrap_or("brush")
+    );
+    preset.metadata.author = None;
+    preset.metadata.license = Some("source license unknown; user-provided assets only".into());
+    preset.metadata.source_format = Some(format!("{source_format:?}"));
+    preset.metadata.tags = vec!["recreated".into(), "imported-assets".into()];
+    let mut mappings = Vec::new();
+    if let Some(tip) = resources.iter().find(|resource| resource.kind == "tip") {
+        if let crate::TipBehavior::Stamp(value) = &mut preset.tip {
+            value.resource_hash = Some(tip.sha256);
+            value.diameter_px = 32.0;
+        }
+        mappings.push(SettingMapping {
+            source_path: "source.tip-image".into(),
+            source_value: DisplayValue::Text(tip.name.clone()),
+            target_path: "tip.resource_hash".into(),
+            target_value: DisplayValue::Text(hex(&tip.sha256)),
+            quality: MappingQuality::Approximated,
+            note: Some(
+                "source image reused; brush behavior and filtering were not converted".into(),
+            ),
+        });
+    }
+    if let Some(grain) = resources.iter().find(|resource| resource.kind == "grain") {
+        preset.grain = Some(crate::GrainBehavior {
+            resource_hash: grain.sha256,
+            scale: 1.0,
+            depth: 0.35,
+            contrast: 0.35,
+            canvas_space: true,
+        });
+        mappings.push(SettingMapping {
+            source_path: "source.grain-image".into(),
+            source_value: DisplayValue::Text(grain.name.clone()),
+            target_path: "grain.resource_hash".into(),
+            target_value: DisplayValue::Text(hex(&grain.sha256)),
+            quality: MappingQuality::Approximated,
+            note: Some("source grain image reused with Project Ink default grain settings".into()),
+        });
+    }
+    preset.validate()?;
+    let preview = preview_for(&preset)?;
+    let names = resources
+        .iter()
+        .map(|resource| resource.kind.as_str())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    Ok(BrushImportReport {
+        source_format,
+        source_sha256,
+        importer_version: BRUSH_IMPORTER_VERSION.into(),
+        fidelity: FidelityTier::GuidedRecreation,
+        preset: Some(preset),
+        mappings,
+        omitted: vec![OmittedSetting {
+            source_path: "source.brush-settings".into(),
+            reason: "source renderer settings, dynamics, and effects are not converted".into(),
+        }],
+        resources,
+        preview: Some(preview),
+        warnings: vec![ImportWarning {
+            code: "guided-assets-staged".into(),
+            message: format!(
+                "{names} image assets were staged for a new recreated brush; nothing was installed automatically"
+            ),
+        }],
+    })
+}
+
+fn normalize_monochrome_tip_alpha(rgba: &mut [u8]) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let luminance =
+            ((u16::from(pixel[0]) * 54 + u16::from(pixel[1]) * 183 + u16::from(pixel[2]) * 19)
+                / 256) as u8;
+        pixel[3] =
+            u8::try_from(u16::from(pixel[3]) * u16::from(255 - luminance) / 255).unwrap_or(0);
+        pixel[..3].fill(255);
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn tar_thumbnail(tar: &[u8]) -> Result<Option<Vec<u8>>, BrushPackError> {
+    let mut offset = 0usize;
+    while offset.checked_add(512).is_some_and(|end| end <= tar.len()) {
+        let header = &tar[offset..offset + 512];
+        if header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+        let name_end = header[..100]
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(100);
+        let name = std::str::from_utf8(&header[..name_end]).unwrap_or("");
+        let size_end = header[124..136]
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(12);
+        let size_text = std::str::from_utf8(&header[124..124 + size_end])
+            .unwrap_or("")
+            .trim();
+        let size = usize::from_str_radix(size_text.trim_start_matches('0'), 8).unwrap_or(0);
+        let start = offset + 512;
+        let Some(end) = start.checked_add(size) else {
+            break;
+        };
+        if end > tar.len() {
+            return Err(BrushPackError::UnsafeArchive(
+                "truncated material thumbnail archive",
+            ));
+        }
+        if name == "thumbnail/thumbnail.png" && size <= MAX_RESOURCE_BYTES {
+            return Ok(Some(tar[start..end].to_vec()));
+        }
+        let padded = size.checked_add(511).map(|value| value / 512 * 512);
+        let Some(next) = padded.and_then(|value| start.checked_add(value)) else {
+            break;
+        };
+        if next <= offset || next > tar.len() {
+            break;
+        }
+        offset = next;
+    }
+    Ok(None)
+}
+
+fn image_has_texture(rgba: &[u8]) -> bool {
+    let mut min = 255u8;
+    let mut max = 0u8;
+    for pixel in rgba.as_chunks::<4>().0 {
+        let luminance =
+            ((u16::from(pixel[0]) * 54 + u16::from(pixel[1]) * 183 + u16::from(pixel[2]) * 19)
+                / 256) as u8;
+        min = min.min(luminance);
+        max = max.max(luminance);
+        if max.saturating_sub(min) >= 8 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Validate a source enough to display an import choice without installing it.
 pub fn inspect_brush_import(path: &Path) -> Result<BrushImportInspection, BrushPackError> {
     if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
@@ -923,11 +1283,11 @@ pub fn inspect_brush_import(path: &Path) -> Result<BrushImportInspection, BrushP
         ));
     }
     let format = detect_external_format(path)?;
-    let mut file = File::open(path)?;
-    let mut raw = Vec::with_capacity(MAX_INSPECTION_BYTES + 1);
-    std::io::Read::by_ref(&mut file)
-        .take((MAX_INSPECTION_BYTES + 1) as u64)
-        .read_to_end(&mut raw)?;
+    let raw = if format == ExternalBrushFormat::Image {
+        read_bounded_file(path, MAX_ARCHIVE_BYTES)?
+    } else {
+        read_file_prefix(path, MAX_INSPECTION_BYTES as u64)?
+    };
     match format {
         ExternalBrushFormat::InkBrush | ExternalBrushFormat::InkBrushPack
             if raw.len() < 2 || !raw.starts_with(b"PK") =>
@@ -1137,10 +1497,11 @@ pub fn import_mypaint_myb(path: &Path) -> Result<BrushImportReport, BrushPackErr
     if std::fs::metadata(path)?.len() > MAX_PRESET_BYTES as u64 {
         return Err(BrushPackError::UnsafeArchive("MyPaint preset is too large"));
     }
-    let bytes = std::fs::read(path)?;
-    if bytes.len() > MAX_PRESET_BYTES {
-        return Err(BrushPackError::UnsafeArchive("MyPaint preset is too large"));
-    }
+    let bytes = read_bounded_file_with_message(
+        path,
+        MAX_PRESET_BYTES as u64,
+        "MyPaint preset is too large",
+    )?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     let source_sha256 = sha256(&bytes);
     let mut preset = crate::builtin_library()
@@ -1271,6 +1632,8 @@ pub fn import_external(path: &Path) -> Result<BrushImportReport, BrushPackError>
             })
         }
         ExternalBrushFormat::MyPaintMyb => import_mypaint_myb(path),
+        ExternalBrushFormat::ProcreateBrush => import_procreate_brush_assets(path),
+        ExternalBrushFormat::ClipStudioSut => import_clip_studio_sut_assets(path),
         ExternalBrushFormat::Image => import_image_as_brush(path),
         _ => guided_recreation_report(path),
     }
@@ -1293,9 +1656,14 @@ pub fn import_image_as_brush(path: &Path) -> Result<BrushImportReport, BrushPack
             "image exceeds the tip import limit",
         ));
     }
-    let bytes = std::fs::read(path)?;
+    let bytes = read_bounded_file_with_message(
+        path,
+        64 * 1024 * 1024,
+        "image exceeds the tip import limit",
+    )?;
     let (width, height) = image_dimensions(&bytes)?;
-    let decoded = decode_image_rgba8(&bytes, width, height)?;
+    let mut decoded = decode_image_rgba8(&bytes, width, height)?;
+    normalize_monochrome_tip_alpha(&mut decoded);
     let source_sha256 = sha256(&bytes);
     let resource_sha256 = sha256(&decoded);
     let mut preset = crate::builtin_library()
@@ -1433,6 +1801,20 @@ fn resource_hashes_for_preset(preset: &BrushPresetV2) -> Vec<[u8; 32]> {
     hashes
 }
 
+fn add_pack_report_resource_bytes(current: u64, additional: u64) -> Result<u64, BrushPackError> {
+    let total = current
+        .checked_add(additional)
+        .ok_or(BrushPackError::UnsafeArchive(
+            "multi-brush report resource size overflows",
+        ))?;
+    if total > MAX_PACK_REPORT_RESOURCE_BYTES {
+        return Err(BrushPackError::UnsafeArchive(
+            "multi-brush report resources exceed limits",
+        ));
+    }
+    Ok(total)
+}
+
 fn tip_resource_hash(preset: &BrushPresetV2) -> Option<[u8; 32]> {
     match &preset.tip {
         crate::TipBehavior::Stamp(tip) => tip.resource_hash,
@@ -1512,9 +1894,14 @@ fn decode_image_rgba8(
             "decoded image exceeds the resource cache limit",
         ));
     }
-    let reader = image::ImageReader::new(Cursor::new(bytes))
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(expected_width);
+    limits.max_image_height = Some(expected_height);
+    limits.max_alloc = Some(MAX_RESOURCE_BYTES as u64);
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| BrushPackError::UnsafeArchive("image format cannot be identified"))?;
+    reader.limits(limits);
     let image = reader
         .decode()
         .map_err(|_| BrushPackError::UnsafeArchive("image resource cannot be decoded"))?;
@@ -1761,20 +2148,45 @@ fn read_entry<R: Read + Seek>(
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32], BrushPackError> {
-    let mut file = File::open(path)?;
+    hash_file_with_limit(path, MAX_ARCHIVE_BYTES)
+}
+
+fn hash_file_with_limit(path: &Path, limit: u64) -> Result<[u8; 32], BrushPackError> {
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(BrushPackError::UnsafeArchive(
+            "brush source must not be a symlink",
+        ));
+    }
+    let file = File::open(path)?;
+    let mut reader = file.take(limit.saturating_add(1));
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
+    let mut total = 0_u64;
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         hasher.update(&buffer[..read]);
+    }
+    if total > limit {
+        return Err(BrushPackError::UnsafeArchive(
+            "source exceeds import size limit",
+        ));
     }
     Ok(hasher.finalize().into())
 }
 
 fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, BrushPackError> {
+    read_bounded_file_with_message(path, limit, "source exceeds import size limit")
+}
+
+fn read_bounded_file_with_message(
+    path: &Path,
+    limit: u64,
+    limit_message: &'static str,
+) -> Result<Vec<u8>, BrushPackError> {
     if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(BrushPackError::UnsafeArchive(
             "brush source must not be a symlink",
@@ -1784,10 +2196,19 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, BrushPackError>
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
+        return Err(BrushPackError::UnsafeArchive(limit_message));
+    }
+    Ok(bytes)
+}
+
+fn read_file_prefix(path: &Path, limit: u64) -> Result<Vec<u8>, BrushPackError> {
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(BrushPackError::UnsafeArchive(
-            "source exceeds import size limit",
+            "brush source must not be a symlink",
         ));
     }
+    let mut bytes = Vec::new();
+    File::open(path)?.take(limit).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -1817,6 +2238,67 @@ mod tests {
             writer.write_all(bytes).expect("bundle member bytes");
         }
         writer.finish().expect("bundle finish");
+    }
+
+    #[test]
+    fn bounded_import_reader_rejects_bytes_past_its_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "project-ink-bounded-import-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"0123456789").expect("write test source");
+
+        let result = read_bounded_file_with_message(&path, 4, "test import limit");
+
+        assert!(matches!(
+            result,
+            Err(BrushPackError::UnsafeArchive("test import limit"))
+        ));
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn bounded_import_hash_rejects_bytes_past_its_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "project-ink-bounded-hash-{}.bin",
+            std::process::id()
+        ));
+        let source = b"0123456789";
+        std::fs::write(&path, source).expect("write test source");
+
+        let bounded = hash_file_with_limit(&path, 4);
+        assert!(matches!(
+            bounded,
+            Err(BrushPackError::UnsafeArchive(
+                "source exceeds import size limit"
+            ))
+        ));
+        assert_eq!(
+            hash_file_with_limit(&path, source.len() as u64).expect("bounded hash"),
+            sha256(source)
+        );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn multi_brush_report_resource_budget_rejects_clone_amplification() {
+        assert_eq!(
+            add_pack_report_resource_bytes(MAX_PACK_REPORT_RESOURCE_BYTES - 1, 1)
+                .expect("exact budget boundary"),
+            MAX_PACK_REPORT_RESOURCE_BYTES
+        );
+        assert!(matches!(
+            add_pack_report_resource_bytes(MAX_PACK_REPORT_RESOURCE_BYTES, 1),
+            Err(BrushPackError::UnsafeArchive(
+                "multi-brush report resources exceed limits"
+            ))
+        ));
+        assert!(matches!(
+            add_pack_report_resource_bytes(u64::MAX, 1),
+            Err(BrushPackError::UnsafeArchive(
+                "multi-brush report resource size overflows"
+            ))
+        ));
     }
 
     #[test]
@@ -1887,11 +2369,75 @@ mod tests {
     #[test]
     fn external_formats_are_never_mislabeled_as_lossless() {
         let path = std::env::temp_dir().join("source.sut");
-        std::fs::write(&path, b"not decoded").expect("fixture");
+        std::fs::write(&path, vec![b'x'; MAX_INSPECTION_BYTES + 1]).expect("fixture");
+        let inspection = inspect_brush_import(&path).expect("inspection");
+        assert_eq!(inspection.source_format, ExternalBrushFormat::ClipStudioSut);
+        assert_eq!(inspection.fidelity_hint, FidelityTier::GuidedRecreation);
         let report = guided_recreation_report(&path).expect("report");
         assert_eq!(report.fidelity, FidelityTier::GuidedRecreation);
         assert!(report.preset.is_none());
         std::fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn procreate_zip_brush_is_reported_as_guided_recreation() {
+        let path = std::env::temp_dir().join(format!(
+            "project-ink-procreate-brush-{}.brush",
+            std::process::id()
+        ));
+        let file = File::create(&path).expect("fixture file");
+        let mut archive = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        archive.start_file("Brush.archive", options).expect("entry");
+        let source_data: Vec<u8> = (0..=MAX_INSPECTION_BYTES)
+            .map(|index| u8::try_from(index % 251).unwrap_or_default())
+            .collect();
+        archive.write_all(&source_data).expect("brush data");
+        let png = tiny_test_png();
+        archive.start_file("Shape.png", options).expect("entry");
+        archive.write_all(&png).expect("shape data");
+        archive.start_file("Grain.png", options).expect("entry");
+        archive.write_all(&png).expect("grain data");
+        archive.finish().expect("finish fixture");
+
+        let inspection = inspect_brush_import(&path).expect("inspection");
+        assert_eq!(
+            inspection.source_format,
+            ExternalBrushFormat::ProcreateBrush
+        );
+        assert_eq!(inspection.fidelity_hint, FidelityTier::GuidedRecreation);
+        let report = import_external(&path).expect("guided report");
+        assert_eq!(report.source_format, ExternalBrushFormat::ProcreateBrush);
+        assert_eq!(report.fidelity, FidelityTier::GuidedRecreation);
+        assert!(report.preset.is_some());
+        assert_eq!(report.resources.len(), 2);
+        assert!(
+            report
+                .resources
+                .iter()
+                .any(|resource| resource.kind == "tip")
+        );
+        assert!(
+            report
+                .resources
+                .iter()
+                .any(|resource| resource.kind == "grain")
+        );
+        std::fs::remove_file(path).expect("cleanup");
+    }
+
+    fn tiny_test_png() -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &[0, 0, 0, 255, 255, 255, 255, 255],
+                2,
+                1,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("encode fixture PNG");
+        bytes
     }
 
     #[test]
@@ -2161,6 +2707,25 @@ mod tests {
         assert_eq!(webp_report.source_format, ExternalBrushFormat::Image);
         assert_eq!(webp_report.resources[0].data.len(), 4);
         std::fs::remove_file(webp_path).expect("cleanup");
+    }
+
+    #[test]
+    fn image_tip_decoder_enforces_declared_dimensions_before_decode() {
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([255, 255, 255, 255]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode fixture");
+
+        let error = decode_image_rgba8(&encoded.into_inner(), 1, 1)
+            .expect_err("mismatched dimensions should be stopped by decoder limits");
+        assert!(matches!(
+            error,
+            BrushPackError::UnsafeArchive("image resource cannot be decoded")
+        ));
     }
 
     #[test]

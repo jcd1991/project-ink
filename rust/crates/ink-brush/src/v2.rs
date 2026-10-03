@@ -34,6 +34,8 @@ const MAX_METADATA_AUTHOR_BYTES: usize = 512;
 const MAX_METADATA_LICENSE_BYTES: usize = 1024;
 const MAX_METADATA_TAGS: usize = 64;
 const MAX_METADATA_TAG_BYTES: usize = 128;
+/// Reserved built-in ID range; stays clear of IDs assigned by earlier app versions.
+const STARTER_BRUSH_ID_BASE: u128 = 4_000_000_000_000_000;
 
 /// Stable rendering semantics identifier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -771,12 +773,6 @@ impl BrushPresetV2 {
     /// document tile store. The preview intentionally uses the same compiled
     /// dab evaluator as committed strokes.
     pub fn preview_rgba8(&self, width: u16, height: u16) -> Result<Vec<u8>, BrushValidationError> {
-        let width_usize = usize::from(width);
-        let height_usize = usize::from(height);
-        if width == 0 || height == 0 || width_usize.saturating_mul(height_usize) > 256 * 256 {
-            return Err(BrushValidationError::WorkLimitExceeded);
-        }
-        let compiled = self.compile()?;
         let samples = (0..16)
             .map(|index| {
                 let index = index as u64;
@@ -798,7 +794,29 @@ impl BrushPresetV2 {
                 }
             })
             .collect::<Vec<_>>();
-        let dabs = compiled.render(&samples)?;
+        self.preview_samples_rgba8(width, height, &samples)
+    }
+
+    /// Render a bounded, editor-provided stroke using the compiled brush.
+    /// This path has no access to a document tile store or history.
+    pub fn preview_samples_rgba8(
+        &self,
+        width: u16,
+        height: u16,
+        samples: &[PointerSample],
+    ) -> Result<Vec<u8>, BrushValidationError> {
+        let width_usize = usize::from(width);
+        let height_usize = usize::from(height);
+        if width == 0
+            || height == 0
+            || width_usize.saturating_mul(height_usize) > 256 * 256
+            || samples.is_empty()
+            || samples.len() > 1024
+        {
+            return Err(BrushValidationError::WorkLimitExceeded);
+        }
+        let compiled = self.compile()?;
+        let dabs = compiled.render(samples)?;
         let mut pixels = vec![0_u8; width_usize * height_usize * 4];
         for dab in dabs {
             let left = (dab.x - dab.radius_x).floor().max(0.0) as u32;
@@ -827,6 +845,7 @@ impl BrushPresetV2 {
                     let alpha = (dab.opacity
                         * dab.flow
                         * grain
+                        * (f32::from(dab.color.a) / 255.0)
                         * (1.0 - (nx * nx + ny * ny)).clamp(0.0, 1.0)
                         * 255.0)
                         .clamp(0.0, 255.0) as u16;
@@ -840,10 +859,21 @@ impl BrushPresetV2 {
                     pixels[offset + 2] = ((u16::from(pixels[offset + 2]) * inverse
                         + u16::from(dab.color.b) * alpha)
                         / 255) as u8;
-                    pixels[offset + 3] =
-                        u8::try_from((u16::from(pixels[offset + 3]) + alpha).min(255))
-                            .unwrap_or(255);
+                    pixels[offset + 3] = (alpha
+                        + (u16::from(pixels[offset + 3]) * inverse + 127) / 255)
+                        .min(255) as u8;
                 }
+            }
+        }
+        let (rgba_pixels, remainder) = pixels.as_chunks_mut::<4>();
+        debug_assert!(remainder.is_empty());
+        for pixel in rgba_pixels {
+            let alpha = u16::from(pixel[3]);
+            if alpha == 0 {
+                continue;
+            }
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
             }
         }
         Ok(pixels)
@@ -1787,6 +1817,146 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             }),
         ),
     ];
+    presets.extend([
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 1,
+            "Soft Graphite",
+            &["sketch", "pencil", "soft"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 8.0,
+                hardness: 0.28,
+                density: 0.62,
+                ..StampTip::default()
+            }),
+            PaintBehavior::Glaze(GlazePaint {
+                color: dark,
+                opacity: 0.72,
+                flow: 0.6,
+                accumulation: AccumulationMode::Glaze,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 2,
+            "Charcoal",
+            &["sketch", "charcoal", "texture"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 18.0,
+                hardness: 0.18,
+                density: 0.52,
+                ..StampTip::default()
+            }),
+            PaintBehavior::Glaze(GlazePaint {
+                color: dark,
+                opacity: 0.78,
+                flow: 0.68,
+                accumulation: AccumulationMode::BuildUp,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 3,
+            "Brush Pen",
+            &["ink", "pressure", "taper"],
+            TipBehavior::Bristle(BristleTip {
+                diameter_px: 18.0,
+                bristle_count: 12,
+                spread: 0.32,
+                stiffness: 0.82,
+                lag: 0.04,
+            }),
+            PaintBehavior::Solid(SolidPaint {
+                color: dark,
+                opacity: 1.0,
+                flow: 1.0,
+                accumulation: AccumulationMode::UniformStroke,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 4,
+            "Dry Ink",
+            &["ink", "texture", "dry"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 7.0,
+                hardness: 0.7,
+                density: 0.78,
+                ..StampTip::default()
+            }),
+            PaintBehavior::Glaze(GlazePaint {
+                color: dark,
+                opacity: 0.88,
+                flow: 0.74,
+                accumulation: AccumulationMode::BuildUp,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 5,
+            "Flat Paint",
+            &["paint", "opaque", "flat"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 32.0,
+                hardness: 0.82,
+                roundness: 0.58,
+                ..StampTip::default()
+            }),
+            PaintBehavior::Solid(SolidPaint {
+                color: dark,
+                opacity: 0.96,
+                flow: 0.9,
+                accumulation: AccumulationMode::BuildUp,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 6,
+            "Soft Blender",
+            &["blend", "smudge", "soft"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 36.0,
+                hardness: 0.08,
+                density: 0.64,
+                ..StampTip::default()
+            }),
+            PaintBehavior::ColorPickup(ColorPickupPaint {
+                color: dark,
+                opacity: 0.82,
+                flow: 0.45,
+                pickup: 0.62,
+                deposit: 0.1,
+                dilution: 0.28,
+                blur: 0.18,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 7,
+            "Hard Eraser",
+            &["eraser", "hard", "clean"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 24.0,
+                hardness: 0.98,
+                ..StampTip::default()
+            }),
+            PaintBehavior::Solid(SolidPaint {
+                color: dark,
+                opacity: 1.0,
+                flow: 1.0,
+                accumulation: AccumulationMode::Erase,
+            }),
+        ),
+        base_preset(
+            STARTER_BRUSH_ID_BASE + 8,
+            "Soft Eraser",
+            &["eraser", "soft"],
+            TipBehavior::Stamp(StampTip {
+                diameter_px: 36.0,
+                hardness: 0.18,
+                ..StampTip::default()
+            }),
+            PaintBehavior::Solid(SolidPaint {
+                color: dark,
+                opacity: 0.46,
+                flow: 0.58,
+                accumulation: AccumulationMode::Erase,
+            }),
+        ),
+    ]);
     // The default ink pen should visibly respond to Apple Pencil pressure;
     // with no dynamics configured, its incoming pressure samples were ignored.
     presets[0]
@@ -1798,6 +1968,22 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
     presets[5]
         .dynamics
         .push(pressure_binding(ParameterId::Diameter, 0.85));
+    for index in [12, 13, 14, 15] {
+        presets[index]
+            .dynamics
+            .push(pressure_binding(ParameterId::Diameter, 0.62));
+    }
+    presets[14].stroke.taper_start = 0.08;
+    presets[14].stroke.taper_end = 0.18;
+    presets[14].stroke.smoothing = 0.12;
+    presets[15].stroke.taper_end = 0.08;
+    presets[15].grain = Some(GrainBehavior {
+        resource_hash: [0x55; 32],
+        scale: 1.0,
+        depth: 0.2,
+        contrast: 0.35,
+        canvas_space: true,
+    });
     presets[6]
         .dynamics
         .push(pressure_binding(ParameterId::Opacity, 0.35));
@@ -1884,9 +2070,23 @@ mod tests {
     #[test]
     fn builtin_library_contains_deterministic_phase_two_brushes() {
         let library = builtin_library();
-        assert!(library.len() >= 10);
+        assert_eq!(library.len(), 20);
+        let ids = library
+            .iter()
+            .map(|brush| brush.id)
+            .collect::<std::collections::HashSet<_>>();
+        let names = library
+            .iter()
+            .map(|brush| brush.metadata.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), library.len(), "built-in IDs must be unique");
+        assert_eq!(names.len(), library.len(), "built-in names must be unique");
         assert!(library.iter().all(|brush| brush.validate().is_ok()));
         assert_eq!(library[0].id, BrushId::from_u128(1));
+        assert_eq!(
+            library[12].id,
+            BrushId::from_u128(STARTER_BRUSH_ID_BASE + 1),
+        );
         assert!(library.iter().any(|brush| brush.grain.is_some()));
     }
 

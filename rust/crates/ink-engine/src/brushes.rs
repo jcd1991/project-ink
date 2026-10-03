@@ -1,15 +1,143 @@
 use super::{
-    BrushDraftSettings, BrushEditUndo, BrushId, BrushResource, BrushSummaryProjection, CombineOp,
-    Document, EngineError, EngineEvent, LayerId, LayerKind, MAX_DOCUMENT_RESOURCE_BYTES,
-    PaintBehavior, ParameterBinding, ParameterId, ResponseCurve, Rgba8, SensorId, TipBehavior,
-    VectorStrokeSummaryTuple, advance_revision, brush_summary_projection, builtin_library,
-    decode_editor_curve, hex_hash, lock_recover, next_available_brush_id,
-    resource_hashes_for_preset, resource_total_bytes, validate_brush_draft_settings,
+    BrushDraftSettings, BrushEditUndo, BrushId, BrushPresetV2, BrushPreviewPoint, BrushResource,
+    BrushSummaryProjection, CombineOp, Document, EngineError, EngineEvent, LayerId, LayerKind,
+    MAX_DOCUMENT_RESOURCE_BYTES, PaintBehavior, ParameterBinding, ParameterId, ResponseCurve,
+    Rgba8, SensorId, TipBehavior, VectorStrokeSummaryTuple, advance_revision,
+    brush_summary_projection, builtin_library, decode_editor_curve, hex_hash, lock_recover,
+    next_available_brush_id, render_brush_dabs, resource_hashes_for_preset, resource_total_bytes,
+    validate_brush_draft_settings,
 };
+use ink_input::{DeviceKind, Phase, PointerSample, flags};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::Ordering;
 
+fn validate_brush_preview_bounds(
+    width: u16,
+    height: u16,
+    points: &[BrushPreviewPoint],
+) -> Result<(), EngineError> {
+    if width == 0
+        || height == 0
+        || usize::from(width) * usize::from(height) > 256 * 256
+        || points.is_empty()
+        || points.len() > 1024
+        || points.iter().any(|point| {
+            !point.x.is_finite()
+                || !point.y.is_finite()
+                || !point.pressure.is_finite()
+                || point.x < 0.0
+                || point.y < 0.0
+                || point.x > f32::from(width)
+                || point.y > f32::from(height)
+                || !(0.0..=1.0).contains(&point.pressure)
+        })
+    {
+        return Err(EngineError::InvalidCommand(
+            "brush preview points are outside the supported bounds".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl Document {
+    /// Render one bounded preview stroke without changing document pixels,
+    /// history, or revision.
+    pub fn render_brush_preview_rgba8(
+        &self,
+        brush_id: BrushId,
+        width: u16,
+        height: u16,
+        points: &[BrushPreviewPoint],
+    ) -> Result<Vec<u8>, EngineError> {
+        validate_brush_preview_bounds(width, height, points)?;
+        let (mut preset, draft) = {
+            let state = lock_recover(&self.state);
+            let preset = state
+                .brush_overrides
+                .get(&brush_id)
+                .cloned()
+                .or_else(|| {
+                    builtin_library()
+                        .into_iter()
+                        .find(|preset| preset.id == brush_id)
+                })
+                .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
+            let draft = state
+                .brush_drafts
+                .values()
+                .find(|(draft_brush_id, _)| *draft_brush_id == brush_id)
+                .map(|(_, settings)| settings.clone());
+            (preset, draft)
+        };
+        if let Some(settings) = draft
+            && validate_brush_draft_settings(&settings).is_ok()
+        {
+            apply_brush_draft_to_preset(&mut preset, &settings)?;
+        }
+        let count = points.len();
+        let samples = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| PointerSample {
+                pointer_id: 1,
+                flags: flags::ACTUAL,
+                device_kind: DeviceKind::Stylus,
+                phase: if index == 0 {
+                    Phase::Down
+                } else if index + 1 == count {
+                    Phase::Up
+                } else {
+                    Phase::Move
+                },
+                canvas_x: point.x,
+                canvas_y: point.y,
+                pressure: (point.pressure * f32::from(u16::MAX)).round() as u16,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                azimuth: 0.0,
+                twist: 0.0,
+                timestamp_ns: index as u64 * 1_000_000,
+                sequence: index as u32,
+            })
+            .collect::<Vec<_>>();
+        let dabs = preset
+            .compile()
+            .and_then(|compiled| compiled.render(&samples))
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+        let resources = {
+            let state = lock_recover(&self.state);
+            dabs.iter()
+                .filter_map(|dab| dab.tip_resource_hash)
+                .filter_map(|hash| {
+                    state
+                        .resources
+                        .get(&hash)
+                        .map(|resource| (hash, resource.clone()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut tiles = ink_raster::TileStore::default();
+        render_brush_dabs(
+            &mut tiles,
+            &dabs,
+            &resources,
+            None,
+            false,
+            false,
+            false,
+            u32::from(width),
+            u32::from(height),
+        );
+        let mut pixels = Vec::with_capacity(usize::from(width) * usize::from(height) * 4);
+        for y in 0..u32::from(height) {
+            for x in 0..u32::from(width) {
+                let pixel = tiles.sample_pixel(x, y);
+                pixels.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+            }
+        }
+        Ok(pixels)
+    }
+
     /// Start a temporary, Rust-owned brush edit transaction. Drafts are not
     /// visible to stroke capture until committed and are discarded on close.
     pub fn begin_brush_draft(&mut self, brush_id: BrushId) -> Result<u64, EngineError> {
@@ -128,7 +256,7 @@ impl Document {
             settings.smoothing,
             settings.pressure_size,
             settings.pressure_opacity,
-            0.5,
+            settings.pressure_curve,
             settings.hardness,
             settings.texture_scale,
             settings.scatter,
@@ -230,102 +358,23 @@ impl Document {
                     .find(|candidate| candidate.id == brush_id)
             })
             .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
-        preset.stroke.spacing = spacing;
-        preset.stroke.smoothing = smoothing;
-        let pressure_curve = ResponseCurve {
-            points: decode_editor_curve(pressure_curve_points, pressure_curve)?,
+        let settings = BrushDraftSettings {
+            diameter_px,
+            opacity,
+            spacing,
+            smoothing,
+            pressure_size,
+            pressure_opacity,
+            pressure_curve,
+            hardness,
+            texture_scale,
+            scatter,
+            rotation_jitter,
+            smudge,
+            wetness,
+            pressure_curve_points: pressure_curve_points.to_vec(),
         };
-        for binding in &mut preset.dynamics {
-            if binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter {
-                binding.amount = pressure_size;
-            }
-            if binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity {
-                binding.amount = pressure_opacity;
-            }
-            if binding.sensor == SensorId::Pressure {
-                binding.curve = pressure_curve.clone();
-            }
-        }
-        if !preset.dynamics.iter().any(|binding| {
-            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
-        }) {
-            preset.dynamics.push(ParameterBinding {
-                target: ParameterId::Diameter,
-                base: 1.0,
-                sensor: SensorId::Pressure,
-                curve: pressure_curve.clone(),
-                amount: pressure_size,
-                combine: CombineOp::Multiply,
-            });
-        }
-        if !preset.dynamics.iter().any(|binding| {
-            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
-        }) {
-            preset.dynamics.push(ParameterBinding {
-                target: ParameterId::Opacity,
-                base: 1.0,
-                sensor: SensorId::Pressure,
-                curve: pressure_curve.clone(),
-                amount: pressure_opacity,
-                combine: CombineOp::Multiply,
-            });
-        }
-        match &mut preset.tip {
-            TipBehavior::Stamp(tip) => {
-                tip.diameter_px = diameter_px;
-                tip.editor_scatter = scatter;
-                tip.density = (tip.density * (1.0 - scatter * 0.5)).clamp(0.01, 1.0);
-                tip.angle_degrees = rotation_jitter * 180.0;
-            }
-            TipBehavior::Spray(tip) => {
-                tip.diameter_px = diameter_px;
-                tip.scatter = scatter;
-            }
-            TipBehavior::Ribbon(tip) => tip.width_px = diameter_px,
-            TipBehavior::Bristle(tip) => {
-                tip.diameter_px = diameter_px;
-                tip.spread = (tip.spread + scatter * 0.25).clamp(0.0, 1.0);
-                tip.lag = (tip.lag + smoothing * 0.25).clamp(0.0, 1.0);
-            }
-        }
-        match &mut preset.tip {
-            TipBehavior::Stamp(tip) => tip.hardness = hardness,
-            TipBehavior::Spray(tip) => tip.hardness = hardness,
-            TipBehavior::Ribbon(_) => {}
-            TipBehavior::Bristle(tip) => tip.stiffness = hardness,
-        }
-        match &mut preset.paint {
-            PaintBehavior::Solid(paint) => {
-                paint.opacity = opacity;
-                paint.flow = (1.0 - wetness * 0.5).clamp(0.01, 1.0);
-            }
-            PaintBehavior::Glaze(paint) => {
-                paint.opacity = opacity;
-                paint.flow = (1.0 - wetness * 0.5).clamp(0.01, 1.0);
-            }
-            PaintBehavior::Marker(paint) => {
-                paint.opacity = opacity;
-                paint.flow = (1.0 - wetness * 0.5).clamp(0.01, 1.0);
-            }
-            PaintBehavior::ColorPickup(paint) => {
-                paint.opacity = opacity;
-                paint.pickup = smudge;
-                paint.blur = (smudge * 0.5).clamp(0.0, 1.0);
-            }
-            PaintBehavior::DigitalWatercolor(paint) => {
-                paint.wash = opacity;
-                paint.dilution = wetness;
-                paint.pickup = smudge;
-                paint.granulation = ((texture_scale - 0.01) / 63.99).clamp(0.0, 1.0);
-            }
-        }
-        if let Some(grain) = &mut preset.grain {
-            grain.scale = texture_scale;
-            grain.depth = scatter;
-        }
-        preset
-            .validate()
-            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+        apply_brush_draft_to_preset(&mut preset, &settings)?;
         state.brush_overrides.insert(brush_id, preset);
         let current_override = state.brush_overrides.get(&brush_id).cloned();
         state.brush_undo = Some(BrushEditUndo {
@@ -856,6 +905,109 @@ impl Document {
         }
         Ok(())
     }
+}
+
+fn apply_brush_draft_to_preset(
+    preset: &mut BrushPresetV2,
+    settings: &BrushDraftSettings,
+) -> Result<(), EngineError> {
+    validate_brush_draft_settings(settings)?;
+    preset.stroke.spacing = settings.spacing;
+    preset.stroke.smoothing = settings.smoothing;
+    let pressure_curve = ResponseCurve {
+        points: decode_editor_curve(&settings.pressure_curve_points, settings.pressure_curve)?,
+    };
+    for binding in &mut preset.dynamics {
+        if binding.sensor == SensorId::Pressure {
+            if binding.target == ParameterId::Diameter {
+                binding.amount = settings.pressure_size;
+            }
+            if binding.target == ParameterId::Opacity {
+                binding.amount = settings.pressure_opacity;
+            }
+            binding.curve = pressure_curve.clone();
+        }
+    }
+    if !preset.dynamics.iter().any(|binding| {
+        binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+    }) {
+        preset.dynamics.push(ParameterBinding {
+            target: ParameterId::Diameter,
+            base: 1.0,
+            sensor: SensorId::Pressure,
+            curve: pressure_curve.clone(),
+            amount: settings.pressure_size,
+            combine: CombineOp::Multiply,
+        });
+    }
+    if !preset.dynamics.iter().any(|binding| {
+        binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
+    }) {
+        preset.dynamics.push(ParameterBinding {
+            target: ParameterId::Opacity,
+            base: 1.0,
+            sensor: SensorId::Pressure,
+            curve: pressure_curve,
+            amount: settings.pressure_opacity,
+            combine: CombineOp::Multiply,
+        });
+    }
+    match &mut preset.tip {
+        TipBehavior::Stamp(tip) => {
+            tip.diameter_px = settings.diameter_px;
+            tip.editor_scatter = settings.scatter;
+            tip.density = (tip.density * (1.0 - settings.scatter * 0.5)).clamp(0.01, 1.0);
+            tip.angle_degrees = settings.rotation_jitter * 180.0;
+        }
+        TipBehavior::Spray(tip) => {
+            tip.diameter_px = settings.diameter_px;
+            tip.scatter = settings.scatter;
+        }
+        TipBehavior::Ribbon(tip) => tip.width_px = settings.diameter_px,
+        TipBehavior::Bristle(tip) => {
+            tip.diameter_px = settings.diameter_px;
+            tip.spread = (tip.spread + settings.scatter * 0.25).clamp(0.0, 1.0);
+            tip.lag = (tip.lag + settings.smoothing * 0.25).clamp(0.0, 1.0);
+        }
+    }
+    match &mut preset.tip {
+        TipBehavior::Stamp(tip) => tip.hardness = settings.hardness,
+        TipBehavior::Spray(tip) => tip.hardness = settings.hardness,
+        TipBehavior::Ribbon(_) => {}
+        TipBehavior::Bristle(tip) => tip.stiffness = settings.hardness,
+    }
+    match &mut preset.paint {
+        PaintBehavior::Solid(paint) => {
+            paint.opacity = settings.opacity;
+            paint.flow = (1.0 - settings.wetness * 0.5).clamp(0.01, 1.0);
+        }
+        PaintBehavior::Glaze(paint) => {
+            paint.opacity = settings.opacity;
+            paint.flow = (1.0 - settings.wetness * 0.5).clamp(0.01, 1.0);
+        }
+        PaintBehavior::Marker(paint) => {
+            paint.opacity = settings.opacity;
+            paint.flow = (1.0 - settings.wetness * 0.5).clamp(0.01, 1.0);
+        }
+        PaintBehavior::ColorPickup(paint) => {
+            paint.opacity = settings.opacity;
+            paint.pickup = settings.smudge;
+            paint.blur = (settings.smudge * 0.5).clamp(0.0, 1.0);
+        }
+        PaintBehavior::DigitalWatercolor(paint) => {
+            paint.wash = settings.opacity;
+            paint.dilution = settings.wetness;
+            paint.pickup = settings.smudge;
+            paint.granulation = ((settings.texture_scale - 0.01) / 63.99).clamp(0.0, 1.0);
+        }
+    }
+    if let Some(grain) = &mut preset.grain {
+        grain.scale = settings.texture_scale;
+        grain.depth = settings.scatter;
+    }
+    preset
+        .validate()
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))
 }
 
 fn set_brush_paint_color(paint: &mut PaintBehavior, color: ink_model::Rgba8) {
