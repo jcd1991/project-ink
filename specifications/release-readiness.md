@@ -692,3 +692,14 @@ evidence remain separate hardware gates.
   this iPad's UDID; if signing requires device registration, obtain explicit
   approval before allowing Xcode to register it. Pencil, latency, memory,
   recovery, offline, and physical document acceptance remain open.
+- iPad Acceptance build-only probe on 2026-10-03: bypassed the acceptance
+  runner's free-space gate and ran the trace-enabled, no-code-signing Debug
+  flavor directly. Xcode completed its compile in 59.3 seconds. The Runner.app
+  bundle is 183 MiB under `app/build/ios/Debug-Acceptance-iphoneos/`; the new
+  Xcode build directory is 503 MiB. The existing acceptance output directory
+  is 751 MiB. Flutter then reported that its expected
+  `ios/iphoneos/Runner.app` path was missing, although the flavor-specific app
+  exists under `ios/Debug-Acceptance-iphoneos/`. Free disk changed from 9.5 to
+  9.8 GiB. This was compile and storage evidence only; there was no signing,
+  install, device registration, Flutter integration run, or native UI test.
+  The 18 GiB threshold has not been calibrated against the full device run.
