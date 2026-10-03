@@ -2268,16 +2268,17 @@ fn parse_id(value: &str) -> Result<u128, StorageError> {
         .map_err(|_| StorageError::InvalidManifest("object ID is invalid".into()))
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PersistedLayerLabel {
+    Channels([u8; 4]),
+    Named(Rgba8),
+}
+
 fn decode_layer_label(value: Option<String>) -> Result<Option<Rgba8>, StorageError> {
     let Some(value) = value.filter(|value| value != "null") else {
         return Ok(None);
     };
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum PersistedLayerLabel {
-        Channels([u8; 4]),
-        Named(Rgba8),
-    }
 
     let label = serde_json::from_str::<PersistedLayerLabel>(&value).map_err(|error| {
         StorageError::InvalidManifest(format!("layer label is invalid: {error}"))
