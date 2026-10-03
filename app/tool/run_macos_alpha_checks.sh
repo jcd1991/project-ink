@@ -178,6 +178,10 @@ if [[ "$mode" == full || "$mode" == workflows ]]; then
 fi
 
 if [[ "$mode" == appkit ]]; then
+  # A prior Flutter integration-test run may leave Generated.xcconfig pointing
+  # at its temporary listener.dart. Restore the normal app target before Xcode
+  # builds the native UI-test host, as the workflows mode does above.
+  run_check macos_acceptance_app_build flutter build macos --debug --no-pub
   result_bundle="$results_dir/NativeDocumentSafety-$(date +%Y%m%d-%H%M%S)-$$.xcresult"
   run_check macos_native_document_safety \
     xcodebuild test -quiet \
@@ -189,6 +193,8 @@ if [[ "$mode" == appkit ]]; then
 fi
 
 if [[ "$mode" == appkit-test ]]; then
+  # Keep focused reruns safe after flutter test integration-test commands too.
+  run_check macos_acceptance_app_build flutter build macos --debug --no-pub
   result_bundle="$results_dir/NativeDocumentSafety-${appkit_test}-$(date +%Y%m%d-%H%M%S)-$$.xcresult"
   run_check macos_native_document_safety_focused \
     xcodebuild test -quiet \

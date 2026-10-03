@@ -17,6 +17,8 @@ free for Xcode build products and refuses to run while Project Ink is open.
 Use `--appkit-test <test-name>` to run one of the six named
 `NativeDocumentSafetyTests` cases while diagnosing a focused failure; the
 runner validates the test name and retains a separate `.xcresult` bundle.
+Both AppKit modes first rebuild the macOS app so a prior integration-test
+listener cannot leave Xcode pointed at a deleted temporary Dart target.
 For example: `app/tool/run_macos_alpha_checks.sh --appkit-test
 testRedCloseCancelKeepsDirtyNamedProjectOpen`.
 `--unit-only` runs analysis and Flutter unit/widget tests without the build
@@ -108,8 +110,13 @@ The automated failure suite is run by `app/tool/run_macos_alpha_checks.sh
 the document/layer/brush/comic round trips, and the AppKit close/quit choices.
 The separate
 `--native-live-texture` mode exercises the Rust/Metal/Flutter surface handoff
-and needs a foreground macOS session with a working Metal adapter. A green
-automated suite does not replace the AppKit matrix above.
+and needs a foreground macOS session with a working Metal adapter. It checks
+that Flutter copies a rendered pixel buffer and eventually releases the
+retiring IOSurface texture. Native Dispose returns after requesting
+unregistration while retaining the backing buffer until Flutter's raster
+callback; a stalled callback keeps new GPU surfaces bounded and the app uses
+CPU preview. A green live-frame check does not pass native retirement or
+replace the AppKit matrix above.
 
 ## Result record
 

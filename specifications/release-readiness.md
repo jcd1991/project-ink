@@ -233,6 +233,36 @@ evidence remain separate hardware gates.
 
 ## Current evidence snapshot
 
+- **macOS acceptance refresh (2026-10-03, 17:00–17:25 EDT).** A fresh run of
+  `app/tool/run_macos_alpha_checks.sh --workflows-only` passed Flutter analysis,
+  all 597 Flutter tests, seven Rust-backed disk journeys (layer round-trip,
+  custom-brush edit/import and damaged-import preservation, comic save/reopen/
+  export, draw/save/reopen/undo/redo, corrupt Open, failed Save, and failed
+  recovery write), and the macOS app build. The run summary and per-journey
+  logs are in `app/build/macos-alpha-checks/`; its isolated document root is
+  `ProjectInkAlphaValidation/20261003-170129-98148`.
+- The real-app manual record
+  `ProjectInkAlphaValidation/manual-xctest-20261003/records/macos-manual-safety.txt`
+  verifies red-close and Cmd-Q Save, Discard, and Cancel, package hashes,
+  recovery behavior, and save/reopen/undo/redo. The focused XCUITest still
+  fails its app-window automation gate (`mainWindow.isEnabled == false`), so
+  automated AppKit acceptance remains open.
+- The native live-texture integration test now proves Rust surface creation,
+  Metal texture registration, dab rendering, frame notification, and Rust
+  acknowledgment, and records two raster pixel-buffer copies. Native Dispose
+  now returns after requesting asynchronous unregistration while retaining the
+  pixel buffer until Flutter's raster callback, so a missing callback cannot
+  block canvas cleanup. The focused test still fails after ten raster frames:
+  the texture remains in `retiring` state and the callback was not received.
+  Creation stays bounded and the controller falls back to CPU preview. The
+  stage log is in
+  `app/build/macos-alpha-checks/macos_native_live_texture.log`; native texture
+  retirement is not accepted.
+- The connected iPad Pro 11-inch (3rd generation) preflight reports 11.2 GiB
+  free against the runner's 18 GiB device-run threshold. No current-revision
+  build or install was started; Apple Pencil, recovery, offline, and physical
+  document acceptance remain open.
+
 - This validation pass fixed `.inkproj` layer-label persistence. New saves use
   the storage reader's canonical four-channel array, while the reader also
   accepts older object-shaped labels so projects saved before the fix remain
@@ -605,3 +635,16 @@ evidence remain separate hardware gates.
   the iPad UDID with the configured developer team; authorization is pending.
   Physical Pencil, save, recovery, offline, latency, and memory acceptance
   remain open.
+- Fresh macOS revalidation on 2026-10-03: `app/tool/run_macos_alpha_checks.sh
+  --workflows-only` passed Flutter analysis, all 597 Flutter tests, all seven
+  disk-backed document/layer/brush/comic and failure-preservation journeys,
+  and the macOS debug build. The run summary and per-step logs are retained in
+  `app/build/macos-alpha-checks/`. The AppKit runner now rebuilds the regular
+  app target before either focused or full native UI testing, repairing the
+  stale temporary `listener.dart` configuration found during the prior run.
+  A focused red-close Cancel test passed the app build but Xcode timed out while
+  enabling macOS UI automation before launching the test app; its result bundle
+  is `app/build/macos-alpha-checks/NativeDocumentSafety-testRedCloseCancelKeepsDirtyNamedProjectOpen-20261003-182239-67480.xcresult`.
+  The six-choice AppKit automation remains unverified. The recorded manual
+  real-app matrix remains passed. Current free space is 10.3 GiB, below the
+  physical-device run's 18 GiB minimum; no iPad build or install was started.
