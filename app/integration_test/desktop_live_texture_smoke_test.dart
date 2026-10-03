@@ -129,8 +129,14 @@ void main() {
     }
 
     Map<String, Object?>? lifecycleState;
-    for (var frame = 0; frame < 10; frame++) {
-      await tester.pump(const Duration(milliseconds: 16));
+    for (var attempt = 0; attempt < 100; attempt++) {
+      // `pump(Duration)` advances Flutter's test clock but does not guarantee
+      // a wall-clock turn for Flutter's native raster thread. Give the
+      // asynchronous texture-retirement callback up to two real seconds.
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
       lifecycleState = await _channel.invokeMapMethod<String, Object?>(
         'debugTextureLifecycleState',
         <String, Object>{'textureId': textureId},

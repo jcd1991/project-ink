@@ -659,3 +659,12 @@ evidence remain separate hardware gates.
   `manual-xctest-20261003/records/macos-manual-safety.txt`. iPad signing and
   Xcode UI-automation authorization have not been granted; no device install
   or system privacy change was made.
+- Native live-texture recheck on 2026-10-03: the macOS integration test built
+  and rendered a confirmed dab; Flutter copied two pixel buffers and frame
+  acknowledgement succeeded. Native texture disposal returned promptly, but
+  Flutter did not deliver `onTextureUnregistered` within a two-second
+  wall-clock polling window. The texture remained in `retiring`; the acceptance
+  test correctly fails rather than releasing the backing buffer early. The
+  registry retains one surface at most and the Dart controller falls back to
+  CPU preview. Result log:
+  `app/build/macos-alpha-checks/macos_native_live_texture.log`.
