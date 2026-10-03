@@ -480,6 +480,174 @@
 
 ## 3.75 — professional UI parity
 
+### Layers workflow rebuild
+
+- [x] Replace crowded per-row layer actions with 48px RGBA thumbnails,
+  transparency checkerboards, compact type/status text, visibility, and a
+  scrollable Options sheet. Simple mode exposes properties in Options; Studio
+  keeps the inspector and command bar visible. Preserve hierarchy with group
+  indentation and collapse controls.
+- [x] Give the layer selection one explicit primary owner and preserve
+  secondary selection without changing the edit target. Brush input no longer
+  falls back to another layer when the primary target is missing, hidden, or
+  non-paintable. Selection is still session state and is not yet persisted.
+- [x] Route layer opacity/color-range selection, bucket/gradient fill, and
+  raster transforms through the explicit primary layer ID, including ancestor
+  visibility checks and gesture-start target capture. Reject unsupported mask
+  painting rather than treating the mask as an ordinary color layer.
+- [x] Decode layer thumbnails as raw RGBA, reject stale projection results,
+  cap thumbnail reads at two concurrent requests, and retain an 8 MiB LRU
+  cache keyed by document generation, engine revision, and layer ID. Rust now
+  letterboxes non-square canvas thumbnails instead of distorting their aspect.
+  Bounded area sampling preserves sparse marks between thumbnail pixel centers;
+  `TileStore.sample_pixel` reads allocated pixels without cloning full tiles.
+  Mask previews show effective grayscale coverage, including sparse reveal-all
+  defaults, rather than the mask's empty storage representation.
+- [x] Preview layer opacity through a Rust-owned edit transaction. Slider
+  movement updates compositing without history entries; release commits one
+  undoable command, Escape restores the starting value, and saving during a
+  preview closes it as one committed action. Rust engine and bridge tests cover
+  commit, undo/redo, cancellation, and snapshot behavior; Flutter tests cover
+  live drag callbacks and Escape cancellation.
+- [x] Expose explicit Select contents and Merge Down actions in each layer's
+  Options menu, using the selected layer ID and adjacent lower sibling IDs.
+  Merge preflight rejects even hidden mask siblings so normalization cannot
+  retarget a legacy adjacency-based mask.
+- [x] Guard Merge Down previews and the Rust merge command against hidden,
+  clipped, masked, non-Normal, non-adjacent, non-raster, and grouped layer
+  combinations. Bake source opacity only when the lower target is at 100% and
+  fully opaque beneath source marks; preflight before mutation and verify
+  compositor pixel equality for the supported exact-merge case.
+- [x] Keep hidden-layer tile descriptors during full redraws so visibility
+  changes recomposite existing content when layers are shown again; cover the
+  invalidation path with a Flutter regression and a live macOS hide/show test.
+- [x] Add explicit Move into group and Move out of group layer actions; route
+  them through the Rust move command and reject non-group destinations while
+  preserving cycle error reporting and hiding reparent actions for comic-owned
+  structures.
+- [x] Add Select All and Deselect Secondary selection actions plus one atomic,
+  undoable Group Selected command. Grouping preserves sibling stack order and
+  creates a pass-through group at the highest selected position; the panel
+  warns before shifting intervening unselected siblings. The current macOS
+  build added a pass-through group to the reopened test project and Undo/Redo
+  removed and restored that group in the live Layers list.
+- [x] Add an explicit reorder grip with above/below previews for drag moves
+  within a sibling stack, keyed by stable layer identity, and an inside-group
+  drop target that routes through the validated Rust reparent command. On the
+  rebuilt Mac app, dragging Ink above its sibling group kept its mask directly
+  associated with Ink; Undo/Redo restored and reapplied the order. Saving,
+  relaunching, and reopening preserved the reordered stack and the `Mask · Ink`
+  owner label.
+- [x] Add confirmed Delete Selected for bulk layer selections. Normalize a
+  selected group and selected descendants to the structural root and commit
+  the full subtree removal as one undoable command; reject whole-document and
+  comic-owned deletions before mutation. A read-only Rust preflight now shares
+  the structural deletion plan and inherited-lock checks with the committed
+  command, so bulk deletion reports last-layer, locked-owner, and comic-owned
+  failures before confirmation. Flutter translates engine layer IDs into
+  friendly names. Focused engine/bridge/widget tests pass, and the rebuilt Mac
+  app visibly rejected deleting a locked `Layer 3` before confirmation while
+  retaining both selected layers.
+- [x] Delete an ordinary single leaf directly with Undo, while preserving the
+  last-layer guard and group/subtree confirmation. Keep compact rows readable
+  by placing group disclosure on the thumbnail and retaining an explicit
+  reorder handle beside visibility and Options.
+- [x] Add atomic bulk merge for contiguous selected raster siblings. It retains
+  the lowest layer ID, bakes upper opacity, rejects unsupported structures,
+  confirms in the UI, and uses one undo step. Bulk duplication, labels,
+  visibility, locking, grouping, deletion, and same-stack drag reorder also
+  use validated undoable commands; duplication carries groups and owner masks.
+  Remaining: richer rollback coverage and locked/comic-owned destination
+  previews.
+- [x] Add atomic ungroup with compositing-preservation checks.
+- [x] Add Rust-owned whole-layer/group locks, inherited lock validation for
+  descendant edits/moves/deletes, distinct lock projection/badges, and v4
+  persistence. Visibility and unlocking remain available while locked.
+- [x] Project Rust-owned drag-source and ordinary-group destination
+  capabilities, including inherited lock, comic ownership, attached-mask, and
+  invalid-target reasons. Flutter hides unavailable drag handles and gives a
+  rejection explanation during a blocked drop.
+- [x] Explain pair-specific group-cycle and comic-owned-destination rejection
+  in the live drag preview. Widget coverage checks both before release; the
+  cycle case confirms no invalid move is dispatched.
+- [x] Project Rust capability reasons for properties, duplicate/delete,
+  ungroup, and Apply Mask; Layer Options disables unavailable actions and
+  displays the engine's explanation. Duplicate availability includes the
+  document layer limit. Engine, bridge, and Flutter tests cover locked,
+  last-layer, unsafe-ungroup, capacity, and non-raster Apply Mask cases.
+- [ ] Extend action capability projection to merge, group/bulk selection, and
+  other context-dependent commands; verify the complete menu against live
+  engine state. Rust now projects structural Merge Down availability and
+  restrictions for the actual lower sibling, and Flutter uses that projection
+  in Layer Options and the direct Merge Down preview. A non-mutating Rust
+  preflight now checks pixel coverage before confirmation and shares validation
+  with the undoable command, returning actionable reasons through the bridge.
+  The fresh macOS build verified an unsafe merge shows the exact coverage
+  reason and disables Merge, while an eligible pair previews, commits, and
+  restores through Undo/Redo. Rust group-selection preflight now checks
+  selection size/identity, parent, comic ownership, locks, capacity, and mask/
+  clipping boundaries before dispatch; the command revalidates at commit. A
+  non-mutating Rust group preflight now runs before UI confirmation; Flutter
+  passes selected IDs in sibling stack order and displays the engine's exact
+  rejection reason. The rebuilt macOS app rejected grouping across a clipped
+  sibling with “Grouping this range could change clipping behavior.” without
+  opening confirmation or dispatching a mutation, then clipping was restored.
+  After save/relaunch, the group and its `Mask · Ink` owner relationship were
+  still visible in the reopened tree. Bulk duplicate/delete/visibility/lock/
+  label and other context-dependent capability reasons remain open. The
+  group-preflight bridge/widget suite passes 70 tests, `flutter analyze` is
+  clean, and the rebuilt macOS debug app was exercised on this path.
+- [x] Implement mask ownership and core mask editing: explicit owner IDs persist in v3+ and v1/v2
+  adjacency migrates on load. V5 now persists enabled, inverted, and stencil
+  semantics; new ordinary masks use sparse hidden coverage and reveal all by
+  default, while legacy/comic stencils retain direct coverage. CPU layer reads,
+  composite preview, export, and Apply Mask share effective coverage. Mask
+  strokes follow brush shape/pressure/opacity, with black hiding and white
+  revealing. Enable, invert, and raster Apply Mask commands are undoable; the
+  Flutter options path confirms before applying. Engine/bridge tests cover
+  normal and disabled masks plus undo. A fresh macOS debug build exercised
+  attached-mask creation, Apply Mask, and Undo restoration through the UI.
+  Duplicate owners carry attached masks. A v6 test project was saved from the
+  macOS app; its manifest records the primary layer and its SQLite layer row
+  stores the mask owner ID. The current macOS app reopened that project through
+  Open Project, restoring the title, attached mask owner label, primary mask,
+  and paint layer. The project picker requires choosing the `.inkproj` folder,
+  then granting access to its parent folder in the follow-up sheet.
+- [x] Finish document-state persistence: v6 writing, v1-v5 readers, and
+  forward-version rejection are implemented; mask ownership, full-lock, and
+  legacy mask coverage migrate safely. Primary target and collapsed ordinary
+  groups now persist per page and restore in the canvas. Storage migration,
+  v6 round-trip tests pass; a saved mask/primary-target project reopened in the
+  current macOS app with its layer tree and target restored.
+- [x] Implement preview/commit/cancel opacity transactions and temporary Solo.
+  Solo clears when its target is deleted or ungrouped. Rust tests cover saved
+  visibility/history invariance and stale-target cleanup; Flutter tests cover
+  the long-press gesture, and a macOS build was exercised with the populated
+  layer panel. The CUA run could verify visibility and opacity rendering but
+  cannot synthesize a stationary long-press.
+- [x] Enforce whole-layer/group lock restrictions for content edits, movement,
+  and deletion in Rust, with source/destination drag explanations and common
+  per-action reasons in Layer Options. Expand pixel-equality merge coverage
+  across nested pass-through/isolated parents and masked/effect rejection
+  reasons; project the remaining bulk and context-dependent action reasons.
+- [ ] Finish all visible controls through UI-to-engine tests and populated
+  Simple/Studio screenshot comparisons. Current Flutter goldens use the test
+  renderer; physical tablet/stylus acceptance remains separate. The live
+  macOS build reopened an attached-mask v6 project, created an ordinary group,
+  and verified group Undo/Redo. A test stroke on the selected Ink layer
+  appeared on canvas and in the Ink thumbnail only; Undo removed it from both
+  and Redo restored it. The current project is a populated Simple-mode capture;
+  Studio and cross-device acceptance remain open.
+- [ ] Verify save/reopen plus undo/redo for every new operation, 200-layer
+  responsiveness, portrait/landscape tablet and phone sheets, handedness,
+  themes, 150%/200% text, and accessibility targets.
+
+- [ ] Refine tablet Simple/Studio and Canvas Focus using
+  `specifications/focused-workspace-ui.md`: preserve per-mode palette state,
+  suppress every overlay in Focus, provide accessible exit/quick controls,
+  bound essential toolbars/sliders, verify transparent brush behavior, and
+  complete adaptive palette and physical-device acceptance.
+
 - [x] Make command-bar customization persist per built-in workspace and
   per saved custom workspace; keep action IDs allowlisted and the list bounded.
 - [x] Add resizable vertical palette-group dividers and persist built-in group
@@ -625,8 +793,40 @@ testable locally without a downloaded shader.
 
 ## 4 — release hardening
 
-- [ ] Fault injection, repair copies, import limits, accessibility, locales,
-  reproducible signed builds and offline release validation.
+- [x] Add `ink-storage` failure injection for manifest, SQLite, tile, and
+  history writes plus subprocess abrupt-exit checks across the atomic publish
+  boundaries; verify backup recovery and corrupt-source preservation.
+- [x] Reject PSD imports above 64 me pixels before RGBA allocation and enforce
+  a 768 MiB combined source/decode/initial-layer budget from the file header;
+  limit comic projects to 128 me aggregate page pixels. Boundary tests cover
+  pixel, projected-memory, and comic page-add rejection.
+- [x] Enforce MyPaint and image-tip byte caps while reading and hashing so
+  source growth after metadata preflight cannot cause unbounded work/allocation.
+- [x] Inject repair-copy failures after manifest, tiles, SQLite, and history
+  writes; confirm corrupt-source bytes survive and no partial recovery copy is
+  published.
+- [x] Verify legacy format reads migrate in memory without rewriting source
+  packages, and unsupported future versions are rejected byte-for-byte intact.
+- [ ] Extend fault injection through app recovery checkpoints and provider
+  write-back; complete remaining import-route and time-budget reviews,
+  accessibility, locale review, reproducible signed builds, and offline release
+  validation.
+- [x] Rebuild and test the shared `.inkproj` 768 MiB aggregate-data and 900 MiB
+  projected load budget, including multipage studio projects and the existing
+  oversized-history preservation behavior. `CARGO_PROFILE_TEST_DEBUG=0
+  CARGO_INCREMENTAL=0 cargo test -p ink-storage --lib` passes all 24 tests,
+  including aggregate-budget boundaries, studio round-trip, oversized-history
+  preservation, and abrupt-process interruption. This is host test evidence;
+  minimum-device peak-memory measurement remains open.
+- [ ] Complete live dirty-window-close acceptance with a fresh isolated named
+  document. Cmd-Q was observed reaching the AppKit callback and displaying the
+  dirty recovery prompt; Cancel restored the same recovered document. Save and
+  Discard, the red window-close button, and an isolated named-document run
+  remain unverified. The app was left open to preserve its recovery copy.
+- [ ] Complete the release gates in
+  `specifications/release-readiness.md`, including document close/discard
+  semantics, per-platform acceptance, core end-to-end journeys, and tagged
+  public packages. The current macOS debug build does not close these gates.
 
 ## 5 — final external acceptance and deferred enhancements
 

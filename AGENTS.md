@@ -41,6 +41,10 @@ the source code take precedence over assumptions based on a generic pattern.
 - `.inkproj` is versioned and recovery-safe. Never overwrite an unsupported or
   invalid source document as a side effect of opening it. Keep atomic save,
   backup/recovery, and provider write-back guarantees intact.
+- Recursive recovery deletion is allowed only for `last-session.inkproj` under
+  the trusted app recovery directory. A custom `autosavePath` is not a trusted
+  deletion root; hosts that own such a path must provide an explicit deletion
+  callback with their own safety checks.
 
 ## Ownership map
 
@@ -60,12 +64,279 @@ the source code take precedence over assumptions based on a generic pattern.
   it when the workspace session ends. Comic widgets and painters display Rust
   view types; they do not own or mutate project state.
 - `CanvasScreen` remains the canvas composition and lifecycle point.
-  `CanvasDocumentActions`, `CanvasPreviewSynchronization`,
-  `CanvasTileSynchronization`, and `StrokeOperationQueue` own their existing
-  document, live-preview, tile-publication, and ordered-bridge seams.
+  `CanvasDocumentActions` is an independent controller with an explicit
+  `CanvasDocumentActionHost` and routes file/document action IDs to its own
+  workflows, including native close/quit unsaved-change decisions. It depends
+  on the narrow `CanvasDocumentActionSession` contract rather than importing
+  the screen. The screen retains method-channel registration and reply/error
+  adapters.
+  `CanvasLayerActions` owns Rust-backed layer
+  commands, selection updates, opacity transactions, solo state, and serialized
+  layer-panel persistence through `CanvasLayerActionHost`; keep screen state
+  access behind that host. `CanvasLayerProjectionService` converts Rust layer
+  summaries into immutable presentation snapshots and owns bounded thumbnail
+  caching. `CanvasLayerPresentationState` owns the projected layers, transient
+  selection/solo state, generation-bound panel restoration, and selection
+  reconciliation; the screen publishes updates and queues persistence.
+  `CanvasWorkspaceLayoutActions` owns device-local
+  workspace preference updates, built-in/custom layout resolution, dock-width
+  persistence, workspace selection/follow preference transitions, and palette
+  mappings through `CanvasWorkspaceLayoutHost`; it returns immutable
+  `WorkspaceDockSelection` values but does not own active dock presentation
+  state. `CanvasWorkspaceDockState` owns
+  device-local dock widths, groups, tabs, collapse flags, handedness, and
+  preference hydration/rebinds; the screen publishes controller transitions.
+  `CanvasToolActions` owns
+  raster selection/fill/transform workflows through explicit engine, selection,
+  layer, and UI callbacks. `canvas_workspace_panel_sheets.dart` owns the
+  Quick Access, History, and focus quick-control sheet composition and accepts
+  explicit preference/engine/brush snapshots and action callbacks; the screen
+  retains command dispatch, history navigation, and preference persistence.
+  `CanvasDesktopWorkspace` composes desktop docks, status chrome, and collapse
+  affordances from immutable snapshots and a callback action port; the screen
+  and workspace action owners retain dock state and preference persistence.
+  `CanvasToolPaletteContent`, `CanvasBrushPaletteContent`, and
+  `CanvasComicPaletteContent` adapt shared screen-owned actions to reusable
+  tool, brush, and comic palette widgets for both docked and floating layouts.
+  `CanvasWorkspacePanelActions` owns the sheet/dock/floating-panel routing
+  transitions from an immutable selection snapshot; its host keeps Flutter
+  state publication, preference writes, and route presentation explicit.
+  `CanvasEditorActionRouter` owns shared command precedence across document,
+  history, tool, color, viewport, and workspace owners; keep its dispatch order
+  covered by tests and leave screen lifecycle effects behind host callbacks.
+  `CanvasPreviewSynchronization`
+  independently
+  owns native preview lifecycle, viewport sync, ephemeral preview picture
+  retirement, and CPU handoff acknowledgement state through explicit engine
+  and viewport inputs. `CanvasTilePainter`
+  and `CanvasOverlayPainter` consume explicit immutable paint inputs,
+  `CanvasColorWheel` and `CanvasColorSquare` own their color-picker gestures,
+  `CanvasQuickControls`/`CanvasColorSwatch` own callback-driven toolbar
+  presentation; `EditorActionMenu`, `DesktopToolRail`, and
+  `TabletStudioToolRail` are independent controls; and `NewDocumentDialog`/
+  `ProjectNameDialog` own their form state. The
+  `CanvasQuickAccessPanel` owns only its local selected-set projection and
+  sends changed sets and actions to its host callbacks. The
+  `CanvasColorPalettePanel` receives color projections and action callbacks.
+  `CanvasHistoryPanel` owns its asynchronous history projection through an
+  explicit engine, revision token, and navigation callback;
+  `CanvasHistoryActions` owns undo/redo queue ordering, history navigation,
+  autosave marking, and projection refresh sequencing through an explicit host.
+  Status-bar and
+  selection-toolbar widgets are callback/value driven. The
+  `CanvasTileSynchronization` owns CPU byte and decoded-image caches, render
+  revision, tile publication, pending preview acknowledgements, commit-batch
+  sequencing, and its periodic fallback poll. Engine replacement resets its
+  revision and byte cache and retires the decoded-image cache so an in-flight
+  decode cannot publish into the next engine generation. Its host contract
+  supplies visible raster IDs and queue depths, not layer models or queue
+  objects. Preview lifecycle and the narrow acknowledgement/retirement action
+  port and UI effects are constructor-injected separately from the read-only
+  state host. The effects port publishes canvas state and reports visible
+  updates; it does not expose the full trace object. Cache and render-revision
+  state remain internal. `CanvasTileSynchronizationHost.captureSnapshot()`
+  returns an immutable `CanvasTileSynchronizationSnapshot` for visible raster
+  IDs, packet timing, and queue depths at the point each refresh decision needs
+  them; do not expose layer models or queue owners. The host captures engine
+  identity and generation as `CanvasTileSynchronizationSession` and validates
+  that token after asynchronous boundaries. Diagnostics are
+  constructor-injected outside the state host. Input and history paths still
+  request immediate refreshes.
+  `CanvasCompositeTileSnapshotReader`
+  owns bounded multi-part tile reads and revision-coherence validation.
+  `CanvasCpuAcknowledgementBatch` owns the pure dirty-tile deduplication and
+  acknowledgement-atomic batch-selection policy;
+  `projectVisibleTileEntries` selects current composite or visible raster images
+  and orders them deterministically from explicit tile and layer snapshots;
+  the screen adapts its engine/session state and rendering callbacks.
+  `TouchGestureTracker` owns transient touch pointer bookkeeping, long-press
+  timing, and gesture classification; `CanvasScreen` maps emitted gestures to
+  editor actions, while `CanvasTouchStrokeCancellationCoordinator` owns the
+  queued drawing-stroke cancellation guard.
+  `NativePointerPacketQueue` owns buffered native packet ordering and move-only
+  compaction. `NativePencilInputCoordinator` owns drain scheduling, serial
+  packet failure logging, and stroke recovery; the screen supplies the ordered
+  stroke queue and the native stroke operation.
+  `NativePencilStrokeCoordinator` owns native Pencil packet-to-Rust stroke
+  ordering, pressure/edge diagnostics, and commit/cancel decisions through an
+  explicit host. The screen adapts shared preview, autosave, and lifecycle
+  state; Rust remains responsible for clipping committed pixels.
+  `NativePencilInputCoordinator` owns contact filtering, native packet
+  adaptation, confirmed-preview scheduling, the bounded packet queue, and
+  failure recovery for serialized native packets. The screen provides position
+  transforms, preview presentation, and its stroke-cancellation operation
+  explicitly.
+  `FlutterPointerStrokeCoordinator` owns ordered Flutter pointer-to-Rust
+  delivery and terminal decisions behind its own explicit host. Preview
+  construction and presentation remain screen-owned.
+  `CanvasComicPanelActions` maps Rust comic panel projections to the active
+  canvas document, materializes panel layer trees, and applies/removes panel
+  clipping; it receives workspace, layer, and selection operations explicitly.
+  `CanvasComicWorkspaceNotifications` owns the workspace listener and
+  frame-coalesced change handling; the screen supplies page-selection cleanup,
+  rebuild, and follow-document workspace effects.
+  `CanvasDockActions` owns dock width changes, collapse/expand transitions,
+  tab movement, group resizing, and persistence through explicit state and
+  preference callbacks. `CanvasScreen` supplies the dock-state adapter and
+  wraps state mutations for widget publication.
+  `CanvasWorkspaceLayoutActions` owns workspace-selection and follow-document
+  preference transitions and returns immutable dock-selection values; the
+  screen applies them to view state.
+  `resolveCanvasWorkspaceFrame` in `workspace_dock_layout.dart` projects
+  explicit platform, viewport, preference, and dock snapshots into per-frame
+  dock visibility, effective widths, tablet modes, and native-menu eligibility.
+  `shouldUseWideDesktopLayout` owns the pure platform/logical/physical width
+  thresholds; the screen resolves inherited media and workspace mode, then
+  composes the resulting frame. These projections own no mutable state.
+  `CanvasLayerPanelContent` composes layer and vector presentation from the
+  existing action services; it does not own Rust document state.
+  `CanvasBrushActions.updateActiveBrushColor` is the single owner for active
+  brush color writes and successful autosave dirty marking; color UI state and
+  recent-color sequencing is owned by `CanvasBrushColorActions` through an
+  explicit host. It owns picker result handling and receives `BuildContext` at
+  the call site; the screen owns visible color projections.
+  `CanvasToolEventCoordinator` owns pointer sampling and Rust command dispatch
+  for selection, transform, fill, and ruler tools, plus selection mutation
+  commands. It delegates vector stroke mutations to `CanvasVectorActions` via
+  `CanvasVectorToolOperations`. It owns transient tool-start, target-layer,
+  sampled-point, and ruler state; the screen reads preview/ruler snapshots for
+  painting and coordinate snapping and resets pointer-path state when the tool
+  or engine changes. Shared selection geometry and dialogs remain explicit
+  host/action-service inputs.
+  `CanvasStrokePreviewActions` owns ephemeral Flutter/native preview point
+  assembly, sequence-to-preview mapping, chunk compaction, page-edge clipping,
+  and CPU-covered retirement; the screen supplies brush/document snapshots and
+  coordinate policy, while Rust remains authoritative for committed pixels.
+  `CanvasLiveStrokePreviewInput` sequences start/sample signaling around that
+  owner and the optional live GPU surface; keep pointer callbacks free of waits.
+  `CanvasPointerEventRouter` owns Flutter pointer filtering and dispatch order
+  across sampling, tools, touch navigation, and serialized stroke work through
+  an explicit host, plus active pointer-ID tracking and reset operations during
+  Pencil takeover and document replacement. `CanvasLiveStrokePreviewInput`
+  owns the diagnostic, GPU
+  pending signal, and preview begin/append order for confirmed input. Keep
+  transforms and native adapter policy at the screen/platform boundaries.
+  `CanvasViewportSurface` owns the canvas render stack and gesture surface from
+  an immutable paint snapshot. `CanvasViewportController` owns transform math,
+  the active scale-gesture baseline, and state-independent viewport command
+  routing; the screen obtains bounds, binds the document, and schedules
+  rebuilds. `CanvasInputCoordinatePolicy` owns
+  explicit screen-to-document ruler projection and safe/bounded input rules.
+  `CanvasStrokeConstraintController` owns per-stroke straighten/constrain state
+  and projects sampled positions without depending on widget state.
+  `CanvasGestureCoordinator` owns touch-tracker timing and gesture-to-command
+  mapping; `CanvasTouchStrokeCancellationCoordinator` owns queued touch-stroke
+  cancellation, and the screen supplies command effects.
+  `showCanvasClipboardPalette` owns the sheet/clipboard async flow and dispatches
+  pasted colors through the injected brush-color action; the palette owns its
+  typed commands and RGB text encoding.
+  `CanvasColorSampler` owns document-bounds checks and BGRA tile sampling;
+  `CanvasColorSamplingCoordinator` maps the sample, applies it through the
+  brush action service, then publishes its UI projection after success.
+  `CanvasBrushColorActions` owns apply/swap/reset sequencing, swap/reset command
+  routing, and recent-color policy while preserving the pointer-up drain and
+  bridge write order.
+  `CanvasWorkspaceOverlays` owns generic panel placement and semantics;
+  `CanvasFloatingWorkspacePanels` owns canvas panel metadata and translates
+  close actions into immutable visibility updates. The route owns the visibility
+  controller and composes child content. `CanvasWorkspacePresentationController` owns
+  the route's transient focus mode, quick-menu visibility, floating-panel
+  snapshot, and per-tablet-mode palette memory; the screen publishes changes
+  with `setState` and retains preference persistence, panel content, and route
+  lifecycle. `CanvasFloatingPanelVisibility` owns the
+  immutable panel visibility value and compact-versus-exclusive transition
+  rules.
+  `canvasWorkspacePanelForAction` maps panel commands to workspace panel IDs;
+  `selectCanvasWorkspacePanel` resolves dock routing and mobile sheet intent
+  from layout snapshots. `CanvasScreen` performs UI and persistence effects.
+  `CanvasBrushProjection` owns async Rust brush-summary mapping, local brush
+  preference restoration, stale-request rejection, and active-brush projection.
+  `CanvasWorkspaceEditorActions` owns workspace editing dialogs and preference
+  changes through explicit preference, dock snapshot, and screen-update inputs;
+  active dock presentation remains with `CanvasScreen`.
+  `buildCanvasMacOSApplicationMenus` builds the native macOS menu from shared
+  `EditorActionId` values and shortcuts; `isEditorActionDisabled` is the common
+  UI availability rule used by both the menu and top bar.
+  `buildCanvasEditorShortcutBindings` owns the Flutter shortcut map and sends
+  selected actions through the screen's existing command registry.
+  `CanvasInputSettingsController` owns gesture/navigation and large-control
+  settings plus the async dialog/result lifecycle. The settings dialogs own
+  temporary form state; the screen supplies the mounted/rebuild boundary, while
+  handedness remains with dock state and is persisted by workspace actions.
+  `CanvasTopBar` receives document/workspace projections and action callbacks
+  without reaching into the canvas state. `CanvasCommandSearchDialog` owns its
+  query and returns a selected editor action; `showCanvasCommandSearch` owns
+  the dialog result lifecycle and dispatches through an injected action handler.
+  `CanvasDesktopDock` owns dock rendering and palette drag targets;
+  `CanvasDesktopDockRegion` owns left/right placement and resize hit targets,
+  while the screen persists the resulting width and layout changes.
+  `CanvasDesktopWorkspaceChrome` places the status bar and collapsed-dock
+  affordances from the immutable workspace frame and explicit collapse state.
+  `CanvasBrushActions`
+  owns brush edit drafts, serialized settings writes, preview thumbnail
+  caching, and quick-size persistence through an explicit
+  `CanvasBrushActionHost`; the screen retains active selection, color
+  projections, and stroke state. `CanvasBrushColorDialog` owns temporary HSV,
+  RGB, and alpha selection and returns the chosen color;
+  `CanvasBrushColorActions` owns picker result handling, flush/publish/bridge
+  sequencing, and recent-color policy through an explicit host. The picker
+  context is passed per call instead of being retained by the action host.
+  `CanvasCommandBarEditorDialog` owns its
+  temporary command selection and returns the edited value on Save.
+  `CanvasSimpleEdgeControls`, `CanvasFocusQuickControls`, and
+  `CanvasQuickMenu` receive brush/color snapshots and callbacks; panel
+  decoration is isolated in `CanvasToolPanel`.
+  `CanvasWorkspacePalette` owns dock tab routing and properties, color,
+  materials, Quick Access, and History composition through a snapshot/action
+  port; screen-backed tool, brush, comic, and layer builders are lazy inputs.
+  `StrokeOperationQueue` owns ordered bridge work.
+- `CanvasStrokeAutosaveHold` owns the idempotent continuous-edit hold used by
+  Flutter and native stroke paths. The screen supplies autosave effects and
+  queue observations and ends the hold at stroke, replacement, and disposal
+  boundaries.
+- `CanvasStrokeStartCoordinator` owns brush-edit wait ordering and raster
+  target validation before Rust stroke creation. Keep the active engine,
+  selection, autosave hold, and user-facing error presentation behind its
+  explicit host callbacks.
+- `CanvasDanglingStrokeFinalizer` drains accepted input and finalizes a
+  dangling Rust stroke before brush edits, then resets local state and
+  publishes autosave and projection updates.
+- `CanvasStrokeCompletionCoordinator` owns common Flutter/native terminal
+  reset and preview/autosave refresh ordering while preserving source-specific
+  diagnostics and native-contact cleanup.
+- `CanvasStrokeCancellationCoordinator` owns failure recovery and shared local
+  cancellation cleanup. `CanvasTouchStrokeCancellationCoordinator` owns the
+  touch marker and serialized active-touch ownership check before requesting
+  shared cleanup, so a queued touch cancel cannot cancel a later Pencil stroke.
+- `CanvasDrawAndHoldCoordinator` owns stylus quiet-interval timing and rechecks
+  the stroke, constraint, latest position, and native queue snapshot before
+  dispatching the configured gesture. The screen supplies snapshots and owns
+  disposal with the route.
+- `CanvasLivePreviewFrameDiagnostics` coalesces post-frame preview metrics and
+  optional input-to-visible samples. It consumes an immutable snapshot and is
+  disposed with the route; keep trace meanings distinct from GPU completion or
+  display scan-out.
+- `CanvasEditorAuxiliaryOverlays` owns presentation for focus controls,
+  tablet/desktop tool rails, selection actions, and the quick menu from an
+  immutable snapshot and explicit callbacks. Keep editor command dispatch and
+  lifecycle effects with `CanvasScreen` and the relevant action owners.
+- Document replacement runs through `DocumentReplacementBarrier`: block new
+  Flutter and native input, drain accepted bridge work, cancel any unfinished
+  stroke, flush recovery, then replace the engine. If preparation fails, do not
+  replace the current document.
 - Keep platform input translation in the native adapters and wire-format
   decoding at the bridge/input boundary. Avoid platform-specific branching in
   the engine when an adapter can normalize input without changing semantics.
+- Keep Flutter pressure normalization in `CanvasPointerPressurePolicy` and
+  native Pencil normalization in its adapter; test platform fallbacks at the
+  input boundary before changing the pointer packet contract.
+- `CanvasNativeInputSubscriptions` owns native stream listeners and readiness
+  state. `CanvasScreen` selects the platform channels, forwards events to the
+  pointer coordinator, and disposes the subscription owner with the route.
+- `CanvasInputReplacementCoordinator` retires transient Flutter/native input
+  state before `DocumentReplacementBarrier` drains accepted input and replaces
+  a document. The screen supplies those concrete effects; keep preparation,
+  barrier, and replacement ordering covered by the coordinator tests.
 
 ## State, ordering, and lifecycle rules
 

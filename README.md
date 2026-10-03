@@ -8,13 +8,35 @@ The project is licensed under the Mozilla Public License 2.0 (MPL-2.0): files
 can be reused in proprietary applications, while modified Project Ink files
 must remain available under MPL-2.0.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and contribution checks,
+[SECURITY.md](SECURITY.md) for vulnerability reporting, and
+[CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## Status
 
-The Phase 3.5 illustration/workspace foundation and all locally executable
-verification are in place. Native texture-registry hookup, physical-device,
-hosted Windows/Linux, and final release validation remain gated work. Physical
-and external-platform acceptance is intentionally deferred to Phase 5 so
-development can remain within the available memory budget.
+The illustration/workspace foundation and full Flutter widget suite pass on
+the current host. Native texture-registry, physical-device, hosted
+Windows/Linux, and final release validation remain gated work. Physical and
+external-platform acceptance is intentionally deferred to Phase 5 while local
+implementation continues.
+The six platforms named above are development targets; none is currently
+claimed as release-supported. A platform becomes supported only after its
+signed install, input, document-provider, offline, recovery, and export checks
+are recorded in the release acceptance matrix.
+The first public release candidates are macOS and iPadOS. They remain
+unsupported until those acceptance gates pass; the other four platforms remain
+development targets for a later release.
+The app-specific interface copy is currently English only; no translated
+catalogs are included.
+Project Ink is not yet a release candidate: live dirty-close acceptance, signed
+platform packages, physical-device acceptance, and the public release workflow
+remain open. The Save/Discard/Cancel flow is implemented and has widget
+coverage; the real AppKit close/quit path still needs interactive confirmation.
+The requirement-by-requirement gate list is in
+[`specifications/release-readiness.md`](specifications/release-readiness.md).
+The intended first-release journeys and explicit non-goals are in
+[`specifications/first-release-scope.md`](specifications/first-release-scope.md);
+they become support claims only after their acceptance gates pass.
 The canvas now uses authoritative Rust composite tiles for committed artwork,
 supports sixteen deterministic layer blend modes, and keeps an ephemeral live
 stroke preview visible until the corresponding CPU tile is published;
@@ -186,9 +208,12 @@ fixture tiles, or 900 MB of estimated engine-owned memory.
   project capability, and comic projections/painters live in
   `comic_presentation.dart`.
 - `CanvasScreen` remains the Flutter composition/lifecycle point.
-  `CanvasDocumentActions`, `CanvasPreviewSynchronization`, and
-  `CanvasTileSynchronization` isolate document workflows, native preview
-  lifecycle, and coherent tile publication. `StrokeOperationQueue` serializes
+  `CanvasDocumentActions`, `CanvasLayerActions`,
+  `CanvasWorkspaceLayoutActions`, `CanvasToolActions`, `CanvasVectorActions`,
+  `CanvasPreviewSynchronization`, and `CanvasTileSynchronization` isolate
+  document workflows, Rust-backed layer commands and their serialized panel
+  state, device-local workspace layout decisions, raster tool workflows, native
+  preview lifecycle, and coherent tile publication. `StrokeOperationQueue` serializes
   bridge work and recovers after operation errors. Preserve confirmed-packet
   order, page rebinding, save-before-close order, undo/history transaction
   boundaries, and CPU fallback when editing these seams.

@@ -1,0 +1,19 @@
+name: release preflight
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release-preflight:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate version, changelog, tag, and checkout
+        run: scripts/release_preflight.sh "${GITHUB_REF_NAME}"
