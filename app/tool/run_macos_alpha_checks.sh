@@ -8,11 +8,12 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: run_macos_alpha_checks.sh [--unit-only | --workflows-only | --appkit-only | --full | --native-live-texture | --preflight-only]
+Usage: run_macos_alpha_checks.sh [--unit-only | --workflows-only | --appkit-only | --appkit-test <test-name> | --full | --native-live-texture | --preflight-only]
 
   --unit-only      Run Flutter analysis and the complete unit/widget suite.
   --workflows-only Also run Rust-backed disk journeys and build the app, but skip XCUITest.
   --appkit-only    Run only the real-app AppKit close/quit XCUITest matrix.
+  --appkit-test    Run one named NativeDocumentSafetyTests case for focused debugging.
   --full           Also run Rust-backed document workflows and real-app AppKit close/quit checks.
   --native-live-texture Run the foreground macOS Rust/Metal/Flutter texture smoke test.
   --preflight-only Report toolchain, disk, and app-process state without tests.
@@ -30,18 +31,28 @@ command -v flutter >/dev/null 2>&1 || fail 'Flutter is not on PATH'
 command -v xcodebuild >/dev/null 2>&1 || fail 'Xcode command-line tools are not on PATH'
 
 mode=full
+appkit_test=''
 case "${1:-}" in
   '') ;;
   --unit-only) mode=unit ;;
   --workflows-only) mode=workflows ;;
   --appkit-only) mode=appkit ;;
+  --appkit-test)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    mode=appkit-test
+    appkit_test="$2"
+    case "$appkit_test" in
+      testRedCloseCancelKeepsDirtyNamedProjectOpen|testRedCloseDiscardPreservesNamedProjectAndRemovesRecovery|testRedCloseSavePersistsNamedProjectBeforeWindowCloses|testCommandQCancelKeepsDirtyNamedProjectOpen|testCommandQDiscardPreservesNamedProjectAndRemovesRecovery|testCommandQSavePersistsNamedProjectBeforeAppQuits) ;;
+      *) fail "unknown NativeDocumentSafetyTests case: $appkit_test" ;;
+    esac
+    ;;
   --full) mode=full ;;
   --native-live-texture) mode=native ;;
   --preflight-only) mode=preflight ;;
   --help|-h) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
-[[ $# -le 1 ]] || { usage >&2; exit 2; }
+[[ "$mode" == appkit-test || $# -le 1 ]] || { usage >&2; exit 2; }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 app_dir="$(cd "$script_dir/.." && pwd)"
@@ -67,7 +78,7 @@ if [[ "$mode" == preflight ]]; then
   exit 0
 fi
 
-if [[ "$mode" == full || "$mode" == workflows || "$mode" == appkit || "$mode" == native ]]; then
+if [[ "$mode" == full || "$mode" == workflows || "$mode" == appkit || "$mode" == appkit-test || "$mode" == native ]]; then
   min_free_mib="${PROJECT_INK_MACOS_BUILD_MIN_FREE_MIB:-6144}"
   [[ "$min_free_mib" =~ ^[0-9]+$ ]] || fail 'minimum free-space setting must be an integer MiB value'
   (( free_mib >= min_free_mib )) || \
@@ -175,6 +186,18 @@ if [[ "$mode" == appkit ]]; then
     -destination 'platform=macOS' \
     -derivedDataPath "$app_dir/build/macos-acceptance-derived" \
     -resultBundlePath "$result_bundle"
+fi
+
+if [[ "$mode" == appkit-test ]]; then
+  result_bundle="$results_dir/NativeDocumentSafety-${appkit_test}-$(date +%Y%m%d-%H%M%S)-$$.xcresult"
+  run_check macos_native_document_safety_focused \
+    xcodebuild test -quiet \
+    -workspace "$app_dir/macos/Runner.xcworkspace" \
+    -scheme Acceptance \
+    -destination 'platform=macOS' \
+    -derivedDataPath "$app_dir/build/macos-acceptance-derived" \
+    -resultBundlePath "$result_bundle" \
+    "-only-testing:RunnerUITests/NativeDocumentSafetyTests/$appkit_test"
 fi
 
 if [[ "$mode" == native ]]; then

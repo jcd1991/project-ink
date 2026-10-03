@@ -14,6 +14,11 @@ mode does not claim native close/quit acceptance. Use `--appkit-only` to rerun
 the real-app close/quit matrix after changing the UI tests or granting Xcode UI
 automation, without rerunning the Rust-backed workflows. It still needs 6 GiB
 free for Xcode build products and refuses to run while Project Ink is open.
+Use `--appkit-test <test-name>` to run one of the six named
+`NativeDocumentSafetyTests` cases while diagnosing a focused failure; the
+runner validates the test name and retains a separate `.xcresult` bundle.
+For example: `app/tool/run_macos_alpha_checks.sh --appkit-test
+testRedCloseCancelKeepsDirtyNamedProjectOpen`.
 `--unit-only` runs analysis and Flutter unit/widget tests without the build
 space threshold. The UI tests
 launch with a unique documents path inside the app sandbox and compare the

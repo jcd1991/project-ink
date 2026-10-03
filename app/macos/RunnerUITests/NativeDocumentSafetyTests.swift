@@ -57,8 +57,7 @@ final class NativeDocumentSafetyTests: XCTestCase {
     XCTAssertEqual(unchangedProject, project.baseline)
     XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryProject.path))
 
-    app.launch()
-    XCTAssertTrue(drawingCanvas.waitForExistence(timeout: 30))
+    launchCanvas()
     XCTAssertFalse(app.staticTexts["Unsaved changes"].exists)
     attachScreenshot("red-close-discard-clean-relaunch")
   }
@@ -101,8 +100,7 @@ final class NativeDocumentSafetyTests: XCTestCase {
     XCTAssertEqual(unchangedProject, project.baseline)
     XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryProject.path))
 
-    app.launch()
-    XCTAssertTrue(drawingCanvas.waitForExistence(timeout: 30))
+    launchCanvas()
     XCTAssertFalse(app.staticTexts["Unsaved changes"].exists)
     attachScreenshot("command-q-discard-clean-relaunch")
   }
@@ -126,9 +124,29 @@ final class NativeDocumentSafetyTests: XCTestCase {
     app.descendants(matching: .any)["drawing-canvas"]
   }
 
-  private func startDirtyNamedProject() throws -> NamedProject {
+  private func launchCanvas() {
     app.launch()
-    XCTAssertTrue(drawingCanvas.waitForExistence(timeout: 30))
+    app.activate()
+    XCTAssertTrue(
+      app.wait(for: .runningForeground, timeout: 10),
+      "Project Ink launched but macOS did not bring it to the foreground. "
+        + "Check Xcode UI automation and accessibility permissions."
+    )
+    let mainWindow = app.windows.firstMatch
+    XCTAssertTrue(mainWindow.waitForExistence(timeout: 5), "Project Ink has no main window.")
+    XCTAssertTrue(
+      mainWindow.isEnabled,
+      "Project Ink is foregrounded but its window is disabled to UI automation. "
+        + "Check macOS Privacy & Security permissions for Xcode."
+    )
+    XCTAssertTrue(
+      drawingCanvas.waitForExistence(timeout: 30),
+      "Project Ink is foregrounded but the Flutter drawing canvas is missing."
+    )
+  }
+
+  private func startDirtyNamedProject() throws -> NamedProject {
+    launchCanvas()
 
     let projectName = "\(name.lowercased())-\(UUID().uuidString.prefix(8))"
     app.typeKey("s", modifierFlags: [.command, .shift])
