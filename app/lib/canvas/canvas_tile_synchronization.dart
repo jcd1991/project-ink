@@ -1,45 +1,149 @@
-part of 'canvas_screen.dart';
+import 'dart:async';
+import 'dart:math' as math;
 
-const int _compositeLayerId = -1;
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
+
+import '../bridge/engine_api.dart';
+import 'canvas_diagnostic_recorder.dart';
+import 'canvas_composite_tile_snapshot_reader.dart';
+import 'canvas_cpu_acknowledgement_batch.dart';
+import 'canvas_preview_synchronization.dart';
+import 'canvas_stroke_preview_actions.dart';
+import 'tile_cache.dart';
+
 const int _maxCpuHandoffSnapshotTiles = 256;
+
+/// Engine identity captured for one tile refresh operation.
+@immutable
+class CanvasTileSynchronizationSession {
+  const CanvasTileSynchronizationSession({
+    required this.engine,
+    required this.generation,
+  });
+
+  final EngineApi engine;
+  final int generation;
+}
+
+/// Immutable view of route state needed by one tile refresh decision.
+///
+/// The host creates this value at the point where a refresh needs the data,
+/// so asynchronous work does not retain mutable layer lists or queue owners.
+@immutable
+class CanvasTileSynchronizationSnapshot {
+  CanvasTileSynchronizationSnapshot({
+    required this.lastPacketMicros,
+    required Iterable<int> visibleRasterLayerIds,
+    required this.strokeWorkQueueDepth,
+    required this.pendingNativePacketCount,
+  }) : visibleRasterLayerIds = List<int>.unmodifiable(visibleRasterLayerIds);
+
+  final int? lastPacketMicros;
+  final List<int> visibleRasterLayerIds;
+  final int strokeWorkQueueDepth;
+  final int pendingNativePacketCount;
+}
+
+/// UI effects performed only after a coherent tile publication is prepared.
+class CanvasTileSynchronizationEffects {
+  const CanvasTileSynchronizationEffects({
+    required this.publishCanvasState,
+    required this.markVisibleUpdate,
+  });
+
+  final VoidCallback publishCanvasState;
+  final void Function({
+    required int packetMicros,
+    required Duration tileDecode,
+    required int dirtyTiles,
+  })
+  markVisibleUpdate;
+}
+
+/// State and callbacks consumed by the ordered CPU tile publication service.
+abstract interface class CanvasTileSynchronizationHost {
+  bool get disposed;
+  bool get isMounted;
+  CanvasTileSynchronizationSession captureSession();
+  bool isSessionCurrent(CanvasTileSynchronizationSession session);
+  CanvasTileSynchronizationSnapshot captureSnapshot();
+  bool get strokeActive;
+}
 
 /// Serializes CPU tile refreshes with preview acknowledgements so tile
 /// publication and stroke coverage advance as one coherent revision.
-mixin _CanvasTileSynchronization on State<CanvasScreen> {
-  bool get _awaitingPreviewCommit;
-  set _awaitingPreviewCommit(bool value);
-  CanvasDiagnosticRecorder get _canvasDiagnostics;
-  int get _cpuCommitBatchId;
-  set _cpuCommitBatchId(int value);
-  bool get _disposed;
-  int get _engineGeneration;
-  int? get _lastPacketMicros;
-  StrokeAcknowledgement? get _lastPublishedPreviewAcknowledgement;
-  set _lastPublishedPreviewAcknowledgement(StrokeAcknowledgement? value);
-  List<LayerView> get _layers;
-  LivePreviewController? get _livePreviewSurface;
-  LiveStrokeCoordinator get _liveStrokeCoordinator;
-  List<StrokeAcknowledgement> get _pendingCpuStrokeAcks;
-  List<StrokeAcknowledgement> get _pendingLiveStrokeAcks;
-  List<Uint8List> get _pendingNativePackets;
-  Phase1PerformanceTrace get _performanceTrace;
-  int _previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement);
-  int get _renderRevision;
-  set _renderRevision(int value);
-  bool get _strokeActive;
-  StrokeOperationQueue get _strokeOperations;
-  ValueNotifier<LiveStrokePreview?> get _strokePreview;
-  TileCache get _tileBytes;
-  TileImageCache get _tileImages;
-  void _setStrokePreview(LiveStrokePreview? next);
+class CanvasTileSynchronization {
+  CanvasTileSynchronization(
+    this.host, {
+    required this.diagnostics,
+    required this.previewSynchronization,
+    required this.strokePreviewActions,
+    required this.effects,
+    CanvasCompositeTileSnapshotReader snapshotReader =
+        const CanvasCompositeTileSnapshotReader(),
+  }) : _snapshotReader = snapshotReader;
 
+  final CanvasTileSynchronizationHost host;
+  final CanvasDiagnosticRecorder diagnostics;
+  final CanvasPreviewSynchronization previewSynchronization;
+  final CanvasTilePreviewActions strokePreviewActions;
+  final CanvasTileSynchronizationEffects effects;
+  final CanvasCompositeTileSnapshotReader _snapshotReader;
+  final TileCache tileBytes = TileCache();
+  TileImageCache tileImages = TileImageCache();
   bool _refreshingTiles = false;
   bool _refreshRequested = false;
   bool _refreshInitialRequested = false;
   bool _initialTilesLoaded = false;
+  Timer? _pollTimer;
+  int _cpuCommitBatchId = 0;
+  int _renderRevision = 0;
+  final List<StrokeAcknowledgement> _pendingCpuStrokeAcks =
+      <StrokeAcknowledgement>[];
+  final List<StrokeAcknowledgement> _pendingLiveStrokeAcks =
+      <StrokeAcknowledgement>[];
 
-  Future<void> _refreshTiles({bool initial = false}) async {
-    if (_disposed) return;
+  bool get isPolling => _pollTimer != null;
+
+  int get renderRevision => _renderRevision;
+
+  /// Starts the periodic fallback that discovers Rust tile invalidations.
+  ///
+  /// Pointer completion and history actions still request immediate refreshes;
+  /// polling only catches renderer work that completes asynchronously.
+  void startPolling({required Duration interval}) {
+    if (host.disposed || _pollTimer != null) return;
+    _pollTimer = Timer.periodic(interval, (_) => unawaited(refreshTiles()));
+  }
+
+  /// Stops refresh polling when the canvas route releases this owner.
+  void dispose() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _pendingCpuStrokeAcks.clear();
+    _pendingLiveStrokeAcks.clear();
+    tileBytes.clear();
+    tileImages.dispose();
+  }
+
+  void resetForEngineReplacement() {
+    _refreshRequested = false;
+    _refreshInitialRequested = false;
+    _initialTilesLoaded = false;
+    clearPendingLiveAcknowledgements();
+    tileBytes.clear();
+    tileImages.dispose();
+    tileImages = TileImageCache();
+    _renderRevision = 0;
+  }
+
+  void clearPendingLiveAcknowledgements() {
+    _pendingLiveStrokeAcks.clear();
+  }
+
+  Future<void> refreshTiles({bool initial = false}) async {
+    if (host.disposed) return;
     if (_refreshingTiles) {
       // A release can arrive while an earlier refresh is decoding tiles. Do
       // not drop that request: the earlier batch may have been drained before
@@ -50,8 +154,8 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       return;
     }
     _refreshingTiles = true;
-    final engine = widget.engine;
-    final generation = _engineGeneration;
+    final session = host.captureSession();
+    final engine = session.engine;
     final tileDecodeClock = Stopwatch()..start();
     var drainTileUpdatesUs = 0;
     var compositeSnapshotReadUs = 0;
@@ -68,10 +172,11 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       tileDrainClock.stop();
       drainTileUpdatesUs = tileDrainClock.elapsedMicroseconds;
       if (batch.rendererBusy) {
-        _canvasDiagnostics.record('canvas.cpu_tile_poll_deferred', {
+        final snapshot = host.captureSnapshot();
+        diagnostics.record('canvas.cpu_tile_poll_deferred', {
           'revision': batch.revision,
-          'strokeWorkQueueDepth': _strokeOperations.pendingCount,
-          'nativePacketQueueDepth': _pendingNativePackets.length,
+          'strokeWorkQueueDepth': snapshot.strokeWorkQueueDepth,
+          'nativePacketQueueDepth': snapshot.pendingNativePacketCount,
           'renderer': 'flutter_canvas',
         });
       }
@@ -82,7 +187,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
               ? ++_cpuCommitBatchId
               : _cpuCommitBatchId;
       if (strokeAcknowledgements.isNotEmpty) {
-        _canvasDiagnostics.record('canvas.cpu_commit_batch_received', {
+        diagnostics.record('canvas.cpu_commit_batch_received', {
           'commitId': cpuCommitBatchId,
           'revision': batch.revision,
           'tileUpdates': batch.tiles.length,
@@ -112,7 +217,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
               .toList(growable: false),
         });
       }
-      if (_livePreviewSurface != null) {
+      if (previewSynchronization.surface != null) {
         _pendingLiveStrokeAcks.addAll(strokeAcknowledgements);
       }
       for (final acknowledgement in strokeAcknowledgements) {
@@ -125,9 +230,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
           _pendingCpuStrokeAcks.add(acknowledgement);
         }
       }
-      if (_disposed ||
-          generation != _engineGeneration ||
-          engine != widget.engine) {
+      if (!host.isSessionCurrent(session)) {
         return;
       }
       final fullRedraw = initial || !_initialTilesLoaded || batch.fullRedraw;
@@ -142,17 +245,21 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       );
 
       final visibleLayers =
-          _layers
-              .where((layer) => layer.visible)
-              .map((layer) => layer.id)
-              .toSet();
+          host.captureSnapshot().visibleRasterLayerIds.toSet();
       if (visibleLayers.isEmpty) {
         visibleLayers.add(engine.documentInfo.primaryRasterLayer);
       }
       final updates = batch.tiles
           .where(
             (update) =>
-                update.layer == _compositeLayerId ||
+                // Layer-property changes (especially visibility) arrive as
+                // full redraws with per-layer tile descriptors. Keep hidden
+                // layer descriptors in that batch so their coordinates are
+                // still recomposited: filtering them here can consume the
+                // only invalidation before the updated layer projection is
+                // published, leaving stale/blank composite tiles behind.
+                fullRedraw ||
+                update.layer == compositeTileLayerId ||
                 visibleLayers.contains(update.layer),
           )
           .toList(growable: false);
@@ -164,42 +271,17 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       int? snapshotRevision;
       var snapshotCoherent = true;
       final snapshotPixels = <String, Uint8List>{};
-      final acknowledgedCoordinates = <String, StrokeTileCoordinate>{};
-      final acknowledgedTileRevisions = <String, int>{};
-      final selectedCpuAcknowledgements = <StrokeAcknowledgement>[];
-      StrokeAcknowledgement? oversizedSnapshotAcknowledgement;
-      for (final acknowledgement in cpuStrokeAcknowledgements) {
-        final newCoordinates = acknowledgement.dirtyTiles
-            .where(
-              (coordinate) =>
-                  !acknowledgedCoordinates.containsKey(
-                    '${coordinate.x}:${coordinate.y}',
-                  ),
-            )
-            .toList(growable: false);
-        if (acknowledgedCoordinates.length + newCoordinates.length >
-            _maxCpuHandoffSnapshotTiles) {
-          // A single Rust acknowledgement is one CPU commit group. Keep it
-          // intact even when it spans more than the usual per-refresh tile
-          // budget: the bridge reads it in bounded 16 MiB parts below, and
-          // the live path must not wait forever for an acknowledgement that
-          // can never fit in the selection budget.
-          if (selectedCpuAcknowledgements.isNotEmpty) break;
-          oversizedSnapshotAcknowledgement = acknowledgement;
-        }
-        selectedCpuAcknowledgements.add(acknowledgement);
-        for (final coordinate in acknowledgement.dirtyTiles) {
-          final key = '${coordinate.x}:${coordinate.y}';
-          acknowledgedCoordinates[key] = coordinate;
-          acknowledgedTileRevisions[key] = math.max(
-            acknowledgedTileRevisions[key] ?? 0,
-            acknowledgement.revision,
-          );
-        }
-      }
-      if (selectedCpuAcknowledgements.length <
-          cpuStrokeAcknowledgements.length) {
-        _canvasDiagnostics.record('canvas.cpu_commit_snapshot_deferred', {
+      final acknowledgementBatch = CanvasCpuAcknowledgementBatch.plan(
+        pending: cpuStrokeAcknowledgements,
+        maxTileCount: _maxCpuHandoffSnapshotTiles,
+      );
+      final acknowledgedCoordinates = acknowledgementBatch.coordinates;
+      final acknowledgedTileRevisions = acknowledgementBatch.tileRevisions;
+      final selectedCpuAcknowledgements = acknowledgementBatch.acknowledgements;
+      final oversizedSnapshotAcknowledgement =
+          acknowledgementBatch.oversizedAcknowledgement;
+      if (acknowledgementBatch.hasDeferredAcknowledgements) {
+        diagnostics.record('canvas.cpu_commit_snapshot_deferred', {
           'commitId': cpuCommitBatchId,
           'reason': 'bounded_snapshot_group',
           'selectedAcknowledgements': selectedCpuAcknowledgements.length,
@@ -211,7 +293,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
         });
       }
       if (oversizedSnapshotAcknowledgement != null) {
-        _canvasDiagnostics.record('canvas.cpu_commit_snapshot_multipart', {
+        diagnostics.record('canvas.cpu_commit_snapshot_multipart', {
           'commitId': cpuCommitBatchId,
           'strokeId': oversizedSnapshotAcknowledgement.stroke.toString(),
           'throughSourceSequence':
@@ -242,60 +324,37 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
                   )
                   .take(_maxCpuHandoffSnapshotTiles)
                   .toList(growable: false);
-      Future<void> readSnapshotPart(
-        List<StrokeTileCoordinate> partCoordinates,
-      ) async {
-        if (!snapshotCoherent || partCoordinates.isEmpty) return;
-        final part = await engine.readCompositeTilesSnapshot(
-          coordinates: partCoordinates,
-        );
-        if (snapshotRevision != null && snapshotRevision != part.revision) {
-          snapshotCoherent = false;
-          return;
-        }
-        snapshotRevision = part.revision;
-        for (final tile in part.tiles) {
-          snapshotPixels['${tile.x}:${tile.y}'] = tile.bytes;
-        }
-      }
-
-      if (snapshotCoordinates.isNotEmpty) {
-        snapshotPartCount =
-            (snapshotCoordinates.length + maxCompositeTileSnapshotTiles - 1) ~/
-            maxCompositeTileSnapshotTiles;
-        var partIndex = 0;
-        final snapshotReadClock = Stopwatch()..start();
-        for (
-          var start = 0;
-          start < snapshotCoordinates.length && snapshotCoherent;
-          start += maxCompositeTileSnapshotTiles
-        ) {
-          final end = math.min(
-            start + maxCompositeTileSnapshotTiles,
-            snapshotCoordinates.length,
-          );
-          _canvasDiagnostics.record('canvas.cpu_commit_snapshot_part', {
+      final snapshot = await _snapshotReader.read(
+        engine: engine,
+        coordinates: snapshotCoordinates,
+        onPartStarted: ({
+          required partIndex,
+          required partCount,
+          required tileCount,
+        }) {
+          diagnostics.record('canvas.cpu_commit_snapshot_part', {
             'commitId': cpuCommitBatchId,
             'partIndex': partIndex,
-            'partCount': snapshotPartCount,
-            'tileCount': end - start,
+            'partCount': partCount,
+            'tileCount': tileCount,
           });
-          await readSnapshotPart(snapshotCoordinates.sublist(start, end));
-          partIndex++;
-        }
-        snapshotReadClock.stop();
-        compositeSnapshotReadUs = snapshotReadClock.elapsedMicroseconds;
-      }
+        },
+      );
+      snapshotPartCount = snapshot.partCount;
+      compositeSnapshotReadUs = snapshot.elapsedMicroseconds;
+      snapshotRevision = snapshot.revision;
+      snapshotCoherent = snapshot.isCoherent;
+      snapshotPixels.addAll(snapshot.pixels);
       if (!snapshotCoherent) {
         snapshotPixels.clear();
-        _canvasDiagnostics.record('canvas.cpu_commit_snapshot_deferred', {
+        diagnostics.record('canvas.cpu_commit_snapshot_deferred', {
           'commitId': cpuCommitBatchId,
           'reason': 'document_revision_changed_between_parts',
           'tileCount': snapshotCoordinates.length,
         });
       } else if (snapshotRevision != null) {
-        revision = math.max(revision, snapshotRevision!);
-        _canvasDiagnostics.record('canvas.cpu_commit_pixel_snapshot', {
+        revision = math.max(revision, snapshotRevision);
+        diagnostics.record('canvas.cpu_commit_pixel_snapshot', {
           'commitId': cpuCommitBatchId,
           'snapshotRevision': snapshotRevision,
           'tileCount': snapshotPixels.length,
@@ -306,7 +365,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
         // Keep the previous frame visible while a full snapshot is decoded.
         // Clearing the GPU cache here makes layer changes flash white/empty
         // before the replacement tiles are ready.
-        _tileBytes.clear();
+        tileBytes.clear();
       }
 
       var changed = false;
@@ -319,7 +378,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
         if (requiredAcknowledgementRevision != null &&
             (!snapshotCoherent ||
                 snapshotRevision == null ||
-                snapshotRevision! < requiredAcknowledgementRevision ||
+                snapshotRevision < requiredAcknowledgementRevision ||
                 snapshotBytes == null)) {
           // Never publish a separately-read tile from an acknowledgement
           // group whose immutable snapshot was missing or crossed revisions.
@@ -332,20 +391,18 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
         final bytes =
             snapshotBytes ??
             await engine.readCompositeTile(x: coordinate.$1, y: coordinate.$2);
-        if (_disposed ||
-            generation != _engineGeneration ||
-            engine != widget.engine) {
+        if (!host.isSessionCurrent(session)) {
           return;
         }
-        final accepted = _tileBytes.put(
+        final accepted = tileBytes.put(
           revision,
-          _compositeLayerId,
+          compositeTileLayerId,
           coordinate.$1,
           coordinate.$2,
           bytes,
         );
         if (!accepted) continue;
-        _canvasDiagnostics.recordCompositeTile(
+        diagnostics.recordCompositeTile(
           revision: revision,
           x: coordinate.$1,
           y: coordinate.$2,
@@ -353,23 +410,25 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
           // Preserve exact CPU output for the committed final frame. During
           // the stroke only compact hashes are logged, keeping long captures
           // within their fixed size budget.
-          includePixels: !_strokeActive && _awaitingPreviewCommit,
+          includePixels:
+              !host.strokeActive &&
+              previewSynchronization.awaitingPreviewCommit,
         );
         final key = TileCacheKey(
           revision,
-          _compositeLayerId,
+          compositeTileLayerId,
           coordinate.$1,
           coordinate.$2,
         );
         final tileImageClock = Stopwatch()..start();
-        await _tileImages.put(key, bytes);
+        await tileImages.put(key, bytes);
         tileImageClock.stop();
         tileImageDecodeUs += tileImageClock.elapsedMicroseconds;
         decodedTileCount++;
         changed = true;
       }
       if (deferredAcknowledgedTiles > 0) {
-        _canvasDiagnostics.record('canvas.cpu_commit_tiles_deferred', {
+        diagnostics.record('canvas.cpu_commit_tiles_deferred', {
           'commitId': cpuCommitBatchId,
           'tileCount': deferredAcknowledgedTiles,
           'snapshotCoherent': snapshotCoherent,
@@ -380,14 +439,14 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       _initialTilesLoaded = true;
       if (fullRedraw) {
         _renderRevision = revision;
-        _tileImages.retainRevision(revision);
+        tileImages.retainRevision(revision);
       } else {
         // Dirty images are decoded into the new revision while the current
         // frame remains visible. Promote unchanged tiles only after every
         // replacement image is ready, then switch the revision in the same
         // state publication that advances live stroke coverage.
-        final previousRevision = _renderRevision;
-        _tileImages.promoteRevision(previousRevision, revision);
+        final previousRevision = renderRevision;
+        tileImages.promoteRevision(previousRevision, revision);
         _renderRevision = revision;
       }
       var acknowledgedPreviewThrough = -1;
@@ -400,7 +459,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
                 .where(
                   (coordinate) => batch.tiles.any(
                     (tile) =>
-                        tile.layer == _compositeLayerId &&
+                        tile.layer == compositeTileLayerId &&
                         tile.revision == acknowledgement.revision &&
                         tile.x == coordinate.x &&
                         tile.y == coordinate.y,
@@ -415,7 +474,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
             acknowledgement.dirtyTiles.isEmpty ||
             (snapshotCoherent &&
                 snapshotRevision != null &&
-                snapshotRevision! >= acknowledgement.revision &&
+                snapshotRevision >= acknowledgement.revision &&
                 allDirtyTilePixelsDecoded);
         if (hasPublishedPixels) {
           publishedPixelAcknowledgements.add(acknowledgement);
@@ -425,8 +484,9 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
                 ? _previewIndexForAcknowledgement(acknowledgement)
                 : -1;
         if (previewIndex < 0) continue;
-        _lastPublishedPreviewAcknowledgement = acknowledgement;
-        _canvasDiagnostics.record('canvas.cpu_commit_handoff', {
+        previewSynchronization.lastPublishedPreviewAcknowledgement =
+            acknowledgement;
+        diagnostics.record('canvas.cpu_commit_handoff', {
           'commitId': cpuCommitBatchId,
           'strokeId': acknowledgement.stroke.toString(),
           'throughSourceSequence': acknowledgement.highestCommittedSequence,
@@ -489,14 +549,14 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       _pendingCpuStrokeAcks.removeWhere(
         (acknowledgement) =>
             publishedPixelAcknowledgements.contains(acknowledgement) &&
-            (_strokePreview.value == null ||
+            (previewSynchronization.strokePreview.value == null ||
                 _previewIndexForAcknowledgement(acknowledgement) < 0),
       );
       // A full redraw with no tiles is a valid empty document (for example,
       // undoing the only stroke). The cache has already retired the previous
       // frame above, so repaint even when no replacement image was decoded.
-      if ((changed || fullRedraw || previewProgressChanged) && mounted) {
-        final livePreview = _strokePreview.value;
+      if ((changed || fullRedraw || previewProgressChanged) && host.isMounted) {
+        final livePreview = previewSynchronization.strokePreview.value;
         if (livePreview != null) {
           final candidateThrough = acknowledgedPreviewThrough;
           if (candidateThrough >= 0) {
@@ -507,7 +567,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
                       livePreview.points.length,
                     )
                     .toInt();
-            _setStrokePreview(
+            previewSynchronization.setStrokePreview(
               livePreview.copyWith(
                 confirmedThrough: confirmedThrough,
                 revision: livePreview.revision + 1,
@@ -518,11 +578,11 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
               return publishedCpuAcknowledgements.contains(acknowledgement) &&
                   (index < 0 || index <= candidateThrough);
             });
-            _liveStrokeCoordinator.retireThrough(candidateThrough);
+            strokePreviewActions.retireThrough(candidateThrough);
           }
-          final committedPreview = _strokePreview.value;
-          if (!_strokeActive &&
-              _awaitingPreviewCommit &&
+          final committedPreview = previewSynchronization.strokePreview.value;
+          if (!host.strokeActive &&
+              previewSynchronization.awaitingPreviewCommit &&
               committedPreview != null &&
               committedPreview.confirmedThrough >=
                   committedPreview.points.length) {
@@ -535,7 +595,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
                     )
                     .lastOrNull ??
                 publishedCpuAcknowledgements.lastOrNull ??
-                _lastPublishedPreviewAcknowledgement;
+                previewSynchronization.lastPublishedPreviewAcknowledgement;
             retiredPreviewFields = <String, Object?>{
               'strokeId': terminalAcknowledgement?.stroke.toString(),
               'throughSourceSequence':
@@ -548,17 +608,17 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
               'terminalAcknowledgementInCurrentRefresh':
                   publishedCpuAcknowledgements.isNotEmpty,
             };
-            _setStrokePreview(null);
-            _liveStrokeCoordinator.clear();
-            _lastPublishedPreviewAcknowledgement = null;
-            _awaitingPreviewCommit = false;
+            previewSynchronization.setStrokePreview(null);
+            strokePreviewActions.clear();
+            previewSynchronization.lastPublishedPreviewAcknowledgement = null;
+            previewSynchronization.awaitingPreviewCommit = false;
             _pendingCpuStrokeAcks.clear();
           }
         }
-        final packetMicros = _lastPacketMicros;
+        final packetMicros = host.captureSnapshot().lastPacketMicros;
         final dirtyTiles = updates.length;
         final tileDecode = tileDecodeClock.elapsed;
-        _canvasDiagnostics.record('canvas.cpu_commit_stage_timing', {
+        diagnostics.record('canvas.cpu_commit_stage_timing', {
           'commitId': cpuCommitBatchId,
           'revision': revision,
           'tileUpdates': batch.tiles.length,
@@ -572,37 +632,37 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
           'refreshToSetStateUs': tileDecode.inMicroseconds,
           'renderer': 'flutter_canvas',
         });
-        setState(() {});
+        effects.publishCanvasState();
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          _canvasDiagnostics.record('canvas.cpu_frame_presented', {
+          final frameSnapshot = host.captureSnapshot();
+          diagnostics.record('canvas.cpu_frame_presented', {
             'revision': revision,
             'dirtyTiles': dirtyTiles,
             'fullRedraw': fullRedraw,
             ...cpuCoverageFrameFields,
-            'strokeWorkQueueDepth': _strokeOperations.pendingCount,
-            'nativePacketQueueDepth': _pendingNativePackets.length,
+            'strokeWorkQueueDepth': frameSnapshot.strokeWorkQueueDepth,
+            'nativePacketQueueDepth': frameSnapshot.pendingNativePacketCount,
             'batchToFrameUs':
                 tileDecodeClock.elapsedMicroseconds - batchReceivedAtRefreshUs,
             'refreshToFrameUs': tileDecodeClock.elapsedMicroseconds,
             'renderer': 'flutter_canvas',
             'gpuPreviewReady':
-                _livePreviewSurface?.gpuFrameReady.value ?? false,
+                previewSynchronization.surface?.gpuFrameReady.value ?? false,
           });
           final retired = retiredPreviewFields;
           if (retired != null) {
-            _canvasDiagnostics.record('canvas.live_preview_retired', retired);
+            diagnostics.record('canvas.live_preview_retired', retired);
           }
         });
         _scheduleLiveStrokeAcknowledgements(revision);
         if (packetMicros != null) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            _performanceTrace.markVisibleUpdate(
+            if (!host.isMounted) return;
+            effects.markVisibleUpdate(
               packetMicros: packetMicros,
               tileDecode: tileDecode,
               dirtyTiles: dirtyTiles,
             );
-            widget.onPerformanceSnapshot?.call(_performanceTrace.snapshot());
           });
         }
       }
@@ -610,22 +670,20 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
       // example after a tool/document transition). Once a commit's immutable
       // pixels are present, there is no live geometry left for it to retire;
       // discard its acknowledgement instead of snapshotting it on every poll.
-      if (_strokePreview.value == null &&
+      if (previewSynchronization.strokePreview.value == null &&
           publishedCpuAcknowledgements.isNotEmpty) {
         _pendingCpuStrokeAcks.removeWhere(
           publishedCpuAcknowledgements.contains,
         );
       }
     } catch (error, stack) {
-      if (!_disposed &&
-          generation == _engineGeneration &&
-          engine == widget.engine) {
-        _canvasDiagnostics.recordError('canvas_tile_refresh', error, stack);
+      if (host.isSessionCurrent(session)) {
+        diagnostics.recordError('canvas_tile_refresh', error, stack);
         debugPrint('Project Ink tile refresh failed: $error\n$stack');
       }
     } finally {
       _refreshingTiles = false;
-      if (_refreshRequested && !_disposed) {
+      if (_refreshRequested && !host.disposed) {
         final retryInitial = _refreshInitialRequested;
         _refreshRequested = false;
         _refreshInitialRequested = false;
@@ -633,7 +691,7 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
         // visible before the follow-up drain. This is intentionally a single
         // coalesced retry; the regular 16 ms poll remains the backstop.
         scheduleMicrotask(() {
-          if (!_disposed) unawaited(_refreshTiles(initial: retryInitial));
+          if (!host.disposed) unawaited(refreshTiles(initial: retryInitial));
         });
       } else {
         _refreshInitialRequested = false;
@@ -649,13 +707,19 @@ mixin _CanvasTileSynchronization on State<CanvasScreen> {
         .toList(growable: false);
     if (eligible.isEmpty) return;
     _pendingLiveStrokeAcks.removeWhere(eligible.contains);
-    final liveSurface = _livePreviewSurface;
+    final liveSurface = previewSynchronization.surface;
     if (liveSurface == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_disposed || !identical(liveSurface, _livePreviewSurface)) return;
+      if (host.disposed ||
+          !identical(liveSurface, previewSynchronization.surface)) {
+        return;
+      }
       for (final acknowledgement in eligible) {
         unawaited(liveSurface.acknowledge(acknowledgement));
       }
     });
   }
+
+  int _previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement) =>
+      strokePreviewActions.previewIndexForAcknowledgement(acknowledgement);
 }

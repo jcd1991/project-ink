@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/canvas/native_pointer_stream.dart';
+import 'package:project_ink/canvas/native_pointer_packet_adapter.dart';
 import 'package:project_ink/canvas/pointer_packet.dart';
 
 void main() {
@@ -26,6 +27,42 @@ void main() {
     expect(data.getFloat32(16, Endian.little), 220);
     expect(packetHasPhase(transformed, InkPointerPhase.down), isTrue);
     expect(packetHasPhase(transformed, InkPointerPhase.up), isFalse);
+  });
+
+  test('packet adapter transforms coordinates and rewrites every sequence', () {
+    final packet = encodePointerPacket(
+      pointerId: 7,
+      device: InkPointerDevice.stylus,
+      phase: InkPointerPhase.down,
+      x: 10,
+      y: 20,
+      pressure: 0.8,
+      timestampNs: 9,
+      sequence: 1,
+    );
+    var nextSequence = 42;
+    var transformedDownSample = false;
+    final prepared = NativePointerPacketAdapter().prepare(
+      packet,
+      transformPosition: (position, isDownSample) {
+        transformedDownSample = isDownSample;
+        return position + const Offset(100, 200);
+      },
+      nextSequence: () => nextSequence++,
+    );
+    final data = ByteData.sublistView(prepared.bytes);
+
+    expect(prepared.beginsStroke, isTrue);
+    expect(transformedDownSample, isTrue);
+    expect(data.getFloat32(12, Endian.little), 110);
+    expect(data.getFloat32(16, Endian.little), 220);
+    expect(data.getUint32(48, Endian.little), 42);
+    expect(prepared.previewSamples, hasLength(1));
+    expect(prepared.previewSamples.single.sourceSequence, 42);
+    expect(
+      NativePointerPacketAdapter().lastConfirmedPosition(prepared.bytes),
+      const Offset(110, 220),
+    );
   });
 
   test('rejects malformed native packets', () {

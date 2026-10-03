@@ -10,6 +10,7 @@ import 'package:project_ink/bridge/engine_api.dart';
 import 'package:project_ink/canvas/canvas_screen.dart';
 import 'package:project_ink/comics/comic_workspace.dart';
 import 'package:project_ink/design_system/ink_theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 final _themes = <(String, ThemeData)>[
   ('dark', InkTheme.dark()),
@@ -26,7 +27,10 @@ class _VisualComicController extends ComicWorkspaceController {
 }
 
 void main() {
-  setUpAll(_loadVisualFonts);
+  setUpAll(() async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    await _loadVisualFonts();
+  });
   const desktopWorkspaces = <String>['illustration', 'comic', 'minimal'];
   for (final workspaceId in desktopWorkspaces) {
     for (final (themeName, theme) in _themes) {
@@ -150,6 +154,49 @@ void main() {
       greaterThanOrEqualTo(400),
       reason: 'the dock widths must yield to the canvas on smaller desktops',
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('desktop dock regions resize from their outer edges', (
+    tester,
+  ) async {
+    await _setViewport(tester, const Size(1600, 900), 1);
+    await _pumpEditor(
+      tester,
+      theme: InkTheme.dark(),
+      platform: TargetPlatform.macOS,
+      mode: WorkspaceMode.desktop,
+      preferences: const WorkspacePreferences(
+        dockWidth: 280,
+        leftDockWidth: 280,
+        followDocumentType: false,
+      ),
+    );
+
+    final canvas = find.bySemanticsLabel('Drawing canvas');
+    final initialWidth = tester.getRect(canvas).width;
+    await tester.drag(
+      find.byKey(const ValueKey<String>('canvas.dock.resize.left')),
+      const Offset(40, 0),
+    );
+    await tester.pumpAndSettle();
+    final afterLeftResize = tester.getRect(canvas).width;
+    expect(afterLeftResize, lessThan(initialWidth));
+
+    await tester.drag(
+      find.byKey(const ValueKey<String>('canvas.dock.resize.right')),
+      const Offset(-40, 0),
+    );
+    await tester.pumpAndSettle();
+    final afterRightResize = tester.getRect(canvas).width;
+    expect(afterRightResize, lessThan(afterLeftResize));
+
+    await tester.tap(find.byTooltip('Collapse Workspace dock').last);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Expand Workspace dock'), findsOneWidget);
+    await tester.tap(find.byTooltip('Expand Workspace dock'));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(canvas).width, closeTo(afterRightResize, 1));
     expect(tester.takeException(), isNull);
   });
 
@@ -313,6 +360,56 @@ void main() {
     });
   }
 
+  testWidgets('tablet Simple Focus layout', (tester) async {
+    await _setViewport(tester, const Size(834, 1194), 2);
+    await _pumpEditor(
+      tester,
+      theme: InkTheme.dark(),
+      platform: TargetPlatform.iOS,
+      mode: WorkspaceMode.expandedTouch,
+      preferences: const WorkspacePreferences(
+        tabletMode: TabletWorkspaceMode.simple,
+        followDocumentType: false,
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Canvas Focus'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Exit Focus'), findsOneWidget);
+    expect(find.byTooltip('Focus controls'), findsOneWidget);
+    expect(find.byTooltip('Close Layers'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await expectLater(
+      find.byType(CanvasScreen),
+      matchesGoldenFile('goldens/editor_layout/tablet_simple_focus_dark.png'),
+    );
+  });
+
+  testWidgets('tablet Studio Focus layout', (tester) async {
+    await _setViewport(tester, const Size(834, 1194), 2);
+    await _pumpEditor(
+      tester,
+      theme: InkTheme.dark(),
+      platform: TargetPlatform.iOS,
+      mode: WorkspaceMode.expandedTouch,
+      preferences: const WorkspacePreferences(
+        tabletMode: TabletWorkspaceMode.studio,
+        followDocumentType: false,
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Canvas Focus'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Exit Focus'), findsOneWidget);
+    expect(find.byTooltip('Focus controls'), findsOneWidget);
+    expect(find.byTooltip('Close Layers'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await expectLater(
+      find.byType(CanvasScreen),
+      matchesGoldenFile('goldens/editor_layout/tablet_studio_focus_dark.png'),
+    );
+  });
+
   for (final (themeName, theme) in _themes) {
     testWidgets('phone simple $themeName layout', (tester) async {
       await _setViewport(tester, const Size(390, 844), 3);
@@ -330,7 +427,7 @@ void main() {
       );
 
       expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
-      expect(find.bySemanticsLabel('Gallery and documents'), findsOneWidget);
+      expect(find.bySemanticsLabel('Open project'), findsOneWidget);
       expect(find.bySemanticsLabel('Brush size'), findsOneWidget);
       final exception = tester.takeException();
       expect(

@@ -287,6 +287,7 @@ class InkSelectableChip extends StatelessWidget {
     super.key,
     required this.label,
     required this.selected,
+    this.secondarySelected = false,
     required this.onPressed,
     this.leading,
     this.minimumHeight = 48,
@@ -294,6 +295,7 @@ class InkSelectableChip extends StatelessWidget {
 
   final String label;
   final bool selected;
+  final bool secondarySelected;
   final VoidCallback? onPressed;
   final Widget? leading;
   final double minimumHeight;
@@ -370,6 +372,7 @@ class InkLayerRow extends StatelessWidget {
     super.key,
     required this.title,
     required this.selected,
+    this.secondarySelected = false,
     required this.onTap,
     this.subtitle,
     this.leading,
@@ -383,6 +386,7 @@ class InkLayerRow extends StatelessWidget {
   final Widget? leading;
   final Widget? trailing;
   final bool selected;
+  final bool secondarySelected;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
   final double minimumHeight;
@@ -398,10 +402,14 @@ class InkLayerRow extends StatelessWidget {
     );
     return Semantics(
       selected: selected,
+      container: true,
+      explicitChildNodes: true,
       child: Material(
         color:
             selected
-                ? colors.selected.withValues(alpha: 0.48)
+                ? colors.selected.withValues(alpha: 0.62)
+                : secondarySelected
+                ? colors.selected.withValues(alpha: 0.24)
                 : Colors.transparent,
         child: InkWell(
           onTap: onTap,
@@ -770,6 +778,7 @@ class InkPropertySlider extends StatelessWidget {
     required this.min,
     required this.max,
     required this.onChanged,
+    this.onChangeStart,
     this.onChangeEnd,
     this.divisions,
     this.valueLabel,
@@ -782,6 +791,7 @@ class InkPropertySlider extends StatelessWidget {
   final double max;
   final int? divisions;
   final ValueChanged<double>? onChanged;
+  final ValueChanged<double>? onChangeStart;
   final ValueChanged<double>? onChangeEnd;
   final String? valueLabel;
   final double valueWidth;
@@ -796,6 +806,7 @@ class InkPropertySlider extends StatelessWidget {
       max: max,
       divisions: divisions,
       onChanged: onChanged,
+      onChangeStart: onChangeStart,
       onChangeEnd: onChangeEnd,
     );
     return Semantics(

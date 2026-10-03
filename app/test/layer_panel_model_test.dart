@@ -58,6 +58,37 @@ void main() {
     expect(selection.selected, containsAll(<int>[1, 3]));
     selection.select(2, additive: true);
     expect(selection.selected, containsAll(<int>[1, 2, 3]));
+    expect(selection.primaryId, 2);
+    selection.toggleSecondary(3);
+    expect(selection.primaryId, 2);
+    expect(selection.selected, containsAll(<int>[1, 2]));
+  });
+
+  test('primary owner stays explicit when secondary layers are toggled', () {
+    final selection = LayerSelectionModel()..select(41);
+    selection.toggleSecondary(7);
+    expect(selection.primaryId, 41);
+    expect(selection.selected, containsAll(<int>[41, 7]));
+    selection.select(9);
+    expect(selection.primaryId, 9);
+    expect(selection.selected, <int>{9});
+  });
+
+  test('restores durable primary target and collapsed groups only', () {
+    final selection =
+        LayerSelectionModel()
+          ..select(7)
+          ..toggleSecondary(9)
+          ..toggleGroupExpanded(12);
+
+    selection.restorePresentationState(
+      primaryId: 3,
+      collapsedGroups: <int>[21, 12],
+    );
+
+    expect(selection.primaryId, 3);
+    expect(selection.selected, <int>{3});
+    expect(selection.collapsedGroups, <int>{12, 21});
   });
 
   test('adjustment layers nest in groups but not comic panel groups', () {

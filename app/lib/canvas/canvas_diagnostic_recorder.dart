@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
+
+import '../documents/project_documents_directory.dart';
 
 /// Bounded, device-local rolling trace for canvas troubleshooting.
 ///
@@ -12,7 +13,7 @@ import 'package:path_provider/path_provider.dart';
 /// uploaded automatically.
 class CanvasDiagnosticRecorder {
   CanvasDiagnosticRecorder._()
-    : _documentsDirectoryProvider = getApplicationDocumentsDirectory,
+    : _documentsDirectoryProvider = projectDocumentsDirectory,
       _segmentByteLimit = maxSegmentBytes;
 
   @visibleForTesting

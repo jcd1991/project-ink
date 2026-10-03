@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:ui' as ui;
 import 'dart:typed_data';
 
+const int compositeTileLayerId = -1;
+
 class TileCacheKey {
   const TileCacheKey(this.revision, this.layer, this.x, this.y);
   final int revision;

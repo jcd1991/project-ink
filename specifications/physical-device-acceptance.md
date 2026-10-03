@@ -8,6 +8,28 @@ upload traces or documents.
 
 ## Prepare the app
 
+The CUA bridge controls desktop applications and does not send touch or Pencil
+input to iPadOS. For brush rendering on a physical iPad, use the integration
+gallery from `app/` with local `.brush` and `.sut` fixtures:
+
+```sh
+./tool/run_brush_device_gallery.sh DEVICE_UDID /path/to/sample.brush /path/to/sample.sut
+```
+
+It copies fixture files to a dedicated directory in the app container,
+imports them into a fresh disposable Rust document, draws a synthetic
+pressure-changing touch stroke for each imported brush, asserts that committed
+Rust pixels changed, and saves a screenshot under
+`app/build/brush-device-gallery/`. The helper snapshots the launchable Profile
+app before the test build and reinstalls that snapshot afterward, because
+`flutter drive --profile` may replace Flutter's shared Profile output with the
+integration-test runner. It leaves the user's active artwork untouched.
+Synthetic pressure does not validate Apple Pencil pressure, tilt,
+hover, latency, or brush feel; perform those checks manually with the Pencil.
+The first run may require trusting the Apple Development identity in iPad
+Settings → General → VPN & Device Management before Xcode can launch its
+integration-test app.
+
 Build or run the app with the opt-in trace flag. Normal builds leave tracing
 disabled and create no trace file:
 

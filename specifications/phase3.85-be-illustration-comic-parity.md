@@ -49,6 +49,32 @@ Use this plan to delegate Phase 3.85.be to a lower-cost implementation model. Th
 | 6 | **P2 comic authoring/output.** Create a multi-page project; manage pages/panels/dialogue; save/reopen; export at least one usable target with references intact. | `app/lib/comics/comic_workspace.dart` and comic controllers/widgets; `app/lib/app/project_ink_app.dart`; `rust/crates/ink-comic/src/lib.rs`; bridge `api.rs`; `rust/crates/ink-storage`; comic format spec and tests. | Select one missing CRUD or export path per ticket. Route mutations through validated project state/checkpoints; repair selection and page/layer/panel/balloon references on deletion/reorder. Verify panel clipping and one concrete export. State font, rasterization, color-profile and print limitations plainly. |
 | 7 | **Integration/report gate.** Changed journeys have focused tests and runtime evidence; remaining parity gaps are explicit. | Owning package suites; `flutter test`, `flutter analyze`, `cargo test --workspace`; macOS debug build and isolated QA profile; `BUGS.md` and this spec. | Run focused suites first, then broad suites when feasible. Record exact command/result and separate automated, desktop runtime, physical stylus, print/color, and cross-platform evidence. Never update visual goldens without reviewing the intended diff. |
 
+### Status reconciliation — 2026-10-02
+
+The 2026-09-30 observation in closeout item 1 that a dirty macOS window could
+close without a prompt is historical. The current implementation tracks edits
+since the last explicit save separately from recovery-checkpoint dirtiness and
+routes native window close and Cmd-Q through Save/Discard/Cancel. Discard waits
+for an active recovery write to finish, removes the recovery copy, and explains
+that the last explicitly saved project remains unchanged. If recovery cleanup
+fails, close is cancelled and recovery scheduling is restored.
+
+Current host evidence: `canvas_document_actions_test.dart` (30 tests),
+`project_ink_app_test.dart` (13 tests), and `autosave_coordinator_test.dart`
+(7 tests) pass together with the related document-action suite for 50 tests on
+2026-10-03. Added app-session coverage injects a
+recovery-cleanup failure after a valid replacement engine is opened, then
+proves the current engine and recovery sentinel remain intact and the unused
+candidate closes. The suites also cover native-channel decisions, failed
+recovery-copy deletion, corrupt Open preservation, failed Save, canceled
+pickers, and recovery-write ordering. The canceled Open/Save As regression now
+starts with a dirty named project and verifies both its path and unsaved state
+remain unchanged after picker cancellation. They do not prove provider
+write-back or process interruption during a production Rust atomic save. Live
+macOS Cmd-Q reached the AppKit callback and showed the recovery prompt; Cancel
+returned to the same document. Save/Discard, red window close, and an isolated
+named document remain unverified.
+
 ### Handoff contract for each ticket
 
 Give the implementation model this file, `BUGS.md`, the named source/tests, and only the relevant format contract. Use this request:
