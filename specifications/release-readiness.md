@@ -576,18 +576,20 @@ evidence remain separate hardware gates.
   testRedCloseCancelKeepsDirtyNamedProjectOpen` reproduced the same diagnosed
   permission failure in five seconds and retained
   `NativeDocumentSafety-testRedCloseCancelKeepsDirtyNamedProjectOpen-20261003-165216-91732.xcresult`.
-  A manual app launch exposes the canvas to desktop accessibility, but does not
-  replace the uncompleted close/quit matrix. Resolve Xcode's macOS UI
-  automation/accessibility access before claiming native acceptance.
+  A manual app launch exposes the canvas to desktop accessibility. The manual
+  matrix now covers all six Save/Discard/Cancel outcomes, but the automated
+  XCUITest matrix remains unverified. Resolve Xcode's macOS UI
+  automation/accessibility access before claiming automated acceptance.
 - Real-app macOS manual safety follow-up on the built debug app: the native
   accessibility tree exposed `Drawing canvas`, and a saved stroke changed the
   package including tile files. Cmd-Q Cancel and red-close Cancel kept the
   window open, left the explicitly saved package byte-for-byte unchanged, and
   retained recovery. Red-close Discard and Cmd-Q Discard left the saved package
   hashes unchanged and removed recovery; fresh launches showed no recovery
-  prompt. Cmd-Q Save exited the app after changing tile/history data. Reopening
-  that project displayed the saved stroke; Undo removed it and Redo restored
-  it. Detailed hashes and steps are in the local record
+  prompt. Red-close Save and Cmd-Q Save both exited after changing package
+  state, including canvas tiles. Reopening the Cmd-Q-saved project displayed
+  its stroke; Undo removed it and Redo restored it. Detailed hashes and steps
+  are in the local record
   `manual-xctest-20261003/records/macos-manual-safety.txt` under the app's
   `ProjectInkAlphaValidation` documents folder. These are desktop pointer
   checks, not physical Apple Pencil evidence. The XCUITest matrix remains
@@ -595,7 +597,7 @@ evidence remain separate hardware gates.
 - The paired physical iPad Pro (11-inch, 3rd generation; iPadOS 27.0) is
   currently visible to Flutter and `devicectl`. The acceptance preflight
   reported 19.9 GiB free before the macOS workflow rerun. That rerun used disk;
-  current free space is about 14 GiB, below the 18 GiB device threshold and
+  current free space is 13.1 GiB, below the 18 GiB device threshold and
   28 GiB full-run threshold. Approved inactive simulator and macOS Xcode build
   products were removed to recover space; per-run simulator checksum
   manifests were refreshed, and logs/Xcode result bundles remain preserved.
