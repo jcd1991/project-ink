@@ -14,7 +14,7 @@ release-supported.
 - [x] Implement macOS window close and app quit dispatch through the shared
   Save, Discard, and Cancel flow. Cancel tells AppKit to keep the same window
   and document open; widget/channel coverage exercises each choice.
-- [ ] Verify the close button and Cmd-Q interactively in a fresh macOS app
+- [x] Verify the close button and Cmd-Q interactively in a fresh macOS app
   session, including the actual AppKit callbacks and a dirty named document.
 - [ ] New, standalone Open, comic Open, and import replacement use the same
   decision. A cancelled picker does not prompt or change the current document.
@@ -25,11 +25,13 @@ release-supported.
   user's named project. Remove a recovery checkpoint only after an explicit
   save, a valid replacement, or a confirmed Discard; wait for an in-flight
   recovery write before removal.
-- [ ] Confirm Discard through a disposable profile: remove the recovery copy,
+- [x] Confirm Discard through a disposable profile: remove the recovery copy,
   leave the named project byte-identical, and launch the app to a clean state.
   Debug runs can isolate documents and diagnostic logs with
   `--dart-define=PROJECT_INK_TEST_DOCUMENTS_PATH=/absolute/test/path`; release
-  builds ignore this override.
+  builds ignore this override. The 2026-10-03 manual record now covers the
+  real AppKit red-close and Cmd-Q branches, named-package hash, recovery
+  removal, and a fresh-process reopen after Cmd-Q Discard.
 - [x] Rust storage tests cover malformed metadata, corrupt journals, oversized
   tile payloads, injected failures after manifest/tiles/SQLite/history writes,
   and abrupt subprocess exit across writer and backup/publish boundaries.
@@ -181,6 +183,18 @@ acceptance are separate evidence classes. Do not substitute one for another.
 
 ## Gate 5: public release path
 
+The local iOS acceptance scheme and runner are documented in
+specifications/ios-acceptance.md. It supports simulator and connected-device
+Flutter/Rust integration tests, native packet tests, process relaunch, native
+project-picker entry, and a guided local Pencil session. The acceptance app
+uses a separate bundle and data container. The runner has been added but has
+completed both Flutter/Rust integration targets on an iPad simulator for the
+recorded working-tree fingerprint, but the native XCUITest stage did not
+complete and the run did not pass as a whole. That fingerprint differs from
+the current working tree, so rerun the suite after active canvas changes
+stabilize. Physical-device automation and Pencil, latency, and process-memory
+evidence remain separate hardware gates.
+
 - [ ] Confirm the recommended channel for each first-release candidate before
   configuring signing: signed and notarized macOS direct download, plus an
   iPadOS TestFlight beta followed by an App Store release if the beta passes.
@@ -246,6 +260,40 @@ acceptance are separate evidence classes. Do not substitute one for another.
   app-container path. The repository bundle ID was restored afterward. An
   initial `/tmp` override was rejected by the macOS sandbox and was not used
   for document edits.
+
+- Latest macOS validation attempt (2026-10-03): Flutter analysis passed and all
+  596 unit/widget tests passed. Six Rust-backed on-disk workflows passed:
+  layer save/reopen and undo/redo, custom brush edit/export/import, damaged
+  brush source preservation, multi-page comic save/reopen/export, pixel
+  save/reopen/undo/redo with corrupt Open recovery, and failed recovery-write
+  preservation. The app-shell failed Save As/corrupt Open integration initially
+  hit an unregistered test text-input channel; after removing the unnecessary
+  `hide()` call, that focused integration passed. The normal macOS debug app
+  rebuilt successfully. The new Xcode UI-test bundle compiled, but macOS timed
+  out while enabling UI automation before executing any of its six close/quit
+  cases. Its retained result bundle is
+  `app/build/macos-alpha-checks/NativeDocumentSafety-20261003-142002-8978.xcresult`.
+  Therefore the overall runner exits nonzero and the automated UI suite has no
+  case results. The separate visible-app results are recorded below. Check
+  Gate 1 again after UI automation is available, then repeat the visual manual
+  matrix in `macos-alpha-acceptance.md`. Fresh-process save/reopen and
+  undo/redo have since been observed for one brush family; the full two-brush
+  workflow, provider flows, offline acceptance, and physical iPad/Pencil
+  evidence remain open.
+- A separate visible-app pass used the isolated profile recorded in
+  `Library/Containers/org.projectink.studio/Data/Documents/ProjectInkAlphaValidation/manual-20261003/records/partial-native-close-quit.txt`.
+  Red-close Cancel, Discard, and Save behaved as expected for the visible
+  document, saved-package hashes, and recovery copy. Cmd-Q Cancel kept the
+  dirty project open. Cmd-Q Save initially persisted the mark and removed
+  recovery but left the window visible. The native callback was fixed to reply
+  synchronously when already on the main thread; a visible rerun then saved,
+  removed recovery, and quit the app. A separate run against the current
+  Flutter-built app confirmed Cmd-Q Discard exits, preserves the named package
+  byte-for-byte, removes recovery, and permits a fresh-process open of the
+  unchanged project. An older Xcode acceptance-derived app was mistakenly
+  opened during an intervening attempt; that run is excluded in the evidence
+  record. In the latest red-close Save and Discard reruns, the app process
+  stopped after its window closed.
 - Focused autosave, document-action, and app-session tests cover separate
   explicit-save state, the recovery path, in-flight recovery-write draining,
   and Cancel/Discard for New/Open.
@@ -451,3 +499,31 @@ acceptance are separate evidence classes. Do not substitute one for another.
   declares English as its only supported locale and resolves an unsupported
   Spanish system locale to English; native picker localization and broader
   accessibility/layout review remain open.
+- Current manual macOS reruns used the Flutter-built app, with its executable
+  path checked before interaction. All six dirty-document choices now have
+  visible real-AppKit evidence across the recorded sessions. The current
+  red-close Save and Discard runs both stopped the process; Save changed the
+  named package and removed recovery, while Discard preserved its exact package
+  hash and removed recovery. Cmd-Q Discard also preserved the package, exited,
+  and allowed a fresh-process reopen without the discarded mark. The exact
+  package hash records and binary identity note are in the manual acceptance
+  record. A separate fresh-process workflow created a visible stroke, saved and
+  closed the project, reopened it in a new app process, and verified Undo then
+  Redo visually. Package hashes after save, undo/redo, and a later Discard are
+  identical. This is partial workflow evidence: it uses one brush family and
+  does not yet cover a second post-redo save/reopen. XCUITest still timed out
+  before executing cases.
+- Added `app/tool/run_macos_alpha_checks.sh --workflows-only` to rerun analysis,
+  Flutter tests, disk-backed Rust bridge journeys, and the macOS app build
+  without entering the OS UI automation stage. It reports explicitly that the
+  native AppKit UI suite was not run; `--full` remains the full automated gate.
+- The paired physical iPad Pro (11-inch, 3rd generation; iPadOS 27.0) is
+  currently visible to Flutter and `devicectl`. The acceptance preflight
+  reports 19.9 GiB free, above the runner's 18 GiB device threshold and below
+  its 28 GiB full-run threshold. Approved inactive simulator and macOS Xcode
+  build products were removed to recover space; per-run simulator checksum
+  manifests were refreshed, and logs/Xcode result bundles remain preserved.
+  No iPad build or install has started because automatic signing may register
+  the iPad UDID with the configured developer team; authorization is pending.
+  Physical Pencil, save, recovery, offline, latency, and memory acceptance
+  remain open.
