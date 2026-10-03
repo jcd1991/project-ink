@@ -121,7 +121,12 @@ final class NativeDocumentSafetyTests: XCTestCase {
   }
 
   private var drawingCanvas: XCUIElement {
-    app.descendants(matching: .any)["drawing-canvas"]
+    let canvasSemantics = NSPredicate(
+      format: "identifier == %@ OR label == %@",
+      "drawing-canvas",
+      "Drawing canvas"
+    )
+    return app.descendants(matching: .any).matching(canvasSemantics).firstMatch
   }
 
   private func launchCanvas() {
@@ -135,13 +140,14 @@ final class NativeDocumentSafetyTests: XCTestCase {
     let mainWindow = app.windows.firstMatch
     XCTAssertTrue(mainWindow.waitForExistence(timeout: 5), "Project Ink has no main window.")
     XCTAssertTrue(
-      mainWindow.isEnabled,
-      "Project Ink is foregrounded but its window is disabled to UI automation. "
-        + "Check macOS Privacy & Security permissions for Xcode."
+      mainWindow.isHittable,
+      "Project Ink is foregrounded but its main window is not hittable by UI automation. "
+        + "Window accessibility state: \(mainWindow.debugDescription)"
     )
     XCTAssertTrue(
       drawingCanvas.waitForExistence(timeout: 30),
-      "Project Ink is foregrounded but the Flutter drawing canvas is missing."
+      "Project Ink is foregrounded but the Flutter drawing canvas is missing. "
+        + "Accessibility hierarchy: \(app.debugDescription)"
     )
   }
 
