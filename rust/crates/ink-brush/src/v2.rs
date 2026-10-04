@@ -1106,6 +1106,15 @@ impl CompiledBrush {
         if path.is_empty() {
             return Ok(Vec::new());
         }
+        // Native iPad input batches the buffered Down sample with the first
+        // measured Move. Taper its first dab only when that batch contains a
+        // real segment, so the moving stroke starts cleanly while a stationary
+        // Pencil tap still leaves its normal mark.
+        let start_taper = if first_path_index == 0 && path.len() > 1 {
+            self.stroke.taper_start
+        } else {
+            0.0
+        };
         let mut result = Vec::new();
         let mut secondary_dab_count = 0;
         for (local_index, point) in path.iter().enumerate() {
@@ -1119,7 +1128,7 @@ impl CompiledBrush {
             let mut radius = (diameter * dynamic.max(0.02)) * 0.5;
             let mut opacity =
                 self.opacity() * self.dynamic_for_point(ParameterId::Opacity, point, progress);
-            opacity *= taper(progress, self.stroke.taper_start, self.stroke.taper_end);
+            opacity *= taper(progress, start_taper, self.stroke.taper_end);
             if !opacity.is_finite() || !radius.is_finite() {
                 return Err(BrushValidationError::InvalidNumber("evaluated dab"));
             }
@@ -1618,6 +1627,26 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
     }
 }
 
+fn technical_pen_pressure_binding() -> ParameterBinding {
+    let mut binding = pressure_binding(ParameterId::Diameter, 1.0);
+    binding.curve = ResponseCurve {
+        points: vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 0.003, y: 0.02 },
+            CurvePoint { x: 0.006, y: 0.1 },
+            CurvePoint { x: 0.01, y: 0.26 },
+            CurvePoint { x: 0.015, y: 0.62 },
+            CurvePoint { x: 0.02, y: 0.82 },
+            CurvePoint { x: 0.04, y: 0.91 },
+            CurvePoint { x: 0.08, y: 0.97 },
+            CurvePoint { x: 0.15, y: 0.99 },
+            CurvePoint { x: 0.3, y: 0.995 },
+            CurvePoint { x: 1.0, y: 1.0 },
+        ],
+    };
+    binding
+}
+
 /// High-quality original starter library for Phase 2.
 #[must_use]
 pub fn builtin_library() -> Vec<BrushPresetV2> {
@@ -1979,7 +2008,6 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
     // response strength and affected property by brush family. Deliberately
     // steady brushes (Opaque Round, Marker, Ribbon Chain) retain fixed output.
     let pressure_bindings = [
-        (0, ParameterId::Diameter, 0.9),  // Technical Pen
         (1, ParameterId::Diameter, 0.55), // HB Sketch Pencil
         (1, ParameterId::Opacity, 0.35),
         (3, ParameterId::Opacity, 0.85),  // Soft Airbrush
@@ -2009,6 +2037,8 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             .dynamics
             .push(pressure_binding(target, amount));
     }
+    presets[0].dynamics.push(technical_pen_pressure_binding());
+    presets[0].stroke.taper_start = 0.08;
     presets[14].stroke.taper_start = 0.08;
     presets[14].stroke.taper_end = 0.18;
     presets[14].stroke.smoothing = 0.12;
@@ -2230,6 +2260,52 @@ mod tests {
             firm[0].radius_x > light[0].radius_x * 1.25,
             "Technical Pen should visibly widen across the pressure range observed on iPad"
         );
+    }
+
+    #[test]
+    fn technical_pen_has_a_stronger_firm_pressure_ramp() {
+        let preset = builtin_library().remove(0);
+        let binding = preset
+            .dynamics
+            .iter()
+            .find(|binding| {
+                binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+            })
+            .expect("technical pen pressure size binding");
+        let ordinary = 1.0 + binding.curve.evaluate(0.015);
+        let firm = 1.0 + binding.curve.evaluate(0.08);
+
+        assert!((binding.amount - 1.0).abs() < f32::EPSILON);
+        assert!(firm > ordinary * 1.15);
+    }
+
+    #[test]
+    fn technical_pen_tapers_moving_start_dab_but_keeps_stationary_tap() {
+        let compiled = builtin_library()
+            .remove(0)
+            .compile()
+            .expect("valid technical pen");
+        let mut down = sample(0.0, u16::MAX / 2, 1);
+        down.phase = Phase::Down;
+        let mut moved = sample(20.0, u16::MAX / 2, 2);
+        moved.phase = Phase::Move;
+        let moving_dabs = compiled.render(&[down, moved]).expect("moving stroke");
+
+        assert!(moving_dabs.len() > 1);
+        assert_eq!(moving_dabs[0].opacity, 0.0);
+        assert!(moving_dabs[1].opacity > 0.0);
+
+        let mut tap_start = sample(0.0, u16::MAX / 2, 3);
+        tap_start.phase = Phase::Down;
+        let mut tap_end = tap_start;
+        tap_end.phase = Phase::Up;
+        tap_end.sequence = 4;
+        let tap_dabs = compiled
+            .render(&[tap_start, tap_end])
+            .expect("stationary tap");
+
+        assert_eq!(tap_dabs.len(), 1);
+        assert!(tap_dabs[0].opacity > 0.0);
     }
 
     #[test]

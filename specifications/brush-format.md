@@ -195,6 +195,12 @@ first confirmed move, then gives the start sample the pressure from the
 earliest confirmed measured move. A contact that ends without moving preserves
 its initial pressure and remains a tap.
 
+Technical Pen suppresses the first dab only when that initial batch contains a
+drawn segment. This removes the isolated start mark on moving Pencil strokes
+while preserving the mark from a stationary tap. Its pressure-size binding
+reaches +100% diameter, with a stronger response through the ordinary-to-firm
+Pencil range.
+
 ## Parameter bindings
 
 Size, opacity, flow, density, spacing, rotation, scatter, grain strength,
@@ -215,7 +221,7 @@ brushes deliberately omit a pressure binding.
 
 | Built-in brush | Default size (canvas px) | Pressure response |
 | --- | ---: | --- |
-| Technical Pen | 4 | Diameter +90% |
+| Technical Pen | 4 | Diameter +100%; moving-stroke start taper |
 | HB Sketch Pencil | 6 | Diameter +55%; opacity +35% |
 | Opaque Round | 24 | Fixed |
 | Soft Airbrush | 80 | Opacity +85% |
