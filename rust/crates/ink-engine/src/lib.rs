@@ -3067,23 +3067,29 @@ fn validate_brush_draft_settings(settings: &BrushDraftSettings) -> Result<(), En
 }
 
 fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
-    let curve = preset
+    let pressure_curve_binding = preset
         .dynamics
         .iter()
         .find(|binding| {
             binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
         })
-        .map_or_else(
-            || vec![0.0, 0.0, 1.0, 1.0],
-            |binding| {
-                binding
-                    .curve
-                    .points
-                    .iter()
-                    .flat_map(|point| [point.x, point.y])
-                    .collect::<Vec<_>>()
-            },
-        );
+        .or_else(|| {
+            preset
+                .dynamics
+                .iter()
+                .find(|binding| binding.sensor == SensorId::Pressure)
+        });
+    let curve = pressure_curve_binding.map_or_else(
+        || vec![0.0, 0.0, 1.0, 1.0],
+        |binding| {
+            binding
+                .curve
+                .points
+                .iter()
+                .flat_map(|point| [point.x, point.y])
+                .collect::<Vec<_>>()
+        },
+    );
     let (diameter_px, hardness, scatter, rotation_jitter) = match &preset.tip {
         TipBehavior::Stamp(tip) => (
             tip.diameter_px,

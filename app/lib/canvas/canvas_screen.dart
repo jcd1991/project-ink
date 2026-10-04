@@ -384,6 +384,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                       : _activeColor,
           width: () => _brushLibrary.selected?.size ?? 8,
           pressureSize: () => _brushLibrary.selected?.pressureSize ?? 0,
+          opacity: () => _brushLibrary.selected?.opacity ?? 1,
+          pressureOpacity: () => _brushLibrary.selected?.pressureOpacity ?? 0,
           pressureCurvePoints:
               () => [
                 for (final point
@@ -393,7 +395,6 @@ class _CanvasScreenState extends State<CanvasScreen>
                   point.y,
                 ],
               ],
-          legacyTechnicalPen: () => _activeBrushId == 1,
           eraser: () => _eraserActive || _transparentColorActive,
           previewStoppedAtPageEdge: () => _previewStoppedAtPageEdge,
           setPreviewStoppedAtPageEdge:

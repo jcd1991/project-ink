@@ -95,7 +95,6 @@ LiveStrokePreview _preview() => LiveStrokePreview(
   pressureSize: 0,
   documentWidth: 100,
   documentHeight: 100,
-  legacyTechnicalPen: false,
   eraser: false,
   points: const <LiveStrokePreviewPoint>[],
   chunks: const <LiveStrokePreviewChunk>[],

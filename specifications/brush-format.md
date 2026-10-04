@@ -196,11 +196,11 @@ Size, opacity, flow, density, spacing, rotation, scatter, grain strength,
 pickup, smudge, color shift, and other configurable values share one mapping
 system.
 
-Starter pressure-to-diameter bindings make the normalized `0.04–0.15` range
-observed in ordinary Apple Pencil strokes visibly change brush size, while
-preserving a gradual response above that range for firmer pressure. The default
-Technical Pen and G-Pen are tested against that measured range. Binding strength
-remains brush-specific, and the brush editor's pressure size and response-curve
+Starter pressure bindings put their steepest response below normalized `0.02`,
+where ordinary Apple Pencil samples clustered in physical-device diagnostics.
+The curve continues rising through firmer pressure instead of reaching its
+maximum at the first light-force samples. Binding strength remains
+brush-specific, and the brush editor's pressure size and response-curve
 controls tune each brush independently.
 
 The same low-force-friendly pressure curve is used by built-in bindings; the

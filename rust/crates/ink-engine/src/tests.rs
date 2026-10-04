@@ -353,6 +353,28 @@ fn original_builtin_ids_use_their_v2_pressure_profiles() {
 }
 
 #[test]
+fn opacity_only_builtin_brushes_project_their_pressure_curve_for_preview() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let doc = Document::new(DocumentId::from_u128(106), spec).expect("valid document");
+    let airbrush = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == BrushId::from_u128(4))
+        .expect("Soft Airbrush summary");
+
+    assert_eq!(airbrush.pressure_size, 0.0);
+    assert_eq!(airbrush.pressure_opacity, 0.85);
+    assert_eq!(airbrush.pressure_curve_points.get(2), Some(&0.003));
+    assert_eq!(airbrush.pressure_curve_points.get(3), Some(&0.02));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn sample_segment_rollover_keeps_curved_stroke_and_next_brush_draws() {
     let spec = DocumentSpec {

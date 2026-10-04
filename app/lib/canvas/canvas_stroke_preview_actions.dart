@@ -16,8 +16,9 @@ class CanvasStrokePreviewHost {
     required this.color,
     required this.width,
     required this.pressureSize,
+    required this.opacity,
+    required this.pressureOpacity,
     this.pressureCurvePoints = _identityPressureCurve,
-    required this.legacyTechnicalPen,
     required this.eraser,
     required this.previewStoppedAtPageEdge,
     required this.setPreviewStoppedAtPageEdge,
@@ -38,8 +39,9 @@ class CanvasStrokePreviewHost {
   final Color Function() color;
   final double Function() width;
   final double Function() pressureSize;
+  final double Function() opacity;
+  final double Function() pressureOpacity;
   final List<double> Function() pressureCurvePoints;
-  final bool Function() legacyTechnicalPen;
   final bool Function() eraser;
   final bool Function() previewStoppedAtPageEdge;
   final void Function(bool stopped) setPreviewStoppedAtPageEdge;
@@ -102,10 +104,11 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       color: host.color(),
       width: host.width(),
       pressureSize: host.pressureSize(),
+      opacity: host.opacity(),
+      pressureOpacity: host.pressureOpacity(),
       pressureCurvePoints: host.pressureCurvePoints(),
       documentWidth: host.documentWidth(),
       documentHeight: host.documentHeight(),
-      legacyTechnicalPen: host.legacyTechnicalPen(),
       eraser: host.eraser(),
       points: <LiveStrokePreviewPoint>[
         if (host.isInsideDocument(position))

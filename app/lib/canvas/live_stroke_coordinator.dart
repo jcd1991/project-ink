@@ -159,13 +159,16 @@ LiveStrokePreviewChunk buildLiveStrokePreviewChunk(
   final origin = Offset(preview.documentWidth / 2, preview.documentHeight / 2);
   final paint =
       Paint()
-        ..color = preview.color.withValues(alpha: preview.eraser ? 0.82 : 1.0)
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round;
   for (var index = firstPointIndex + 1; index <= lastPointIndex; index++) {
     final previous = preview.points[index - 1];
     final current = preview.points[index];
+    paint.color = _liveStrokePreviewColorAt(
+      preview,
+      (previous.pressure + current.pressure) * 0.5,
+    );
     paint.strokeWidth =
         (liveStrokePreviewWidthAt(preview, previous) +
             liveStrokePreviewWidthAt(preview, current)) *
@@ -193,14 +196,27 @@ double liveStrokePreviewWidthAt(
     preview.pressureCurvePoints,
     pressure,
   );
-  final pressureScale =
-      preview.legacyTechnicalPen
-          ? 0.2 + 2.8 * math.pow(pressure, 1.5).toDouble()
-          : 1 -
-              preview.pressureSize +
-              2 * preview.pressureSize * mappedPressure;
+  final pressureScale = 1 + preview.pressureSize * mappedPressure;
   return math.max(0.75, preview.width * pressureScale).toDouble();
 }
+
+double liveStrokePreviewOpacityAt(LiveStrokePreview preview, double pressure) {
+  final mappedPressure = _evaluatePressureCurve(
+    preview.pressureCurvePoints,
+    pressure.clamp(0.0, 1.0),
+  );
+  return (preview.opacity * (1 + preview.pressureOpacity * mappedPressure))
+      .clamp(0.0, 1.0)
+      .toDouble();
+}
+
+Color _liveStrokePreviewColorAt(LiveStrokePreview preview, double pressure) =>
+    preview.color.withValues(
+      alpha:
+          preview.color.a *
+          liveStrokePreviewOpacityAt(preview, pressure) *
+          (preview.eraser ? 0.82 : 1.0),
+    );
 
 double _evaluatePressureCurve(List<double> points, double pressure) {
   if (points.length < 4 || points.length.isOdd) return pressure;
@@ -224,9 +240,10 @@ class LiveStrokePreview {
     required this.color,
     required this.width,
     required this.pressureSize,
+    this.opacity = 1.0,
+    this.pressureOpacity = 0.0,
     required this.documentWidth,
     required this.documentHeight,
-    required this.legacyTechnicalPen,
     this.pressureCurvePoints = const <double>[0, 0, 1, 1],
     required this.eraser,
     required this.points,
@@ -239,9 +256,10 @@ class LiveStrokePreview {
   final Color color;
   final double width;
   final double pressureSize;
+  final double opacity;
+  final double pressureOpacity;
   final int documentWidth;
   final int documentHeight;
-  final bool legacyTechnicalPen;
   final List<double> pressureCurvePoints;
   final bool eraser;
   final List<LiveStrokePreviewPoint> points;
@@ -264,9 +282,10 @@ class LiveStrokePreview {
     color: color,
     width: width,
     pressureSize: pressureSize,
+    opacity: opacity,
+    pressureOpacity: pressureOpacity,
     documentWidth: documentWidth,
     documentHeight: documentHeight,
-    legacyTechnicalPen: legacyTechnicalPen,
     pressureCurvePoints: pressureCurvePoints,
     eraser: eraser,
     points: points ?? this.points,
@@ -315,7 +334,10 @@ class LiveStrokePreviewPainter extends CustomPainter {
     canvas.scale(mirrored ? -scale : scale, scale);
     final paint =
         Paint()
-          ..color = active.color.withValues(alpha: active.eraser ? 0.82 : 1.0)
+          ..color = _liveStrokePreviewColorAt(
+            active,
+            active.points[startIndex].pressure,
+          )
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
@@ -338,6 +360,10 @@ class LiveStrokePreviewPainter extends CustomPainter {
           if (index >= active.points.length) break;
           final previous = active.points[index - 1];
           final current = active.points[index];
+          paint.color = _liveStrokePreviewColorAt(
+            active,
+            (previous.pressure + current.pressure) * 0.5,
+          );
           paint.strokeWidth =
               (liveStrokePreviewWidthAt(active, previous) +
                   liveStrokePreviewWidthAt(active, current)) *

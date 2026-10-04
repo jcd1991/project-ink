@@ -1594,20 +1594,22 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
         target,
         base: 1.0,
         sensor: SensorId::Pressure,
-        // Stylus force commonly occupies only a small part of the platform's
-        // normalized range during ordinary drawing. Give that low-force range
-        // useful resolution while preserving the firm-pressure endpoint; each
-        // brush's amount still controls how strongly pressure changes its
-        // parameter.
+        // Pencil samples on the connected iPad clustered below 0.02 for many
+        // ordinary strokes. Put the curve's steep response in that low-force
+        // range, then retain a gradual rise toward firm pressure. Each brush's
+        // amount still controls how strongly pressure changes its parameter.
         curve: ResponseCurve {
             points: vec![
                 CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.02, y: 0.1 },
-                CurvePoint { x: 0.05, y: 0.3 },
-                CurvePoint { x: 0.1, y: 0.62 },
-                CurvePoint { x: 0.2, y: 0.82 },
-                CurvePoint { x: 0.4, y: 0.95 },
-                CurvePoint { x: 0.7, y: 0.99 },
+                CurvePoint { x: 0.003, y: 0.02 },
+                CurvePoint { x: 0.006, y: 0.1 },
+                CurvePoint { x: 0.01, y: 0.26 },
+                CurvePoint { x: 0.015, y: 0.52 },
+                CurvePoint { x: 0.02, y: 0.72 },
+                CurvePoint { x: 0.04, y: 0.86 },
+                CurvePoint { x: 0.08, y: 0.93 },
+                CurvePoint { x: 0.15, y: 0.97 },
+                CurvePoint { x: 0.3, y: 0.99 },
                 CurvePoint { x: 1.0, y: 1.0 },
             ],
         },
@@ -2195,10 +2197,10 @@ mod tests {
             .compile()
             .expect("valid G-Pen");
         let light = compiled
-            .render(&[sample(0.0, 2_883, 1)])
+            .render(&[sample(0.0, 328, 1)])
             .expect("light-pressure dab");
         let firm = compiled
-            .render(&[sample(0.0, 7_667, 1)])
+            .render(&[sample(0.0, 1_049, 1)])
             .expect("firm-pressure dab");
 
         assert_eq!(light.len(), 1);
@@ -2216,10 +2218,10 @@ mod tests {
             .compile()
             .expect("valid technical pen");
         let light = compiled
-            .render(&[sample(0.0, 2_883, 1)])
+            .render(&[sample(0.0, 328, 1)])
             .expect("light-pressure dab");
         let firm = compiled
-            .render(&[sample(0.0, 7_667, 1)])
+            .render(&[sample(0.0, 1_049, 1)])
             .expect("firm-pressure dab");
 
         assert_eq!(light.len(), 1);
@@ -2231,18 +2233,30 @@ mod tests {
     }
 
     #[test]
-    fn starter_pen_pressure_profile_responds_earlier_than_linear() {
-        let preset = builtin_library().remove(0);
-        let binding = preset
-            .dynamics
-            .iter()
-            .find(|binding| {
-                binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
-            })
-            .expect("starter pen pressure binding");
+    fn starter_pressure_curve_expands_the_observed_low_force_range() {
+        for name in ["Technical Pen", "HB Sketch Pencil", "G-Pen"] {
+            let preset = builtin_library()
+                .into_iter()
+                .find(|preset| preset.metadata.name == name)
+                .expect("pressure-sensitive starter brush");
+            let binding = preset
+                .dynamics
+                .iter()
+                .find(|binding| {
+                    binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+                })
+                .expect("starter pressure size binding");
+            let light = 0.005;
+            let firm = 0.016;
+            let light_size = 1.0 + binding.amount * binding.curve.evaluate(light);
+            let firm_size = 1.0 + binding.amount * binding.curve.evaluate(firm);
 
-        assert!(binding.curve.evaluate(0.2) > 0.2);
-        assert!((binding.curve.evaluate(1.0) - 1.0).abs() < f32::EPSILON);
+            assert!(
+                firm_size > light_size * 1.2,
+                "{name} should respond visibly between low-force Apple Pencil samples"
+            );
+            assert!((binding.curve.evaluate(1.0) - 1.0).abs() < f32::EPSILON);
+        }
     }
 
     #[test]

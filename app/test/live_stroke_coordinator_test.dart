@@ -13,7 +13,6 @@ void main() {
       pressureCurvePoints: const <double>[0, 0, 0.2, 0.32, 0.5, 0.68, 1, 1],
       documentWidth: 100,
       documentHeight: 100,
-      legacyTechnicalPen: false,
       eraser: false,
       points: <LiveStrokePreviewPoint>[],
       chunks: <LiveStrokePreviewChunk>[],
@@ -24,7 +23,25 @@ void main() {
       const LiveStrokePreviewPoint(Offset.zero, 0.2),
     );
 
-    expect(width, closeTo(8.2, 0.001));
+    expect(width, closeTo(11.6, 0.001));
+  });
+
+  test('live preview applies the pressure curve to brush opacity', () {
+    final preview = LiveStrokePreview(
+      color: Colors.black,
+      width: 10,
+      pressureSize: 0.5,
+      opacity: 0.5,
+      pressureOpacity: 0.5,
+      pressureCurvePoints: const <double>[0, 0, 0.2, 0.32, 0.5, 0.68, 1, 1],
+      documentWidth: 100,
+      documentHeight: 100,
+      eraser: false,
+      points: <LiveStrokePreviewPoint>[],
+      chunks: <LiveStrokePreviewChunk>[],
+    );
+
+    expect(liveStrokePreviewOpacityAt(preview, 0.2), closeTo(0.58, 0.001));
   });
 
   test('confirmed source gaps map to ordered preview coverage and chunks', () {
@@ -35,7 +52,6 @@ void main() {
       pressureSize: 0.5,
       documentWidth: 1024,
       documentHeight: 1024,
-      legacyTechnicalPen: false,
       eraser: false,
       points: <LiveStrokePreviewPoint>[
         const LiveStrokePreviewPoint(Offset(512, 512), 0.2, sourceSequence: 40),
