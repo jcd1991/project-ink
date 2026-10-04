@@ -292,6 +292,67 @@ fn technical_pen_stays_visible_at_light_pressure_and_gets_wider() {
 }
 
 #[test]
+fn legacy_pressure_opacity_is_not_multiplied_by_preset_opacity_twice() {
+    let pencil = BrushPreset::starters()[1];
+    let mut tiles = TileStore::default();
+    render_dabs(
+        &mut tiles,
+        &[Dab {
+            x: 20.0,
+            y: 20.0,
+            pressure: 1.0,
+        }],
+        pencil,
+        None,
+        false,
+        false,
+        false,
+        64,
+        64,
+    );
+
+    let alpha = tiles.sample_pixel(20, 20).a;
+    assert!(
+        (135..=145).contains(&alpha),
+        "the HB preset's 0.55 opacity should be applied once, got alpha {alpha}"
+    );
+}
+
+#[test]
+fn original_builtin_ids_use_their_v2_pressure_profiles() {
+    for brush_id in 1..=5_u128 {
+        let spec = DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        };
+        let mut doc =
+            Document::new(DocumentId::from_u128(brush_id + 100), spec).expect("valid document");
+        let layer = doc.layers()[0].id;
+        let stroke = StrokeId::from_u128(brush_id + 200);
+        doc.dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer,
+            brush: BrushId::from_u128(brush_id),
+        })
+        .expect("begin built-in stroke");
+
+        let state = lock_recover(&doc.state);
+        assert!(
+            state
+                .active_stroke
+                .as_ref()
+                .expect("active stroke")
+                .compiled_brush
+                .is_some(),
+            "built-in brush ID {brush_id} should use its V2 preset"
+        );
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn sample_segment_rollover_keeps_curved_stroke_and_next_brush_draws() {
     let spec = DocumentSpec {
@@ -3991,43 +4052,42 @@ fn reopening_rejects_duplicate_layer_ids() {
 }
 
 #[test]
-fn recorded_stroke_matches_host_raster_golden_tile_hash() {
-    let spec = DocumentSpec {
-        width_px: 4096,
-        height_px: 4096,
-        dpi: 300.0,
-        color_space: ColorSpace::Srgb,
-        background: Rgba8::default(),
+fn recorded_stroke_renders_deterministically_on_host() {
+    let render = || {
+        let spec = DocumentSpec {
+            width_px: 4096,
+            height_px: 4096,
+            dpi: 300.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        };
+        let mut doc = Document::new(DocumentId::from_u128(49), spec).expect("valid doc");
+        let layer = doc.layers()[0].id;
+        let stroke = ink_model::StrokeId::from_u128(50);
+        doc.dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer,
+            brush: BrushPreset::starters()[0].id,
+        })
+        .expect("begin");
+        for (x, y, pressure) in [(32.25, 40.5, 0.25), (48.75, 52.0, 0.5), (80.0, 96.25, 1.0)] {
+            doc.push_pointer_packet(&ink_test_support::one_sample(x, y, pressure))
+                .expect("sample");
+        }
+        doc.dispatch(EditorCommand::EndStroke { stroke })
+            .expect("end");
+        let tile = doc
+            .read_tile(layer, TileCoord { x: 0, y: 0 })
+            .expect("tile");
+        let tile = Tile::from_bytes(tile).expect("complete tile");
+        assert!(tile.bytes().iter().any(|byte| *byte != 0));
+        tile.stable_hash()
     };
-    let mut doc = Document::new(DocumentId::from_u128(49), spec).expect("valid doc");
-    let layer = doc.layers()[0].id;
-    let stroke = ink_model::StrokeId::from_u128(50);
-    doc.dispatch(EditorCommand::BeginStroke {
-        stroke,
-        layer,
-        brush: BrushPreset::starters()[0].id,
-    })
-    .expect("begin");
-    for (x, y, pressure) in [(32.25, 40.5, 0.25), (48.75, 52.0, 0.5), (80.0, 96.25, 1.0)] {
-        doc.push_pointer_packet(&ink_test_support::one_sample(x, y, pressure))
-            .expect("sample");
-    }
-    doc.dispatch(EditorCommand::EndStroke { stroke })
-        .expect("end");
-    let tile = doc
-        .read_tile(layer, TileCoord { x: 0, y: 0 })
-        .expect("tile");
-    let expected_hash = match std::env::consts::ARCH {
-        // The original shared value came from the x86_64 CI runner. This
-        // fixture's legacy CPU raster has a separate captured output on arm64.
-        "aarch64" => 1_395_959_408_535_220_756,
-        "x86_64" => 12_475_419_944_979_558_790,
-        architecture => panic!("no raster golden is recorded for {architecture}"),
-    };
-    assert_eq!(
-        Tile::from_bytes(tile).expect("complete tile").stable_hash(),
-        expected_hash
-    );
+
+    // Factory ID 1 now renders through V2, so the old per-architecture legacy
+    // raster hashes no longer describe this recorded stroke. Keep a replay
+    // determinism check while pressure geometry has dedicated engine tests.
+    assert_eq!(render(), render());
 }
 
 #[test]

@@ -1973,21 +1973,39 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             }),
         ),
     ]);
-    // The default ink pen should visibly respond to Apple Pencil pressure;
-    // with no dynamics configured, its incoming pressure samples were ignored.
-    presets[0]
-        .dynamics
-        .push(pressure_binding(ParameterId::Diameter, 0.9));
-    presets[1]
-        .dynamics
-        .push(pressure_binding(ParameterId::Diameter, 0.55));
-    presets[5]
-        .dynamics
-        .push(pressure_binding(ParameterId::Diameter, 0.85));
-    for index in [12, 13, 14, 15] {
+    // Keep the ordinary Apple Pencil force range useful, then vary the
+    // response strength and affected property by brush family. Deliberately
+    // steady brushes (Opaque Round, Marker, Ribbon Chain) retain fixed output.
+    let pressure_bindings = [
+        (0, ParameterId::Diameter, 0.9),  // Technical Pen
+        (1, ParameterId::Diameter, 0.55), // HB Sketch Pencil
+        (1, ParameterId::Opacity, 0.35),
+        (3, ParameterId::Opacity, 0.85),  // Soft Airbrush
+        (5, ParameterId::Diameter, 0.85), // G-Pen
+        (6, ParameterId::Diameter, 0.25), // Dry Gouache
+        (6, ParameterId::Opacity, 0.35),
+        (7, ParameterId::Opacity, 0.45), // Digital Watercolor Wash
+        (8, ParameterId::Diameter, 0.2), // Watercolor Blender
+        (8, ParameterId::Opacity, 0.4),
+        (9, ParameterId::Diameter, 0.45),  // Ink Spatter
+        (11, ParameterId::Diameter, 0.45), // Acrylic Rake
+        (12, ParameterId::Diameter, 0.62), // Soft Graphite
+        (12, ParameterId::Opacity, 0.35),
+        (13, ParameterId::Diameter, 0.62), // Charcoal
+        (13, ParameterId::Opacity, 0.4),
+        (14, ParameterId::Diameter, 0.62), // Brush Pen
+        (15, ParameterId::Diameter, 0.62), // Dry Ink
+        (16, ParameterId::Diameter, 0.25), // Flat Paint
+        (17, ParameterId::Diameter, 0.25), // Soft Blender
+        (17, ParameterId::Opacity, 0.3),
+        (18, ParameterId::Diameter, 0.65), // Hard Eraser
+        (19, ParameterId::Diameter, 0.55), // Soft Eraser
+        (19, ParameterId::Opacity, 0.3),
+    ];
+    for (index, target, amount) in pressure_bindings {
         presets[index]
             .dynamics
-            .push(pressure_binding(ParameterId::Diameter, 0.62));
+            .push(pressure_binding(target, amount));
     }
     presets[14].stroke.taper_start = 0.08;
     presets[14].stroke.taper_end = 0.18;
@@ -2000,9 +2018,6 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
         contrast: 0.35,
         canvas_space: true,
     });
-    presets[6]
-        .dynamics
-        .push(pressure_binding(ParameterId::Opacity, 0.35));
     presets[8].tool = ToolBehavior::Smudge;
     presets[1].grain = Some(GrainBehavior {
         resource_hash: [0x11; 32],
@@ -2104,6 +2119,52 @@ mod tests {
             BrushId::from_u128(STARTER_BRUSH_ID_BASE + 1),
         );
         assert!(library.iter().any(|brush| brush.grain.is_some()));
+    }
+
+    #[test]
+    fn builtin_pressure_defaults_follow_brush_families() {
+        let library = builtin_library();
+        let fixed_response = ["Opaque Round", "Marker", "Ribbon Chain"];
+
+        for preset in &library {
+            let pressure_bindings = preset
+                .dynamics
+                .iter()
+                .filter(|binding| binding.sensor == SensorId::Pressure)
+                .collect::<Vec<_>>();
+            if fixed_response.contains(&preset.metadata.name.as_str()) {
+                assert!(pressure_bindings.is_empty(), "{}", preset.metadata.name);
+            } else {
+                assert!(
+                    !pressure_bindings.is_empty(),
+                    "{} should respond to stylus pressure",
+                    preset.metadata.name
+                );
+            }
+            assert!(pressure_bindings.iter().all(|binding| {
+                binding
+                    .curve
+                    .points
+                    .first()
+                    .is_some_and(|point| point.x == 0.0)
+                    && binding
+                        .curve
+                        .points
+                        .last()
+                        .is_some_and(|point| point.x == 1.0)
+            }));
+        }
+
+        let pencil = library
+            .iter()
+            .find(|preset| preset.metadata.name == "HB Sketch Pencil")
+            .expect("HB Sketch Pencil");
+        assert!(pencil.dynamics.iter().any(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        }));
+        assert!(pencil.dynamics.iter().any(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
+        }));
     }
 
     #[test]

@@ -203,6 +203,39 @@ Technical Pen and G-Pen are tested against that measured range. Binding strength
 remains brush-specific, and the brush editor's pressure size and response-curve
 controls tune each brush independently.
 
+The same low-force-friendly pressure curve is used by built-in bindings; the
+binding amount and target vary by brush. `+N%` means the parameter reaches up to
+`1 + N%` of its unpressured value at maximum curve output. Fixed-pressure
+brushes deliberately omit a pressure binding.
+
+| Built-in brush | Default size (canvas px) | Pressure response |
+| --- | ---: | --- |
+| Technical Pen | 4 | Diameter +90% |
+| HB Sketch Pencil | 6 | Diameter +55%; opacity +35% |
+| Opaque Round | 24 | Fixed |
+| Soft Airbrush | 80 | Opacity +85% |
+| Marker | 14 | Fixed |
+| G-Pen | 10 | Diameter +85% |
+| Dry Gouache | 28 | Diameter +25%; opacity +35% |
+| Digital Watercolor Wash | 42 | Opacity +45% |
+| Watercolor Blender | 38 | Diameter +20%; opacity +40% |
+| Ink Spatter | 30 | Diameter +45% |
+| Ribbon Chain | 16 | Fixed |
+| Acrylic Rake | 30 | Diameter +45% |
+| Soft Graphite | 8 | Diameter +62%; opacity +35% |
+| Charcoal | 18 | Diameter +62%; opacity +40% |
+| Brush Pen | 18 | Diameter +62%; start/end taper |
+| Dry Ink | 7 | Diameter +62%; end taper |
+| Flat Paint | 32 | Diameter +25% |
+| Soft Blender | 36 | Diameter +25%; opacity +30% |
+| Hard Eraser | 24 | Diameter +65% |
+| Soft Eraser | 36 | Diameter +55%; opacity +30% |
+
+All factory brushes, including the original IDs 1–5, render through their V2
+preset so the documented pressure bindings control committed strokes and live
+previews. The legacy dab renderer remains a compatibility path for commands
+that do not resolve to a factory or imported V2 preset.
+
 ```rust
 pub struct ParameterBinding {
     pub target: ParameterId,

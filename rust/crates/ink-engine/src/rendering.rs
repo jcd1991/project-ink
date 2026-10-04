@@ -38,9 +38,11 @@ pub(super) fn render_dabs(
                     && selection.is_none_or(|mask| mask.get(x as u32, y as u32) > 0)
                     && (!alpha_lock || tiles.sample_pixel(x as u32, y as u32).a != 0)
                 {
-                    let opacity =
-                        (coverage * opacity_pressure * preset.opacity * f32::from(u16::MAX))
-                            .clamp(0.0, f32::from(u16::MAX)) as u16;
+                    // `legacy_dab_opacity` already includes the preset's
+                    // opacity. Applying it again here squared the brush's
+                    // opacity and made ordinary stylus pressure too faint.
+                    let opacity = (coverage * opacity_pressure * f32::from(u16::MAX))
+                        .clamp(0.0, f32::from(u16::MAX)) as u16;
                     let coord = if eraser && !preview_mask {
                         tiles.erase_pixel(x as u32, y as u32)
                     } else {

@@ -3028,11 +3028,10 @@ pub(super) fn dispatch_state(
                         .compile()
                         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?,
                 )
-            } else if brush.0 > 5 {
-                let mut brush_copy = builtin_library()
-                    .into_iter()
-                    .find(|candidate| candidate.id == *brush)
-                    .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
+            } else if let Some(mut brush_copy) = builtin_library()
+                .into_iter()
+                .find(|candidate| candidate.id == *brush)
+            {
                 if let Some(color) = state.active_brush_color {
                     crate::brushes::set_brush_paint_color(&mut brush_copy.paint, color);
                 }
@@ -3041,6 +3040,8 @@ pub(super) fn dispatch_state(
                         .compile()
                         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?,
                 )
+            } else if brush.0 > 5 {
+                return Err(EngineError::InvalidCommand("unknown Phase 2 brush".into()));
             } else {
                 None
             };
