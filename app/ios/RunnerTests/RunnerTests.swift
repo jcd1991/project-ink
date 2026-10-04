@@ -5,6 +5,31 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testPencilContactStartUsesFirstMeasuredMovePressure() {
+    var buffer = InkPointerContactStartBuffer()
+    buffer.hold(pointerSample(pointerID: 7, phase: 0, pressure: 0, sequence: 11))
+
+    let start = buffer.take(for: 7, usingFirstMeasuredPressure: 0.016)
+
+    XCTAssertEqual(start?.phase, 0)
+    XCTAssertEqual(start?.pressure, 0.016)
+    XCTAssertEqual(start?.canvasX, 12)
+    XCTAssertEqual(start?.canvasY, 34)
+    XCTAssertEqual(start?.timestampNS, 99)
+    XCTAssertEqual(start?.sequence, 11)
+    XCTAssertNil(buffer.take(for: 7))
+  }
+
+  func testStationaryPencilContactKeepsItsOriginalPressure() {
+    var buffer = InkPointerContactStartBuffer()
+    buffer.hold(pointerSample(pointerID: 9, phase: 0, pressure: 0, sequence: 20))
+
+    let start = buffer.take(for: 9)
+
+    XCTAssertEqual(start?.pressure, 0)
+    XCTAssertEqual(start?.phase, 0)
+  }
+
   func testPointerPacketBoundsRetainConfirmedSamples() {
     var samples: [InkPointerSampleV1] = []
     for index in 0..<350 {
@@ -82,6 +107,29 @@ class RunnerTests: XCTestCase {
     XCTAssertNil(error)
     wait(for: [expectation], timeout: 1.0)
     XCTAssertNil(status.onCancel(withArguments: nil))
+  }
+
+  private func pointerSample(
+    pointerID: UInt32,
+    phase: UInt8,
+    pressure: Float,
+    sequence: UInt32
+  ) -> InkPointerSampleV1 {
+    InkPointerSampleV1(
+      pointerID: pointerID,
+      flags: 1,
+      deviceKind: 1,
+      phase: phase,
+      canvasX: 12,
+      canvasY: 34,
+      pressure: pressure,
+      tiltX: 0,
+      tiltY: 0,
+      azimuth: 0,
+      twist: 0,
+      timestampNS: 99,
+      sequence: sequence
+    )
   }
 
 }

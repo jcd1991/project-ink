@@ -190,6 +190,11 @@ Fallbacks:
 - zero or invalid timestamp delta: reuse the previous valid speed;
 - touch input: configurable synthetic pressure curve, default `0.5`.
 
+The iPad UIKit adapter holds the initial zero-force Pencil contact until the
+first confirmed move, then gives the start sample the pressure from the
+earliest confirmed measured move. A contact that ends without moving preserves
+its initial pressure and remains a tap.
+
 ## Parameter bindings
 
 Size, opacity, flow, density, spacing, rotation, scatter, grain strength,

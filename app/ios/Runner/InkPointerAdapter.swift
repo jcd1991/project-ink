@@ -4,6 +4,7 @@ import UIKit
 /// Converts high-fidelity Pencil touches into the platform-neutral packet.
 final class InkPointerAdapter {
     private var sequence: UInt32 = 0
+    private var pendingContactStarts = InkPointerContactStartBuffer()
 
     func isStylus(_ touch: UITouch) -> Bool {
         touch.type == .pencil
@@ -17,6 +18,14 @@ final class InkPointerAdapter {
     ) -> [Data]? {
         var samples: [InkPointerSampleV1] = []
         for touch in touches where isStylus(touch) {
+            let pointerID = UInt32(truncatingIfNeeded: touch.hash)
+            if phase == 0 {
+                pendingContactStarts.hold(
+                    sample(touch, in: view, phase: phase, flags: 1)
+                )
+                continue
+            }
+
             if phase == 1 {
                 // UIKit returns historical/coalesced samples in time order.
                 // Emit them before the current sample so the renderer never
@@ -27,16 +36,32 @@ final class InkPointerAdapter {
                 // remove it: the documented element is a copy, not
                 // necessarily the same UITouch instance. Emit the historical
                 // prefix, then append `touch` exactly once below.
-                for candidate in coalesced.dropLast() {
-                    samples.append(sample(candidate, in: view, phase: phase, flags: 1 << 1))
+                let historical = coalesced.dropLast().map {
+                    sample($0, in: view, phase: phase, flags: 1 << 1)
                 }
+                let current = sample(touch, in: view, phase: phase, flags: 1)
+                if let start = pendingContactStarts.take(
+                    for: pointerID,
+                    usingFirstMeasuredPressure: historical.first?.pressure ?? current.pressure
+                ) {
+                    samples.append(start)
+                }
+                samples.append(contentsOf: historical)
+                samples.append(current)
+                let predicted = event?.predictedTouches(for: touch) ?? []
+                for candidate in predicted {
+                    samples.append(sample(candidate, in: view, phase: phase, flags: 1 << 2))
+                }
+                continue
+            }
+
+            if let start = pendingContactStarts.take(for: pointerID) {
+                // A stationary tap has no measured move sample to calibrate
+                // its starting dab. Preserve its initial contact pressure
+                // and deliver the down and terminal samples together.
+                samples.append(start)
             }
             samples.append(sample(touch, in: view, phase: phase, flags: 1))
-            guard phase == 1 else { continue }
-            let predicted = event?.predictedTouches(for: touch) ?? []
-            for candidate in predicted {
-                samples.append(sample(candidate, in: view, phase: phase, flags: 1 << 2))
-            }
         }
         return InkPointerPacketV1.encode(samples)
     }
@@ -87,10 +112,10 @@ final class InkPointerAdapter {
             phase: phase,
             canvasX: Float(point.x),
             canvasY: Float(point.y),
-            // UIKit can provide an estimated force on initial contact. Start
-            // the first dab at minimum width; later move/estimate samples
-            // carry the measured force so an optimistic estimate cannot make
-            // a fat isolated dot before the line begins.
+            // The initial contact is buffered until the first measured move.
+            // Its pressure is then aligned with the earliest confirmed move
+            // sample, avoiding a separate base-size dab before the line. A
+            // stationary tap retains its initial contact pressure.
             pressure: phase == 0 ? 0 : Float(touch.force / maximumForce),
             tiltX: Float(tiltMagnitude * cos(azimuth)),
             tiltY: Float(tiltMagnitude * sin(azimuth)),
@@ -104,5 +129,38 @@ final class InkPointerAdapter {
     private func nextSequence() -> UInt32 {
         defer { sequence &+= 1 }
         return sequence
+    }
+}
+
+/// Holds the first contact sample until a measured Pencil move can supply its
+/// pressure, while preserving the original position, timestamp, and sequence.
+struct InkPointerContactStartBuffer {
+    private var starts: [UInt32: InkPointerSampleV1] = [:]
+
+    mutating func hold(_ sample: InkPointerSampleV1) {
+        starts[sample.pointerID] = sample
+    }
+
+    mutating func take(
+        for pointerID: UInt32,
+        usingFirstMeasuredPressure pressure: Float? = nil
+    ) -> InkPointerSampleV1? {
+        guard let start = starts.removeValue(forKey: pointerID) else { return nil }
+        guard let pressure else { return start }
+        return InkPointerSampleV1(
+            pointerID: start.pointerID,
+            flags: start.flags,
+            deviceKind: start.deviceKind,
+            phase: start.phase,
+            canvasX: start.canvasX,
+            canvasY: start.canvasY,
+            pressure: pressure,
+            tiltX: start.tiltX,
+            tiltY: start.tiltY,
+            azimuth: start.azimuth,
+            twist: start.twist,
+            timestampNS: start.timestampNS,
+            sequence: start.sequence
+        )
     }
 }
