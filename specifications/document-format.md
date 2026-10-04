@@ -14,6 +14,12 @@ schema as a standalone document. The bridge exposes one
 Standalone v1/v2/v3/v4/v5 documents remain readable; saves write v6. Readers reject
 newer format versions instead of dropping fields they do not understand.
 
+`history.json.zst` may include the optional `history_truncated: true` flag.
+Writers set it when they omit older undo/redo snapshots to keep the complete
+document within the shared memory budget. Older readers ignore this additive
+field; current readers expose the omission in the History palette. The current
+artwork checkpoint is retained when history is trimmed.
+
 V6 adds bounded `layer_panel_state` metadata to each page manifest. It stores
 the primary layer ID and the IDs of collapsed ordinary groups; this affects
 panel presentation only and is excluded from content history and command
@@ -274,8 +280,11 @@ encoded member, parsed structures, and temporary buffer growth; the projected
 load working set is capped at 900 MiB. Studio pages share one budget with their
 outer comic structure, rather than receiving an independent allowance per page.
 The writer applies the same accounted-data cap so it does not publish a project
-that the reader would reject. These are conservative estimates, not substitutes
-for minimum-device peak-memory measurements.
+that the reader would reject. If reversible history alone prevents a save from
+fitting, the writer reduces the saved history window while retaining the newest
+undo/redo states that fit; it returns the original memory-limit error if the
+artwork and other required data still exceed the cap. These are conservative
+estimates, not substitutes for minimum-device peak-memory measurements.
 
 ## Client autosave contract
 

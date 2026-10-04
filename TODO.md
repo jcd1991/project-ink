@@ -813,11 +813,14 @@ testable locally without a downloaded shader.
   validation.
 - [x] Rebuild and test the shared `.inkproj` 768 MiB aggregate-data and 900 MiB
   projected load budget, including multipage studio projects and the existing
-  oversized-history preservation behavior. `CARGO_PROFILE_TEST_DEBUG=0
-  CARGO_INCREMENTAL=0 cargo test -p ink-storage --lib` passes all 24 tests,
-  including aggregate-budget boundaries, studio round-trip, oversized-history
-  preservation, and abrupt-process interruption. This is host test evidence;
-  minimum-device peak-memory measurement remains open.
+  oversized-history preservation behavior. Saves now trim optional undo/redo
+  history only when needed to fit the existing reader budget, mark the history
+  sidecar, and preserve the current artwork. `CARGO_PROFILE_TEST_DEBUG=0
+  CARGO_INCREMENTAL=0 cargo test -p ink-storage --lib` passes all 28 tests,
+  including aggregate-budget boundaries, studio round-trip, history-trim
+  disclosure, and abrupt-process interruption. The engine suite passes all 120
+  tests. This is host test evidence; minimum-device peak-memory measurement
+  remains open.
 - [ ] Complete live dirty-window-close acceptance with a fresh isolated named
   document. Cmd-Q was observed reaching the AppKit callback and displaying the
   dirty recovery prompt; Cancel restored the same recovered document. Save and

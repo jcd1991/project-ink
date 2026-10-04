@@ -40,6 +40,7 @@ const MAX_PROJECT_DECODED_BYTES: usize = 768 * 1024 * 1024;
 const MAX_PROJECT_LOAD_WORKING_SET_BYTES: usize = 900 * 1024 * 1024;
 const MAX_COMPRESSED_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DECOMPRESSED_HISTORY_BYTES: usize = 128 * 1024 * 1024;
+const MIN_HISTORY_SIDECAR_BYTES: usize = 64;
 const MAX_LAYERS: usize = 4096;
 const MAX_LAYER_NAME_BYTES: usize = 1024;
 const MAX_JOURNAL_ENTRIES: usize = 262_144;
@@ -189,15 +190,33 @@ pub struct VectorRecord {
 pub struct HistorySnapshot {
     pub undo: Vec<StoredState>,
     pub redo: Vec<StoredState>,
-    /// True only when a bounded reader omitted an oversized optional sidecar.
+    /// True when bounded persistence omitted optional undo/redo history.
     #[serde(skip)]
     pub truncated_on_load: bool,
+}
+
+#[derive(Deserialize)]
+struct HistorySnapshotFile {
+    #[serde(default)]
+    undo: Vec<StoredState>,
+    #[serde(default)]
+    redo: Vec<StoredState>,
+    #[serde(default)]
+    history_truncated: bool,
 }
 
 #[derive(Serialize)]
 struct HistorySnapshotView<'a> {
     undo: &'a [StoredState],
     redo: &'a [StoredState],
+    #[serde(skip_serializing_if = "is_false")]
+    history_truncated: bool,
+}
+
+// Serde's `skip_serializing_if` callback is required to accept `&T`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Default)]
@@ -243,7 +262,11 @@ fn bounded_history_window(
         .iter()
         .map(json_len)
         .collect::<Result<Vec<_>, _>>()?;
-    let empty_size = json_len(&HistorySnapshot::default())?;
+    let empty_size = json_len(&HistorySnapshotView {
+        undo: &[],
+        redo: &[],
+        history_truncated: true,
+    })?;
     let mut total = empty_size.saturating_sub(4)
         + undo_sizes.iter().sum::<usize>()
         + redo_sizes.iter().sum::<usize>()
@@ -395,7 +418,8 @@ pub fn save_studio_project(
     destination: &Path,
     snapshot: &StudioProjectSnapshot,
 ) -> Result<(), StorageError> {
-    let project = validate_studio_snapshot(snapshot)?;
+    let history_limit = choose_studio_project_history_limit(snapshot)?;
+    let project = validate_studio_snapshot_with_history_limit(snapshot, history_limit)?;
     validate_destination(destination)?;
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -446,12 +470,7 @@ pub fn save_studio_project(
     for page in &snapshot.pages {
         let page_path = temp.join(&page.relative_path);
         fs::create_dir_all(&page_path)?;
-        write_snapshot(
-            &page_path,
-            &page.snapshot,
-            None,
-            MAX_DECOMPRESSED_HISTORY_BYTES,
-        )?;
+        write_snapshot(&page_path, &page.snapshot, None, history_limit)?;
     }
     sync_directory(&temp.join("pages"))?;
     sync_directory(&temp)?;
@@ -484,6 +503,13 @@ pub fn save_studio_project(
 fn validate_studio_snapshot(
     snapshot: &StudioProjectSnapshot,
 ) -> Result<ink_comic::ComicProject, StorageError> {
+    validate_studio_snapshot_with_history_limit(snapshot, MAX_DECOMPRESSED_HISTORY_BYTES)
+}
+
+fn validate_studio_snapshot_with_history_limit(
+    snapshot: &StudioProjectSnapshot,
+    history_limit: usize,
+) -> Result<ink_comic::ComicProject, StorageError> {
     if snapshot.comic.len() > usize::try_from(MAX_COMIC_BYTES).unwrap_or(usize::MAX) {
         return Err(StorageError::LimitExceeded("studio comic structure size"));
     }
@@ -492,7 +518,10 @@ fn validate_studio_snapshot(
     // snapshot. Account for them before parsing comic metadata so the peak
     // check covers the existing pages plus the parser's temporary allocations.
     for page in &snapshot.pages {
-        memory_budget.retain(project_snapshot_memory_bytes(&page.snapshot)?)?;
+        memory_budget.retain(project_snapshot_memory_bytes_with_history_limit(
+            &page.snapshot,
+            history_limit,
+        )?)?;
     }
     memory_budget.ensure_peak(snapshot.comic.len().saturating_mul(3))?;
     let project = ink_comic::ComicProject::from_json(&snapshot.comic).map_err(|error| {
@@ -536,9 +565,83 @@ fn validate_studio_snapshot(
                 "page document dimensions do not match comic metadata".into(),
             ));
         }
-        validate_snapshot(&page.snapshot)?;
+        validate_snapshot_with_history_limit(&page.snapshot, history_limit)?;
     }
     Ok(project)
+}
+
+fn choose_project_history_limit(snapshot: &ProjectSnapshot) -> Result<usize, StorageError> {
+    choose_history_limit(
+        MAX_DECOMPRESSED_HISTORY_BYTES,
+        MIN_HISTORY_SIDECAR_BYTES,
+        1,
+        |history_limit| project_snapshot_memory_bytes_with_history_limit(snapshot, history_limit),
+    )
+}
+
+fn choose_studio_project_history_limit(
+    snapshot: &StudioProjectSnapshot,
+) -> Result<usize, StorageError> {
+    choose_history_limit(
+        MAX_DECOMPRESSED_HISTORY_BYTES,
+        MIN_HISTORY_SIDECAR_BYTES,
+        snapshot.pages.len().max(1),
+        |history_limit| studio_project_memory_bytes_with_history_limit(snapshot, history_limit),
+    )
+}
+
+fn studio_project_memory_bytes_with_history_limit(
+    snapshot: &StudioProjectSnapshot,
+    history_limit: usize,
+) -> Result<usize, StorageError> {
+    if snapshot.comic.len() > usize::try_from(MAX_COMIC_BYTES).unwrap_or(usize::MAX) {
+        return Err(StorageError::LimitExceeded("studio comic structure size"));
+    }
+    let mut memory_budget = ProjectLoadBudget::default();
+    for page in &snapshot.pages {
+        memory_budget.retain(project_snapshot_memory_bytes_with_history_limit(
+            &page.snapshot,
+            history_limit,
+        )?)?;
+    }
+    memory_budget.ensure_peak(snapshot.comic.len().saturating_mul(3))?;
+    memory_budget.retain(snapshot.comic.len().saturating_mul(2))?;
+    Ok(memory_budget.retained_bytes)
+}
+
+fn is_project_memory_limit(error: &StorageError) -> bool {
+    matches!(
+        error,
+        StorageError::LimitExceeded("aggregate project memory" | "project load working set")
+    )
+}
+
+fn choose_history_limit(
+    full_limit: usize,
+    minimum_limit: usize,
+    page_count: usize,
+    mut measure: impl FnMut(usize) -> Result<usize, StorageError>,
+) -> Result<usize, StorageError> {
+    match measure(full_limit) {
+        Ok(_) => return Ok(full_limit),
+        Err(error) if is_project_memory_limit(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    let minimum_memory = measure(minimum_limit)?;
+    let proposed_limit = history_limit_for_remaining_budget(minimum_memory, page_count);
+    match measure(proposed_limit) {
+        Ok(_) => Ok(proposed_limit),
+        Err(error) if is_project_memory_limit(&error) => Ok(minimum_limit),
+        Err(error) => Err(error),
+    }
+}
+
+fn history_limit_for_remaining_budget(minimum_memory_bytes: usize, page_count: usize) -> usize {
+    let remaining_bytes = MAX_PROJECT_DECODED_BYTES.saturating_sub(minimum_memory_bytes);
+    MIN_HISTORY_SIDECAR_BYTES
+        .saturating_add(remaining_bytes / (2 * page_count.max(1)))
+        .min(MAX_DECOMPRESSED_HISTORY_BYTES)
 }
 
 fn validate_nested_relative_path(path: &str) -> Result<(), StorageError> {
@@ -661,12 +764,8 @@ fn save_project_inner(
     snapshot: &ProjectSnapshot,
     fail_after: Option<SaveStage>,
 ) -> Result<(), StorageError> {
-    save_project_inner_with_history_limit(
-        destination,
-        snapshot,
-        fail_after,
-        MAX_DECOMPRESSED_HISTORY_BYTES,
-    )
+    let history_limit = choose_project_history_limit(snapshot)?;
+    save_project_inner_with_history_limit(destination, snapshot, fail_after, history_limit)
 }
 
 fn save_project_inner_with_history_limit(
@@ -676,7 +775,7 @@ fn save_project_inner_with_history_limit(
     history_limit: usize,
 ) -> Result<(), StorageError> {
     validate_destination(destination)?;
-    validate_snapshot(snapshot)?;
+    validate_snapshot_with_history_limit(snapshot, history_limit)?;
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     if destination.exists() {
@@ -1196,7 +1295,12 @@ fn load_project_contents_with_budget(
             project_budget,
         ) {
             Ok(decoded) => {
-                let history: HistorySnapshot = serde_json::from_slice(&decoded)?;
+                let history_file: HistorySnapshotFile = serde_json::from_slice(&decoded)?;
+                let history = HistorySnapshot {
+                    undo: history_file.undo,
+                    redo: history_file.redo,
+                    truncated_on_load: history_file.history_truncated,
+                };
                 validate_history(&history, spec)?;
                 history
             }
@@ -1528,6 +1632,9 @@ fn write_snapshot(
     let history_json = serde_json::to_vec(&HistorySnapshotView {
         undo: &snapshot.history.undo[history_window.undo_start..],
         redo: &snapshot.history.redo[history_window.redo_start..],
+        history_truncated: snapshot.history.truncated_on_load
+            || history_window.undo_start > 0
+            || history_window.redo_start > 0,
     })?;
     let history_zstd =
         zstd::stream::encode_all(history_json.as_slice(), 3).map_err(StorageError::Compression)?;
@@ -1637,12 +1744,15 @@ fn maybe_fail(fail_after: Option<SaveStage>, stage: SaveStage) -> Result<(), Sto
     Ok(())
 }
 
-fn validate_snapshot(snapshot: &ProjectSnapshot) -> Result<(), StorageError> {
+fn validate_snapshot_with_history_limit(
+    snapshot: &ProjectSnapshot,
+    history_limit: usize,
+) -> Result<(), StorageError> {
     snapshot
         .spec
         .validate()
         .map_err(|error| StorageError::InvalidManifest(error.to_string()))?;
-    validate_project_snapshot_memory(snapshot)?;
+    let _ = project_snapshot_memory_bytes_with_history_limit(snapshot, history_limit)?;
     validate_stored_state(
         &snapshot.layers,
         &snapshot.tiles,
@@ -1740,12 +1850,10 @@ fn serialized_size<T: Serialize>(value: &T) -> Result<usize, StorageError> {
     Ok(counter.0)
 }
 
-fn validate_project_snapshot_memory(snapshot: &ProjectSnapshot) -> Result<(), StorageError> {
-    let _ = project_snapshot_memory_bytes(snapshot)?;
-    Ok(())
-}
-
-fn project_snapshot_memory_bytes(snapshot: &ProjectSnapshot) -> Result<usize, StorageError> {
+fn project_snapshot_memory_bytes_with_history_limit(
+    snapshot: &ProjectSnapshot,
+    history_limit: usize,
+) -> Result<usize, StorageError> {
     let mut budget = ProjectLoadBudget::default();
     if snapshot.resources.len() > MAX_RESOURCES {
         return Err(StorageError::LimitExceeded("resource count"));
@@ -1774,10 +1882,13 @@ fn project_snapshot_memory_bytes(snapshot: &ProjectSnapshot) -> Result<usize, St
     for payload in &snapshot.journal {
         budget.retain(payload.len().saturating_add(std::mem::size_of::<Vec<u8>>()))?;
     }
-    let history_window = bounded_history_window(&snapshot.history, MAX_DECOMPRESSED_HISTORY_BYTES)?;
+    let history_window = bounded_history_window(&snapshot.history, history_limit)?;
     let history_bytes = serialized_size(&HistorySnapshotView {
         undo: &snapshot.history.undo[history_window.undo_start..],
         redo: &snapshot.history.redo[history_window.redo_start..],
+        history_truncated: snapshot.history.truncated_on_load
+            || history_window.undo_start > 0
+            || history_window.redo_start > 0,
     })?;
     budget.retain(
         history_bytes
@@ -2396,6 +2507,46 @@ mod tests {
     }
 
     #[test]
+    fn history_fallback_divides_remaining_memory_across_saved_pages() {
+        let remaining = 16 * 1024 * 1024;
+        let minimum_memory = MAX_PROJECT_DECODED_BYTES - remaining;
+        assert_eq!(
+            history_limit_for_remaining_budget(minimum_memory, 1),
+            MIN_HISTORY_SIDECAR_BYTES + remaining / 2
+        );
+        assert_eq!(
+            history_limit_for_remaining_budget(minimum_memory, 4),
+            MIN_HISTORY_SIDECAR_BYTES + remaining / 8
+        );
+    }
+
+    #[test]
+    fn history_fallback_selects_a_limit_that_fits_the_project_budget() {
+        let selected = choose_history_limit(128, 64, 1, |history_limit| {
+            if history_limit > 114 {
+                return Err(StorageError::LimitExceeded("aggregate project memory"));
+            }
+            Ok(MAX_PROJECT_DECODED_BYTES - 100 + (history_limit - 64) * 2)
+        })
+        .expect("a reduced history window should fit");
+
+        assert_eq!(selected, 114);
+    }
+
+    #[test]
+    fn history_fallback_uses_minimum_when_proposed_window_still_exceeds_budget() {
+        let selected = choose_history_limit(128, 64, 1, |history_limit| {
+            if history_limit > 113 {
+                return Err(StorageError::LimitExceeded("aggregate project memory"));
+            }
+            Ok(MAX_PROJECT_DECODED_BYTES - 100 + (history_limit - 64) * 2)
+        })
+        .expect("the minimum history window should fit");
+
+        assert_eq!(selected, 64);
+    }
+
+    #[test]
     fn sidecar_decode_respects_remaining_project_memory_before_parsing() {
         let encoded =
             zstd::stream::encode_all(&b"bounded payload"[..], 1).expect("encode tiny test sidecar");
@@ -2670,6 +2821,7 @@ mod tests {
         assert_eq!(actual.layers, expected.layers);
         assert_eq!(actual.history.undo.len(), 1);
         assert!(actual.history.undo[0].layers[0].name.starts_with("newest-"));
+        assert!(actual.history.truncated_on_load);
         let encoded_history = fs::read(destination.join("history.json.zst"))
             .expect("history sidecar")
             .as_slice()

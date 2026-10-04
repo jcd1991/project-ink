@@ -95,7 +95,7 @@ remain component caps until the cross-route peak-memory audit below is complete.
 
 | Import route | Current bounds | Remaining hardening |
 | --- | --- | --- |
-| `.inkproj` and studio pages | Manifest 256 KiB; SQLite 64 MiB; decoded tiles 768 MiB; decompressed history 128 MiB; vector/resource libraries 256 MiB each; brush library 64 MiB; comic sidecar 64 MiB. A shared conservative ledger caps accounted document data at 768 MiB and reserves decompression/parse working space below 900 MiB. Studio pages share the same ledger. | Validate the accounting against a generated maximum-valid fixture and measure peak memory on minimum-spec hardware. The 24 storage tests, including aggregate-budget boundaries and a studio round-trip, pass. |
+| `.inkproj` and studio pages | Manifest 256 KiB; SQLite 64 MiB; decoded tiles 768 MiB; decompressed history 128 MiB; vector/resource libraries 256 MiB each; brush library 64 MiB; comic sidecar 64 MiB. A shared conservative ledger caps accounted document data at 768 MiB and reserves decompression/parse working space below 900 MiB. Studio pages share the same ledger. Saves trim older undo/redo history only when that optional data prevents the project from fitting, and disclose the trim on reopen. | Validate the accounting against a generated maximum-valid fixture and measure peak memory on minimum-spec hardware. The 28 storage tests, including adaptive history-limit boundaries and a studio round-trip, pass. |
 | Comic JSON | 64 MiB input; 512 pages; 128 me total page pixels; per-page caps include 256 panels, 512 balloons, 4,096 materials, 2,048 effect lines, 4,096 ink lines, and 256 tone layers; text fields are capped at 16 KiB. | Measure deserialization/render cost at maximum inputs and audit combined transient allocations. |
 | Brush imports | Native `.inkbrush`/`.inkbrushpack`, Krita bundles, and external brush packages cap source at 256 MiB, expanded ZIP data at 512 MiB, entries at 256, and compression ratio at 100:1. Presets cap at 1 MiB, individual decoded resources at 96 MiB, and the unique resource library at 256 MiB. Multi-brush report copies now also cap at 256 MiB total. SUT reads a 256 MiB SQLite source and imports at most two decoded image assets. | Measure decompression/preview latency and aggregate parser buffers on the lowest supported device. |
 | Image brush tip | 64 MiB source; checked dimensions before decode and enforced again by decoder width/height limits; at most 96 MiB decoded RGBA and decoder allocation limit. | The decoder allocation limit is best-effort for some codecs; measure parser and preview peaks on the lowest supported device. |
@@ -388,7 +388,7 @@ evidence remain separate hardware gates.
   remaining payload. Both are targeted host tests, not minimum-device memory
   measurements.
 - `CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p ink-storage
-  --lib` passed all 24 tests, including aggregate project-memory boundaries,
+  --lib` passed all 28 tests, including aggregate project-memory boundaries,
   studio round-trip, migrations, tile limits, corrupt-manifest handling, and
   subprocess interruption. `autosave_coordinator_test.dart` passed 7 tests,
   `canvas_document_actions_test.dart` passed 30 tests, and
