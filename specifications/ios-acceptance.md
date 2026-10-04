@@ -39,6 +39,15 @@ Xcode DerivedData, logs, traces, and XCTest result bundles are kept under
 PROJECT_INK_IOS_SIMULATOR_UDID selects a simulator.
 PROJECT_INK_IPAD_PROFILE may be ipad-m1 or ipad-m4 if model detection fails.
 
+The runner requires 18 GiB free before device, simulator, or Pencil runs and
+28 GiB for full mode. For a constrained local run, set
+`PROJECT_INK_IOS_ACCEPTANCE_MIN_FREE_GIB` to an integer from 6 up to (but not
+including) the mode's default floor. The runner checks the selected floor
+before each bounded build/test command and stops before the next command if
+free space drops below it. A single Xcode/Flutter command can still consume
+space while running, so monitor disk during an override run and keep other
+builds closed.
+
 Each runner invocation isolates Flutter configuration under that run directory.
 Physical-device runs disable Flutter's LLDB debugging transport for the run and
 use Xcode's device debugging path; this works around a CoreDevice VM-service

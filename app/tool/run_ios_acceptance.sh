@@ -39,12 +39,23 @@ available_bytes() { df -Pk "$app_dir" | awk 'NR == 2 { print $4 * 1024 }'; }
 available_gib() { awk -v bytes="$(available_bytes)" 'BEGIN { printf "%.1f", bytes / 1073741824 }'; }
 required_gib=18
 [[ "$mode" != full ]] || required_gib=28
-if [[ "$mode" == preflight ]]; then
-  printf 'Free disk: %s GiB (recommended before full run: %s GiB)\n' "$(available_gib)" "$required_gib"
-else
+disk_floor_override="$(printenv PROJECT_INK_IOS_ACCEPTANCE_MIN_FREE_GIB 2>/dev/null || true)"
+if [[ -n "$disk_floor_override" ]]; then
+  [[ "$disk_floor_override" =~ ^[0-9]+$ ]] || fail 'PROJECT_INK_IOS_ACCEPTANCE_MIN_FREE_GIB must be an integer'
+  (( disk_floor_override >= 6 && disk_floor_override < required_gib )) || \
+    fail "disk floor override must be between 6 and less than ${required_gib} GiB"
+  required_gib="$disk_floor_override"
+fi
+assert_disk_space() {
+  local free_bytes min_bytes
   free_bytes="$(available_bytes)"
   min_bytes=$((required_gib * 1024 * 1024 * 1024))
-  (( free_bytes >= min_bytes )) || fail "only $(available_gib) GiB free; need at least ${required_gib} GiB for this run; free space and retry"
+  (( free_bytes >= min_bytes )) || fail "free disk fell below the ${required_gib} GiB run floor; stopping before the next build/test command"
+}
+if [[ "$mode" == preflight ]]; then
+  printf 'Free disk: %s GiB (run floor: %s GiB)\n' "$(available_gib)" "$required_gib"
+else
+  assert_disk_space
 fi
 flutter_version="$(flutter --version | sed -n '1p')"
 xcode_version="$(xcodebuild -version | tr '\n' ' ')"
@@ -70,11 +81,11 @@ fi
 if [[ -n "$resume_dir" ]]; then
   run_dir="$(cd "$resume_dir" && pwd)"
   [[ -f "$run_dir/state.json" ]] || fail 'resume state is missing'
-  rg -F "\"source_revision\": \"$revision\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: source changed'
-  rg -F "\"diff_fingerprint\": \"$diff_hash\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: tracked diff changed'
-  rg -F "\"flutter_version\": \"$flutter_version\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: Flutter changed'
-  rg -F "\"xcode_version\": \"$xcode_version\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: Xcode changed'
-  if [[ -n "$device_id" ]]; then rg -F "\"device_id\": \"$device_id\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: device changed'; fi
+  rg -F "\"source_revision\":\"$revision\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: source changed'
+  rg -F "\"diff_fingerprint\":\"$diff_hash\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: tracked diff changed'
+  rg -F "\"flutter_version\":\"$flutter_version\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: Flutter changed'
+  rg -F "\"xcode_version\":\"$xcode_version\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: Xcode changed'
+  if [[ -n "$device_id" ]]; then rg -F "\"device_id\":\"$device_id\"" "$run_dir/state.json" >/dev/null || fail 'resume rejected: device changed'; fi
 else
   run_dir="$results_root/runs/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -p "$run_dir"
@@ -202,6 +213,7 @@ run_stage() {
 run_bounded() {
   local timeout_seconds="$1"
   shift
+  assert_disk_space
   /usr/bin/perl - "$timeout_seconds" "$@" <<'PERL'
 use strict;
 use warnings;
@@ -268,7 +280,7 @@ native_acceptance() {
   result="$run_dir/native-$2.xcresult"
   [[ ! -e "$result" ]] || result="$run_dir/native-$2-$(date -u +%H%M%S).xcresult"
   cd "$app_dir"
-  run_bounded 900 xcodebuild test -workspace ios/Runner.xcworkspace -scheme Acceptance -destination "id=$1" \
+  run_bounded 900 xcodebuild test -allowProvisioningUpdates -workspace ios/Runner.xcworkspace -scheme Acceptance -destination "id=$1" \
     -derivedDataPath "$run_dir/xcode-derived-$2" -resultBundlePath "$result" \
     -only-testing:RunnerUITests CODE_SIGN_STYLE=Automatic BUILD_DIR="$app_dir/build/ios-acceptance-output/ios" \
     FLUTTER_TARGET=lib/main.dart
