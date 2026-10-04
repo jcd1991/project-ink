@@ -196,11 +196,12 @@ Size, opacity, flow, density, spacing, rotation, scatter, grain strength,
 pickup, smudge, color shift, and other configurable values share one mapping
 system.
 
-Starter pressure-to-diameter bindings use an early nonlinear response so the
-low-force range common during ordinary Apple Pencil drawing changes brush size
-visibly while retaining room for firmer pressure. The binding amount remains
-brush-specific and the brush editor's pressure size and response-curve controls
-tune each brush independently.
+Starter pressure-to-diameter bindings make the normalized `0.04–0.15` range
+observed in ordinary Apple Pencil strokes visibly change brush size, while
+preserving a gradual response above that range for firmer pressure. The default
+Technical Pen and G-Pen are tested against that measured range. Binding strength
+remains brush-specific, and the brush editor's pressure size and response-curve
+controls tune each brush independently.
 
 ```rust
 pub struct ParameterBinding {

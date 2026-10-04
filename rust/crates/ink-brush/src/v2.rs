@@ -1602,11 +1602,12 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
         curve: ResponseCurve {
             points: vec![
                 CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.02, y: 0.18 },
-                CurvePoint { x: 0.05, y: 0.38 },
-                CurvePoint { x: 0.1, y: 0.56 },
-                CurvePoint { x: 0.3, y: 0.78 },
-                CurvePoint { x: 0.6, y: 0.92 },
+                CurvePoint { x: 0.02, y: 0.1 },
+                CurvePoint { x: 0.05, y: 0.3 },
+                CurvePoint { x: 0.1, y: 0.62 },
+                CurvePoint { x: 0.2, y: 0.82 },
+                CurvePoint { x: 0.4, y: 0.95 },
+                CurvePoint { x: 0.7, y: 0.99 },
                 CurvePoint { x: 1.0, y: 1.0 },
             ],
         },
@@ -1976,7 +1977,7 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
     // with no dynamics configured, its incoming pressure samples were ignored.
     presets[0]
         .dynamics
-        .push(pressure_binding(ParameterId::Diameter, 0.55));
+        .push(pressure_binding(ParameterId::Diameter, 0.9));
     presets[1]
         .dynamics
         .push(pressure_binding(ParameterId::Diameter, 0.55));
@@ -2133,17 +2134,38 @@ mod tests {
             .compile()
             .expect("valid G-Pen");
         let light = compiled
-            .render(&[sample(0.0, 1_311, 1)])
+            .render(&[sample(0.0, 2_883, 1)])
             .expect("light-pressure dab");
         let firm = compiled
-            .render(&[sample(0.0, 3_932, 1)])
+            .render(&[sample(0.0, 7_667, 1)])
             .expect("firm-pressure dab");
 
         assert_eq!(light.len(), 1);
         assert_eq!(firm.len(), 1);
         assert!(
-            firm[0].radius_x > light[0].radius_x * 1.15,
-            "G-Pen should visibly widen from 0.02 to 0.06 normalized Pencil pressure"
+            firm[0].radius_x > light[0].radius_x * 1.25,
+            "G-Pen should visibly widen across the pressure range observed on iPad"
+        );
+    }
+
+    #[test]
+    fn technical_pen_responds_visibly_across_observed_apple_pencil_pressure() {
+        let compiled = builtin_library()
+            .remove(0)
+            .compile()
+            .expect("valid technical pen");
+        let light = compiled
+            .render(&[sample(0.0, 2_883, 1)])
+            .expect("light-pressure dab");
+        let firm = compiled
+            .render(&[sample(0.0, 7_667, 1)])
+            .expect("firm-pressure dab");
+
+        assert_eq!(light.len(), 1);
+        assert_eq!(firm.len(), 1);
+        assert!(
+            firm[0].radius_x > light[0].radius_x * 1.25,
+            "Technical Pen should visibly widen across the pressure range observed on iPad"
         );
     }
 
