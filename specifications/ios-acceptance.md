@@ -80,6 +80,11 @@ remain local; the runner does not upload artwork or traces.
   after terminating and relaunching the acceptance app and opens/dismisses the
   native project picker.
 
+The native UI suite builds `Release-Acceptance`. iPadOS rejects direct
+XCUITest launches of Flutter Debug apps unless Flutter tooling owns the launch;
+the release test host can be launched by XCTest itself. Device UI tests run
+serially to avoid creating parallel test workers on the paired iPad.
+
 The macOS-layout ProjectInkApp recovery fixture is skipped by iOS integration
 runs; keep app-level failed-provider and recovery prompt flows manual pending
 until a tablet-native fixture replaces it. These checks do not automate every

@@ -280,9 +280,11 @@ native_acceptance() {
   result="$run_dir/native-$2.xcresult"
   [[ ! -e "$result" ]] || result="$run_dir/native-$2-$(date -u +%H%M%S).xcresult"
   cd "$app_dir"
-  run_bounded 900 xcodebuild test -allowProvisioningUpdates -workspace ios/Runner.xcworkspace -scheme Acceptance -destination "id=$1" \
+  run_bounded 900 xcodebuild test -allowProvisioningUpdates -workspace ios/Runner.xcworkspace -scheme Acceptance \
+    -configuration Release-Acceptance -destination "id=$1" \
     -derivedDataPath "$run_dir/xcode-derived-$2" -resultBundlePath "$result" \
-    -only-testing:RunnerUITests CODE_SIGN_STYLE=Automatic BUILD_DIR="$app_dir/build/ios-acceptance-output/ios" \
+    -only-testing:RunnerUITests -parallel-testing-enabled NO CODE_SIGN_STYLE=Automatic \
+    BUILD_DIR="$app_dir/build/ios-acceptance-output/ios" \
     FLUTTER_TARGET=lib/main.dart
 }
 simulator_checks() {
