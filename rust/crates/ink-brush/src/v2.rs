@@ -1594,15 +1594,19 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
         target,
         base: 1.0,
         sensor: SensorId::Pressure,
-        // Apple Pencil force varies across users and grip styles. This gentle
-        // early lift makes light-to-medium pressure useful while preserving
-        // the full-pressure endpoint; each brush's amount still controls how
-        // strongly pressure changes its parameter.
+        // Stylus force commonly occupies only a small part of the platform's
+        // normalized range during ordinary drawing. Give that low-force range
+        // useful resolution while preserving the firm-pressure endpoint; each
+        // brush's amount still controls how strongly pressure changes its
+        // parameter.
         curve: ResponseCurve {
             points: vec![
                 CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.2, y: 0.32 },
-                CurvePoint { x: 0.5, y: 0.68 },
+                CurvePoint { x: 0.02, y: 0.18 },
+                CurvePoint { x: 0.05, y: 0.38 },
+                CurvePoint { x: 0.1, y: 0.56 },
+                CurvePoint { x: 0.3, y: 0.78 },
+                CurvePoint { x: 0.6, y: 0.92 },
                 CurvePoint { x: 1.0, y: 1.0 },
             ],
         },
@@ -2117,6 +2121,29 @@ mod tests {
         assert!(
             light[0].radius_x < firm[0].radius_x,
             "firm pressure should produce a wider technical-pen mark"
+        );
+    }
+
+    #[test]
+    fn g_pen_responds_across_light_apple_pencil_pressure() {
+        let compiled = builtin_library()
+            .into_iter()
+            .find(|preset| preset.metadata.name == "G-Pen")
+            .expect("built-in G-Pen")
+            .compile()
+            .expect("valid G-Pen");
+        let light = compiled
+            .render(&[sample(0.0, 1_311, 1)])
+            .expect("light-pressure dab");
+        let firm = compiled
+            .render(&[sample(0.0, 3_932, 1)])
+            .expect("firm-pressure dab");
+
+        assert_eq!(light.len(), 1);
+        assert_eq!(firm.len(), 1);
+        assert!(
+            firm[0].radius_x > light[0].radius_x * 1.15,
+            "G-Pen should visibly widen from 0.02 to 0.06 normalized Pencil pressure"
         );
     }
 
