@@ -94,7 +94,11 @@ class CanvasGestureCoordinator {
         if (host.isMounted()) host.enableStraighten();
       case InkGesture.constrain:
         if (host.isMounted()) host.enableConstrain();
-      case InkGesture.pan || InkGesture.zoom || InkGesture.rotate || null:
+      case InkGesture.pan ||
+          InkGesture.zoom ||
+          InkGesture.rotate ||
+          InkGesture.disabled ||
+          null:
         break;
     }
   }

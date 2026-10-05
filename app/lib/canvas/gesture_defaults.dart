@@ -5,6 +5,7 @@ enum InkGesture {
   fitCanvas,
   undo,
   redo,
+  disabled,
   clipboardPalette,
   toggleInterface,
   eyedropper,

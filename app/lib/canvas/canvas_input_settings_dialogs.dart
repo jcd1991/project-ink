@@ -103,6 +103,7 @@ class _CanvasGestureSettingsDialogState
 const _tapActions = <DropdownMenuItem<InkGesture>>[
   DropdownMenuItem(value: InkGesture.undo, child: Text('Undo')),
   DropdownMenuItem(value: InkGesture.redo, child: Text('Redo')),
+  DropdownMenuItem(value: InkGesture.disabled, child: Text('Off')),
 ];
 
 @immutable
