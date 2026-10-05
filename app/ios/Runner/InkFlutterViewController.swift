@@ -29,6 +29,7 @@ final class InkFlutterViewController: FlutterViewController, UIPencilInteraction
             target: self,
             action: #selector(handlePencilHover(_:))
         )
+        hoverRecognizer.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
         view.addGestureRecognizer(hoverRecognizer)
         pencilHoverRecognizer = hoverRecognizer
     }
@@ -53,7 +54,8 @@ final class InkFlutterViewController: FlutterViewController, UIPencilInteraction
         let point: CGPoint?
         switch recognizer.state {
         case .began, .changed:
-            guard recognizer.zOffset > 0 else { return }
+            // zOffset approaches zero as Pencil gets close to the glass, so
+            // it cannot be used as a gate for whether hover is present.
             point = recognizer.location(in: view)
         case .ended, .cancelled, .failed:
             point = nil
