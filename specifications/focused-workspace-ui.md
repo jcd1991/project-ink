@@ -1,221 +1,341 @@
 # Focused workspace UI: Simple and Studio
 
-Status: refined implementation plan, 2026-10-01. Requirements below are proposed;
-code inspection establishes the current behavior, not physical-device acceptance.
+Status: tablet Simple/Studio control and palette pass implemented and visually
+reviewed in the local tree, 2026-10-04. The Flutter suite, analyzer, and macOS
+debug build pass. Rendered phone, tablet, and desktop layouts were inspected at
+normal and enlarged text sizes; physical-device, stylus, and native
+screen-reader acceptance remain open.
 
-## Design basis
+## Goal and design decisions
 
-Keep Simple for drawing essentials and Studio for advanced editing. Canvas Focus
-is a temporary presentation state available in either workspace.
+Keep Simple focused on drawing essentials and Studio focused on advanced
+editing. Preserve the same location and meaning for the controls artists need
+while drawing in either mode: active color, brush size, brush opacity, undo,
+redo, and brush selection. Studio may add palettes and workspace controls, but
+switching modes must not hide the active color or basic brush adjustments.
 
-The reference provides several concrete interaction patterns:
+Use one visible Color entry point on tablet. It displays the active main color
+and opens one color surface containing main color, sub color, transparent
+drawing, Swap, and Reset. Main and sub colors remain distinct roles. The
+transparent role keeps the current brush and its settings; the Eraser tool stays
+a separate tool choice. Do not render more than one persistent Color button for
+the same action in a mode, even when that action is present in a customizable
+command bar.
 
-| Documentation detail | Project Ink requirement |
+The selected foreground color is shared across brushes. Color controls update
+that shared color without overwriting a brush preset's base color or dynamic
+color settings.
+
+Keep brush size and opacity available beside the drawing controls in both
+modes. Show the selected value and units. Use direct sliders when there is
+room; when height or text scaling makes them cramped, use labeled value buttons
+that open one precise slider. Keep brush presets and advanced brush editing in
+the Brush Library.
+
+Use these tablet control groups as the starting point. Keep the Studio
+workspace preset inside a labeled Workspace section in More, separate from the
+Simple/Studio mode selector:
+
+```text
+Simple top bar: [Document/status] [Save] [Undo] [Redo] [Focus] [Simple | Studio] [More]
+Studio top bar: [Document/status] [Save] [Undo] [Redo] [Focus] [Simple | Studio] [More]
+Drawing controls: [Tool] [Brush] [Eraser] [Color chip] [Size] [Opacity]
+Studio palettes: [Tools] [Brushes] [Properties] [Color] [Layers] [Materials]
+                [Comics] [History] [Quick Access]
+```
+
+The drawing controls may adapt from a vertical edge rail to a compact sheet or
+pop-up when the viewport is narrow. Preserve the left/right handedness setting.
+The top bar must keep essential actions visible without horizontal scrolling on
+tablet and phone widths. Labels, selected state, and accessible names must agree.
+
+Canvas Focus is a temporary presentation state in either mode. It preserves
+the viewport and document state, hides editor chrome, and provides visible Exit
+Focus and Quick controls actions.
+
+The screen and existing action services remain state owners. New reusable
+control and palette widgets receive immutable snapshots and explicit callbacks.
+Rust remains authoritative for brush, color, document, history, and pixels.
+
+## Reference patterns
+
+| Reference | Pattern applied here |
 | --- | --- |
-| Tools expose additional settings; both modes offer size/opacity and a mode switch. | Keep essentials directly reachable and give the selected tool an explicit settings entry. |
-| Simple mode has separate main, sub, and transparent color roles. | Show each role and retain the chosen brush when painting transparently. |
-| Procreate keeps Paint, Smudge, and Erase as visible modes; Clip Studio exposes an Eraser tool and a temporary shortcut. | Keep the selected foreground color shared across brushes, and expose a direct, selected-state Eraser toggle in Studio. Preset color remains the brush's base/dynamic input. |
-| Small Tool Slider palettes replace full sliders with pop-ups. | Adapt quick controls to available height and text size. |
-| Palette docks support collapse, icon views, resizing, and rearrangement. | Define tablet palette states and restoration explicitly. |
-| Saved workspaces can be reloaded or reset. | Separate session restoration, saved layout, and reset behavior. |
-| Some advanced layers cannot be edited in Simple mode. | Declare Simple capabilities and provide an explicit route to Studio for other operations. |
+| Clip Studio Paint's [Simple and Studio modes](https://help.clip-studio.com/en-us/manual_en/090_tablet/Simple_Mode_and_Studio_Mode.htm) and [Simple Mode controls](https://help.clip-studio.com/en-us/manual_en/090_tablet/Using_Simple_Mode.htm) | Keep Simple focused on core drawing; preserve the active brush, color roles, size, and opacity when artists move to Studio. |
+| Clip Studio Paint's [palettes](https://help.clip-studio.com/en-us/manual_en/690_interface/Palettes.htm) and [tool palette](https://help.clip-studio.com/en-us/manual_en/150_tools/The_Tool_palette.htm) | Make palette destinations recognizable, role-based, and reachable through a stable switcher. |
+| Procreate's [interface](https://help.procreate.com/procreate/handbook/interface-gestures/interface), [color controls](https://help.procreate.com/procreate/handbook/colors/colors-interface), and [Paint, Smudge, Erase tools](https://help.procreate.com/procreate/handbook/brushes/paint-smudge-erase) | Keep size and opacity near the drawing hand, show the current color directly, and group related drawing modes. |
 
-Sources: [Tablet interface](https://help.clip-studio.com/en-us/manual_en/090_tablet/Tablet_interface.htm),
-[Using Simple Mode](https://help.clip-studio.com/en-us/manual_en/090_tablet/Using_Simple_Mode.htm),
-[Tool Sliders](https://help.clip-studio.com/en-us/manual_en/240_brushes/Tool_Sliders_palette.htm),
-[Palettes](https://help.clip-studio.com/en-us/manual_en/690_interface/Palettes.htm),
-and [Workspaces](https://help.clip-studio.com/en-us/manual_en/690_interface/Register_and_manage_your_workspace.htm).
-For shared brush-mode patterns, see Procreate's [Paint, Smudge, and Erase](https://help.procreate.com/procreate/handbook/brushes/paint-smudge-erase)
-and Clip Studio's [Tool Shortcuts](https://help.clip-studio.com/en-us/manual_en/780_shortcuts/Tool_Shortcuts.htm).
+These are interaction references adapted to Project Ink's existing Rust-owned
+document and brush behavior.
 
-Focus is a Project Ink design proposal. The linked tablet overview establishes
-Simple/Studio behavior; it does not specify this proposed Focus interaction.
+## Usability comparison after implementation
+
+This comparison uses the competitors' published control flows as references; it
+is a design review, not a timed user study.
+
+| Product | Published interaction | Project Ink implementation | Usability trade-off |
+| --- | --- | --- | --- |
+| Procreate | Keeps the active color visible, opens its color panel from that swatch, and places direct Size/Opacity sliders by the canvas with handedness options. | Both modes keep one active-color chip and nearby Size/Opacity controls. Studio keeps direct sliders when space allows and uses labeled slider sheets for compact or enlarged-text layouts; the controls mirror for handedness. | The drawing path is comparable and adapts to text scale. Main/Sub color roles are opened from one Color surface, so changing roles takes one extra tap compared with always-visible separate color roles. |
+| Clip Studio Paint Simple | Keeps essential drawing controls available, including Main/Sub colors, size/opacity, separate Eraser and transparent drawing, plus a layer panel. | Simple keeps those roles and brush controls available, shows the selected Brush/Eraser state, and routes the selected tool back to the brush library. Main/Sub and transparent drawing are grouped in the shared Color surface. | The focused model stays consistent with Studio and removes duplicate Color buttons. Main/Sub/transparent actions take an extra tap because they are grouped together. |
+| Clip Studio Paint Studio | Exposes a broad, rearrangeable palette workspace. | Studio has named, working palette destinations and a dedicated drawing-control edge opposite the tool rail. This increment retains one active floating panel and the Layers first-use default. | Stable routes are easier to discover than the former missing panel paths; Studio is less customizable than Clip Studio Paint until pinned, collapsed, and rearrangeable tablet palettes are implemented. |
+
+Sources: [Procreate interface](https://help.procreate.com/procreate/handbook/interface-gestures/interface), [Procreate color interface](https://help.procreate.com/procreate/handbook/colors/colors-interface), [Clip Studio Paint Simple and Studio modes](https://help.clip-studio.com/en-us/manual_en/090_tablet/Simple_Mode_and_Studio_Mode.htm), and [Clip Studio Paint Simple controls](https://help.clip-studio.com/en-us/manual_en/090_tablet/Using_Simple_Mode.htm).
+
+The primary touch actions use 48 logical-pixel targets and role/value semantics.
+That target size is a deliberate mobile-accessibility choice; it is not a
+claim of WCAG conformance. Use [WCAG 2.2 Target Size (Minimum)](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html), [Target Size (Enhanced)](https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html), and Flutter's [Semantics API](https://api.flutter.dev/flutter/widgets/Semantics-class.html) as review references. Native VoiceOver/TalkBack behavior remains a device acceptance item.
 
 ## Verified starting point and gaps
 
-Inspection of `app/lib/canvas/canvas_screen.dart`, `app/lib/app/editor_action.dart`,
-`app/lib/app/workspace_preferences.dart`, and `app/lib/canvas/gesture_defaults.dart`
-shows:
+Inspection of `canvas_screen.dart`, `canvas_top_bar.dart`,
+`canvas_compact_controls.dart`, `canvas_editor_auxiliary_overlays.dart`,
+`canvas_workspace_panel_selection.dart`, `workspace_preferences.dart`, and
+`canvas_workspace_presentation_controller.dart` establishes the current
+behavior below.
 
-| Existing behavior | Gap to rectify |
+| Current behavior | Implementation requirement |
 | --- | --- |
-| Simple/Studio preference, left-handed preference, and themes already exist. | Retain these and define restoration independently for each mode. |
-| Simple toolbar is a horizontally scrolling row containing file, selection, transform, brush, layer, color, comic, and workspace controls. | Bound the persistent essentials; place secondary actions in labeled overflow. |
-| Simple edge controls already contain undo/redo, size, opacity, and eyedropper. | Avoid duplicate undo/redo surfaces; provide compact slider behavior and bounded height. |
-| `_toggleTabletWorkspaceMode` opens Layers when entering Studio and clears other palette flags. | Open Layers on first use only; subsequently restore each mode's prior palette state. |
-| `toggleInterface` and four-finger tap already hide/show chrome. | Reuse this action for Focus, add a visible exit and consistent restoration. |
-| Touch tools, brushes, layers, and comics overlays are built outside the `_interfaceHidden` checks. | Include all workspace overlays in Focus suppression; existing hide flags do not suppress all panels. |
-| Escape calls `_closeTransientPanels`, which does not restore a hidden interface. | Define Escape/Back precedence and an explicit Focus exit. |
-| Transparent color callbacks currently route through `toggleEraser`. | Keep transparent drawing independent; the Studio command bar also offers a direct eraser toggle that preserves the selected brush and its settings. |
-| Studio has a 48-point rail and command bar; touch palettes use positioned fixed-width panels. | Specify adaptive tablet docking and verify complete palette access through visible controls. |
-| Desktop supports richer layout/customization structures. | Prove tablet access and persistence before treating desktop support as tablet parity. |
+| Simple's top row has a flexible document title, Open, Save, Undo, Redo, Focus, Color, mode switch, and More. It does not horizontally scroll; the title gives up space as controls accumulate. | Bound the top row to document/status, Save, Undo/Redo, Focus, mode, and More. Move color selection to the shared drawing controls. Keep essential controls visible at minimum supported widths. |
+| Simple's edge controls include tool and brush access, Eraser, Layers, main/sub color swatches, transparent paint, size, opacity, and eyedropper. The top row and More menu also expose Color. | Keep one persistent Color entry point and retain direct size/opacity access. Remove redundant top-row and More Color entries. Put secondary commands in labeled More. |
+| Tablet Studio's top row starts with document, tool, and brush names, then workspace/menu actions, Focus, mode switch, Color, Eraser, Edit sub color, Transparent paint, command-bar buttons, More commands, and settings. `InkCommandButton` renders icons with tooltip/semantic labels, not visible text. The row scrolls horizontally. | Separate document/workspace actions from drawing controls. Remove duplicate Color, Eraser, and palette actions from the tablet top row. Replace icon-only mode switching with a visible Simple/Studio selector. Do not require horizontal scrolling for essential actions. |
+| `showColorPicker` is in `defaultCommandBarItems` and in Studio's compact visible command set. The fixed Color button and command dispatch both open the same main-color dialog; the Menu can expose it again. Edit sub color opens that dialog initialized to the sub color. | Deduplicate visible actions by mode and control location. Main/sub role selection belongs in the shared color surface; keep command search as an alternate route. |
+| Tablet Studio's 48-point rail exposes Tools, Brush presets, Eraser, Layers, and Comics. Tablet Studio does not receive `CanvasQuickControls`; those controls are composed for desktop docks. The Brush Library has size and opacity sliders, so the controls remain reachable only while that palette is open. | Add visible size, opacity, and current-color controls to Studio at the same edge of the canvas as Simple's drawing controls. Keep the advanced Brush Library separate. |
+| Tablet Studio currently supports floating Tools, Brushes, Layers, and Comics panels. History and Quick Access open sheets. Tablet panel selection has no visible palette destination for Tool properties or Materials; those actions can clear the active floating panel without opening a replacement. Desktop palette routing is richer. | Add an explicit tablet destination or a truthful disabled state for every advertised palette. Verify that Tool properties and Materials open usable content before exposing those commands. |
+| Studio opens Layers on the first tablet presentation. Mode switches remember the last open palette per mode while the current editor route remains mounted. Palette memory is not persisted across a cold launch. The selected tablet mode is persisted. | Keep palette memory session-only in this increment: preserve each mode's palette on round trip, and open Layers on a cold Studio launch. Never confuse mode state with workspace preset state. |
+| Transparency and Eraser are separate state paths today: transparent drawing toggles its color role; Eraser toggles the active tool state. | Preserve the distinction and make both meanings clear in labels, icons, and selected state. |
+| Focus currently suppresses the top bar, tablet rails, Simple edge controls, floating panels, desktop docks, quick menu, and selection launcher. Escape's transient-close handler exits Focus. Focus Quick controls include main color, size, opacity, brush access, Undo, and Redo. | Preserve these working paths. Add regression checks for all overlays and define dismissal order for any transient sheet or dialog opened while focused. |
+| `CanvasQuickControls` already presents brush, layer, size, opacity, Eraser, transparency, main/sub color, and swap/reset on desktop. | Reuse its control vocabulary and brush/color action paths for tablet; do not add a second state owner or a separate brush-edit model. |
 
-## Simple mode specification
+## Shared tablet drawing controls
 
-Default to Simple on a fresh tablet setup. Keep the mode switch labeled and visible;
-also provide it in the workspace menu. Shared theme and handedness apply immediately
-in both modes. Use 48 logical-pixel minimum touch targets.
+Build one tablet drawing-control surface used in Simple and Studio. Keep the
+mode-specific tool/palette navigation separate from these high-frequency
+controls. The surface receives the active brush, main/sub colors, active tool,
+Eraser state, and transparency state as a snapshot. It dispatches changes
+through the existing brush and color action owners.
 
-Top bar: document title/status with bounded width, Save, Undo, Redo, Focus,
-Simple/Studio switch, and More. On narrow layouts shorten the title and move
-secondary commands into More; essentials must not require horizontal scrolling.
-Remove duplicate undo/redo buttons from the edge strip once they are in the top bar.
+- Show the selected brush name or a Brush button that opens Brush Library.
+- Show the current main-color chip as the single persistent Color button. It
+  opens one color surface with Main and Sub roles, color picker, recent colors,
+  Swap, Reset, and Transparent drawing. The currently active role is explicit.
+- Keep the transparent-drawing action visibly distinct from the Eraser tool.
+  Its label or supporting text explains that it erases using the active brush.
+- Show Size in document pixels and Opacity as a percentage. Preview while
+  dragging; persist at the existing change-end boundary, not on every movement.
+- Preserve recent-color, color-swap, active-brush, and pending-draft behavior.
+  Picker dismissal leaves the selected role and current color unchanged.
+- Mirror the control surface for handedness. At constrained heights, replace
+  the slider with a value button that opens a labeled, accessible slider.
+- In Focus, provide the same basic color, size, and opacity controls through
+  the existing Focus Quick controls sheet.
 
-Drawing rail: Brush, Eraser, Selection, Fill, Color roles, and Layers. Include only
-implemented commands supported by the active layer. Put Comics, materials,
-transform, document setup, gesture preferences, accessibility, and export in More.
-Tapping an inactive tool selects it. Tapping the selected Brush/Eraser opens its
-presets; double-tap or an explicit Settings control opens its properties. Gesture
-shortcuts always have an accessible button/menu equivalent. Show the actual active
-tool rather than the current hard-coded document-title suffix `Pen`.
+Avoid showing another fixed Color, Edit sub color, or generic color-picker
+command alongside the persistent chip. Command search may still find the Color
+action. Desktop docks may keep their current layout, but their configurable
+command bar must also avoid duplicate visible actions.
 
-Brush size/opacity remain reachable beside the drawing rail. Show units and values,
-and preview changes while dragging through the existing brush-update path. When
-height is constrained, replace long sliders with labeled value buttons that open
-one slider pop-up. Retain the existing size-persistence behavior and explicitly
-verify opacity retention on brush changes and app restart. Do not save on every
-pointer movement. Mirror rail placement for left-handed use.
+## Simple mode
 
-Color control: primary, secondary, and transparency, with distinct selection
-markers. Tapping a swatch selects its role; tapping the selected swatch opens the
-picker. Offer Swap and Reset explicitly. Transparency uses the selected brush's
-shape and settings; switching to the Eraser tool remains a separate operation.
-Long-press sampling uses the existing gesture binding and shows old/new color
-feedback. Disabled sampling/painting must explain the relevant layer limitation.
+Simple remains the default tablet mode on a fresh setup. Keep the mode selector
+visible and labeled. Shared theme and handedness preferences apply immediately
+in both modes. Use 48 logical-pixel
+minimum touch targets.
 
-Simple Layers: thumbnail, name, visibility, selected state, and Add are immediately
-visible. Layer options provide opacity, blend, rename, lock, alpha lock, clipping,
-duplicate, and delete when supported. Drag uses a deliberate handle or long press;
-ordinary scroll must not reorder. Swipe/double-tap can open options, with an explicit
-Options button as the accessible equivalent. Advanced creation and properties route
-to Studio. [Layer palette reference](https://help.clip-studio.com/en-us/manual_en/180_layers/Using_layers.htm)
+Top bar: Document/status, Save, Undo, Redo, Canvas Focus, mode selector, and
+More. Bound the title and show save progress/status without shifting the
+controls. Put Open/New, export, command search, gesture preferences,
+accessibility, workspace preset, and advanced editing routes in labeled More
+sections. Do not show Color again in the top bar or More.
 
-Simple may select and render all supported Project Ink layer types. Raster painting
-and compatible operations remain available. Advanced vector, mask, comic, tone, and
-text operations require a capability decision per operation, rather than blanket
-disabling an entire document. Explain the limitation inline and offer Switch to
-Studio, retaining selected page/layer/tool and artwork. Never flatten or convert
+Drawing navigation: Brush, Eraser, Selection, Fill, and Layers, plus the shared
+Color/size/opacity controls. Expose only implemented operations supported by
+the active layer. Tapping an inactive tool selects it. Tapping the selected
+Brush or Eraser opens its presets; an explicit Settings action opens properties.
+Keep an accessible button/menu equivalent for every gesture shortcut.
+
+Simple may select and render every supported Project Ink layer type. Raster
+painting and compatible operations remain available. Gate advanced vector,
+mask, comic, tone, and text operations per operation rather than disabling a
+whole document. Explain a limitation inline and offer Switch to Studio while
+retaining page, layer, tool, brush draft, and artwork. Never flatten or convert
 content during a mode switch.
 
-## Studio mode specification
+Simple Layers: show thumbnail, name, visibility, selected state, and Add
+immediately. Layer options provide opacity, blend, rename, lock, alpha lock,
+clipping, duplicate, and delete when supported. Use a deliberate drag handle or
+long press for reordering; ordinary scrolling must not reorder. Provide an
+accessible Options button for actions also available by swipe or double tap.
+Route advanced creation and properties to Studio. See the [layer palette
+reference](https://help.clip-studio.com/en-us/manual_en/180_layers/Using_layers.htm).
 
-Use a compact command bar, tool rail, quick size/opacity controls, and an edge
-palette switcher. Provide visible routes to Tools, Brushes, Tool properties,
-Color, Layers, Materials, Comics, History, and Quick Access. Check capability
-availability before exposing each entry. A tool's properties and a layer's
-properties must remain distinct. Group related tools and expose the selected
-group's choices. [Tool grouping reference](https://help.clip-studio.com/en-us/manual_en/150_tools/The_Tool_palette.htm)
+## Studio mode
 
-Define three palette presentation states: pinned, collapsed to icons, and temporary
-pop-up. Start with one active pinned palette on a tablet; Layers is the first-use
-default. Palette headers provide name, options, collapse/pin, and close. Closing a
-palette must leave a visible way to reopen it. A temporary palette dismisses on
-outside touch; a pinned palette stays open. Width is bounded by available canvas
-space and text scale. In portrait or split view, use a sheet/pop-up when pinning
-would leave less than a proposed 360 logical-pixel canvas width; confirm this
-threshold during device review.
+Studio provides advanced palettes while preserving the shared tablet drawing
+controls. Its top bar contains document/status, Save, Undo/Redo, Canvas Focus,
+the labeled mode selector, and More. Put workspace presets in a labeled
+Workspace section in More, separate from the mode choice. Keep active tool and
+brush visible as compact status. Remove fixed Color,
+Edit sub color, Eraser, and Transparent paint buttons from this bar; their
+authoritative controls live in the shared drawing surface or Studio rail.
 
-A user-requested pin/collapse may resize the viewport. Preserve document scale,
-rotation, and the document point at the viewport center; do not automatically Fit.
-Pop-ups overlay the viewport without moving the artwork. Rearrangement is deliberate
-through an Arrange palettes control with drag handles/drop indicators and a menu
-alternative. Adapt desktop preferences to tablet layouts with bounded fallback;
-do not overwrite the saved arrangement simply because the window became smaller.
+The tool rail selects Tools, Brush Library, Eraser, Layers, and Comics. Palette
+navigation provides visible, working routes to Tools, Brushes, Tool properties,
+Color, Layers, Materials, Comics, History, and Quick Access. Route History and
+Quick Access to their sheets, Color to the shared color surface, and each other
+palette to a Studio panel or sheet. If an operation is unsupported in the
+current document, show a reason and any supported route instead of silently
+closing the current palette.
 
-Preserve existing Illustration/Comic/custom workspace controls. Name their scope:
-workspace preset, Simple/Studio mode, and Focus are separate controls. Reset layout
-acts on the chosen mode/preset, lists what it will reset, and leaves document state
-and shared theme/gesture preferences intact.
+Keep Tool properties and Layer properties distinct. Group related tools and
+show choices for the selected group. Check document/layer capability before
+enabling palette actions. Use the [tool grouping
+reference](https://help.clip-studio.com/en-us/manual_en/150_tools/The_Tool_palette.htm).
 
-## Focus and interaction contract
+For the first tablet increment, retain the one-active-panel model and current
+Layers first-use default. Define and implement pinned, collapsed-to-icons, and
+temporary pop-up states as a later palette-layout step. A temporary panel
+dismisses on outside touch and consumes that pointer sequence so it cannot
+leave a mark. A pinned panel stays open. Closing a panel leaves a visible way
+to reopen it.
 
-Reuse `EditorActionId.toggleInterface`; expose the user-facing label Canvas Focus.
-All buttons, command search, and the existing four-finger binding dispatch the same
-action. Keep gesture remapping intact. Existing two-finger undo, three-finger redo,
-and two-finger navigation stay available. [Touch gesture reference](https://help.clip-studio.com/en-us/manual_en/750_gestures/Basic_touch_gestures.htm)
+Bound panel width by available space and text scale. In portrait or split view,
+use a sheet/pop-up when pinning would leave less than a proposed 360 logical
+pixels of canvas width; confirm that threshold during device review. Preserve
+document scale, rotation, and the document point at viewport center when a
+user-requested dock resize changes the viewport. Pop-ups overlay without moving
+artwork. Do not overwrite saved desktop workspace arrangements when a smaller
+window uses a compact fallback.
 
-Entering Focus hides bars, rails, palettes, palette tabs, quick menus, and selection
-launchers. Artwork, selection boundaries, rulers, and drawing guides remain visible.
-The viewport keeps the same dimensions/origin by default, so entering Focus does
-not shift artwork or the stylus location. Expansion to previously docked space is
-deferred until an explicit anchor-preserving transition is designed.
+Keep workspace preset, Simple/Studio mode, and Canvas Focus as separate
+controls. A layout reset names the selected preset and what it resets. It leaves
+document state, shared theme, gesture preferences, and the other mode's
+presentation state intact.
 
-Retain a quiet, always reachable 48-point Exit Focus button inside safe-area bounds.
-Do not hide the sole exit on a timer. It must have a screen-reader label and accept
-touch without drawing beneath it. A second Quick controls button opens a temporary
-overlay for Undo/Redo, brush size, opacity, and color; closing it returns to Focus.
-Its interaction area blocks canvas input. Drawing elsewhere must not exit Focus.
+## Canvas Focus and interaction contract
 
-Escape/Android Back first cancels or dismisses the top transient UI, then exits
-Focus, then follows normal editor navigation. Active transforms, text entry,
-material previews, and dialogs retain their own Commit/Cancel controls; Focus entry
-is unavailable until those transactions are resolved. If a stroke is active, defer
-the transition until pointer-up/cancel. No layout change may interrupt a stroke.
+Reuse `EditorActionId.toggleInterface`; label it Canvas Focus. Buttons,
+command search, and the existing four-finger binding dispatch the same action.
+Keep gesture remapping intact. Preserve two-finger Undo, three-finger Redo, and
+two-finger navigation. See the [touch gesture
+reference](https://help.clip-studio.com/en-us/manual_en/750_gestures/Basic_touch_gestures.htm).
 
-Restore the prior palette presentation and open palette on exit. Keep the current
-viewport if the artist navigated while focused. Focus stays session-only; a cold
-launch opens the remembered Simple/Studio mode with visible controls. If a save
-fails while focused, show an actionable failure indicator and allow retry.
+Entering Focus hides bars, rails, palettes, palette tabs, quick menus, and
+selection launchers. Artwork, selection boundaries, rulers, and drawing guides
+remain visible. Keep the viewport dimensions and origin stable so entering
+Focus does not shift artwork or stylus location. Expanding into dock space is
+deferred until an anchor-preserving transition is designed.
 
-## Temporary panels, files, and materials
+Keep a quiet, always-reachable 48-point Exit Focus button inside safe-area
+bounds. Give it a screen-reader label and block drawing beneath its hit target.
+A second Quick controls button opens a temporary sheet for Undo/Redo, brush
+selection, brush size, opacity, and color; closing it returns to Focus. Its
+interaction area blocks canvas input. Drawing elsewhere does not exit Focus.
 
-Only one temporary workspace panel is active at a time. For outside dismissal,
-consume the dismissing pointer sequence so it cannot leave a mark. The next stylus
-contact draws normally. Preserve independent scrolling and panel-local draft state.
+Dismiss the topmost transient sheet/dialog first, then exit Focus on Escape or
+Android Back, then continue normal editor navigation. Existing dialogs and
+transactions retain their own Commit/Cancel controls. Disable Focus entry while
+a transform, text edit, or material preview has an unresolved transaction. If a
+stroke is active, defer the transition until pointer-up/cancel. No layout
+change may interrupt a stroke.
 
-Save creates/updates the editable `.inkproj`; export creates a shareable output.
-Show Saving, Saved, and Save failed distinctly. Local checkpoint success and file
-provider write-back success must follow the existing document-picker contract.
-Before New/Open or leaving the editor, finish the active stroke and handle dirty
-state with save/discard/cancel where required. Provider cancellation leaves the
-current document active. Do not label Open project as a Gallery until an actual
-gallery exists. Show only export formats supported by the selected adapter and
-declare flattened output where relevant.
+On Focus exit, restore the prior palette presentation and open palette. Keep
+the current viewport if the artist navigated while focused. Focus stays
+session-only; a cold launch uses the remembered Simple/Studio mode with visible
+controls. If a save fails while focused, show an actionable failure indicator
+and allow retry.
 
-Materials must identify whether an item is a brush, project metadata, or an
-insertable canvas asset. Canvas insertion needs a bounded placement preview with
-explicit Apply/Cancel; cancel leaves artwork/history unchanged and apply is undoable.
-Do not promise this flow for metadata-only materials. Keep any missing insertion
-backend as a separate dependency rather than a decorative enabled button. Include
+## Files and materials
+
+Save creates or updates the editable `.inkproj`; export creates a shareable
+output. Show Saving, Saved, and Save failed distinctly. Local checkpoint
+success and provider write-back success follow the existing document-picker
+contract. Before New/Open or leaving the editor, finish the active stroke and
+handle dirty state with Save/Discard/Cancel when required. Provider cancellation
+leaves the current document active. Do not label Open project as Gallery until
+a gallery exists. Show only export formats supported by the selected adapter
+and declare flattened output where relevant.
+
+Label each material as a brush, project metadata, or insertable canvas asset.
+Canvas insertion requires a bounded placement preview and explicit Apply/Cancel;
+Cancel leaves artwork/history unchanged and Apply is undoable. Do not promise
+this flow for metadata-only materials. Keep a missing insertion backend as a
+separate dependency rather than showing an enabled decorative button. Include
 a short local control guide in Help; a full tutorial system can follow later.
 
-## Delivery and acceptance
+## Implementation status
 
 This is a focused increment of the existing professional UI work, not a restart
 of the application's numbered roadmap.
 
-1. State and safety: centralize transitions, capability gates, per-mode restoration,
-   Focus overlay suppression, and pointer/transaction arbitration.
-2. Simple refinement: bounded essential bar, selected-tool interactions, adaptable
-   sliders, color roles, compact Layers, and truthful file/material labels.
-3. Studio refinement: complete palette access, pin/collapse/pop-up behavior,
-   orientation fallback, handedness, and scoped saved-layout/reset controls.
-4. Acceptance: verify the following behavior and inspect rendered tablet layouts.
-   Leave deferred enhancements in the project's existing Phase 5 queue.
+- **Drawing controls and top-bar deduplication are implemented.** Simple and
+  Studio share a single visible Color entry point, and both keep Size and
+  Opacity available beside the canvas. Both modes use direct sliders when the
+  layout permits and labeled value buttons with precise slider sheets in short
+  or enlarged-text layouts. The top row keeps Save when available, Undo/Redo, Focus, the
+  labeled mode selector, and More visible without horizontal scrolling at the
+  tested narrow width. Status and active brush text yield space to controls on
+  a narrow phone. The desktop bar also abbreviates to the document name in a
+  narrow window and puts secondary commands in More.
+- **Studio palette routes are implemented.** Tools, Brushes, Tool properties,
+  Color, Layers, Materials, Comics, History, and Quick Access each open a
+  working panel or sheet. The first-use Layers panel and one-active-panel
+  behavior remain. Handedness changes the rail and drawing-control sides;
+  floating palettes avoid the permanent drawing controls.
+- **Simple controls are refined.** Brush and Eraser show selected state. An
+  inactive tool selects it; activating the selected tool opens the brush
+  library. Color roles and transparent drawing stay in the shared color
+  surface, separate from the Eraser tool. The More menu groups workspace
+  choices separately from the Simple/Studio selector.
+- **Accessibility checks are implemented and host-tested.** Main and sub
+  colors have role-specific labels and values; sliders announce labels, units,
+  and changing values; principal touch controls meet 48 logical pixels; close
+  actions are named; and cramped/enlarged-text layouts switch to reachable
+  value controls. The full Flutter suite, including rendered-layout checks,
+  passes and `flutter analyze` reports no issues. A macOS debug build also
+  completes.
+- **Device acceptance remains open.** Review iPad portrait/landscape, Android
+  tablet, split view, and phone fallback with VoiceOver/TalkBack, both
+  handedness settings, high-contrast themes, keyboard appearance, stylus
+  strokes, Focus dismissal, and color/eraser pixel behavior. Widget semantics
+  do not substitute for those physical checks.
 
-Required checks:
+Keep broader palette arrangement work (additional floating layouts,
+personalized Focus layouts, full local tutorials, and backend-dependent
+material insertion) in the existing Phase 5 queue unless a required palette
+cannot be made usable with the current sheet/panel model.
 
-- Mode round trip restores each mode's palette state; artwork/page/layer/tool,
-  engine history, and pending brush draft remain intact.
-- Focus suppresses every workspace overlay; Exit, Quick controls, Escape/Back,
+## Acceptance criteria
+
+- Switching Simple → Studio → Simple restores each mode's open palette for the
+  current editor session; page, layer, tool, brush draft, artwork, and Rust
+  history remain intact. A cold launch restores the mode preference and opens
+  visible controls. Palette memory stays session-only; Studio opens Layers on a
+  cold launch.
+- Exactly one persistent tablet Color entry point is visible per mode. It
+  clearly shows the active main color. Main/sub selection, picker dismissal,
+  swap/reset, and transparent drawing preserve the selected role and brush.
+- Size and opacity are reachable without opening Brush Library in both modes.
+  Slider changes preview while dragging and persist at change end. Values,
+  units, and selected states remain legible with 150%/200% text scaling.
+- The Studio rail and palette switcher expose only working routes. Tool
+  properties, Materials, History, and Quick Access open their documented
+  surfaces or explain why they are unavailable.
+- Eraser tool and transparent drawing remain distinct. Switching between them
+  retains brush identity/settings as specified and produces the expected Rust
+  pixels; verify with representative strokes.
+- Focus suppresses every workspace overlay. Exit, Quick controls, Escape/Back,
   and four-finger toggling work without hidden touch traps or stray paint marks.
-- Stylus-down transitions wait for stroke completion; selection/transform/dialog
-  transactions resolve explicitly. Navigation during Focus survives exit.
-- Transparency retains brush identity and settings; color swaps and picker
-  dismissal preserve the selected role. Verify actual Rust output.
-- Sliders remain usable with 150%/200% text. Presets and opacity survive the
-  applicable persistence boundary without excessive saves.
+  Stylus-down transitions wait for stroke completion, and navigation during
+  Focus survives exit.
 - Layer limitations offer a working Studio route without changing content.
-- File/provider cancellation, failed save, export, and material Apply/Cancel
-  behave correctly through visible controls.
+  File/provider cancellation, failed save, export, and supported material
+  Apply/Cancel flows behave through visible controls.
 - Review iPad portrait/landscape, Android tablet, split view, and phone fallback
   with light/dark/high-contrast themes and both handedness settings. Verify safe
-  areas, keyboard appearance, and 48-point targets. Preserve the remembered Studio
-  preference when a narrow window temporarily uses the compact Simple shell.
-- Use focused widget/state checks for restoration and input blocking, visual
-  inspection for layout, and physical stylus checks for transitions. Screenshots
-  alone do not establish stroke latency or absence of brief rendering flashes.
-
-Phase 5 follow-ups: additional floating palette arrangements, personalized Focus
-layouts, a full local tutorial system, and backend-dependent material insertion.
-Device acceptance above remains part of this increment before declaring it complete.
+  areas, keyboard appearance, and 48-point targets. Preserve the remembered
+  Studio preference when a narrow window temporarily uses the compact Simple
+  shell.
+- Run focused widget/state checks for restoration, duplicate-action filtering,
+  panel routing, and input blocking; visually inspect rendered layouts; perform
+  physical stylus checks for transitions. Screenshots alone do not establish
+  stroke latency or absence of brief rendering flashes.
