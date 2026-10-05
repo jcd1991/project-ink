@@ -65,6 +65,7 @@ class CanvasWorkspacePaletteActions {
     required this.onChooseColor,
     required this.onChooseSubColor,
     required this.onSelectRecentColor,
+    required this.onSelectRecentSubColor,
     required this.onSwapColors,
     required this.onResetColors,
     required this.onTransparentColor,
@@ -76,11 +77,12 @@ class CanvasWorkspacePaletteActions {
 
   final void Function(BrushPresetView) onBrushChanged;
   final VoidCallback onToggleEraser;
-  final void Function({bool editSubColor}) onBrushColor;
+  final VoidCallback onBrushColor;
   final VoidCallback onOpenLayers;
   final VoidCallback onChooseColor;
   final VoidCallback onChooseSubColor;
   final ValueChanged<Color> onSelectRecentColor;
+  final ValueChanged<Color> onSelectRecentSubColor;
   final VoidCallback onSwapColors;
   final VoidCallback onResetColors;
   final VoidCallback onTransparentColor;
@@ -122,10 +124,11 @@ class CanvasWorkspacePalette extends StatelessWidget {
         mainColor: state.mainColor,
         subColor: state.subColor,
         recentColors: state.recentColors,
-        eraserActive: state.transparentColorActive,
+        transparentColorActive: state.transparentColorActive,
         onChoose: callbacks.onChooseColor,
         onChooseSub: callbacks.onChooseSubColor,
         onSelectRecent: callbacks.onSelectRecentColor,
+        onSelectRecentSub: callbacks.onSelectRecentSubColor,
         onSwap: callbacks.onSwapColors,
         onReset: callbacks.onResetColors,
         onTransparent: callbacks.onTransparentColor,

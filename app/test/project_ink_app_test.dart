@@ -182,7 +182,7 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Phase385Title  •  Pen'), findsOneWidget);
+    expect(find.textContaining('Phase385Title'), findsOneWidget);
     expect(engine.savedPaths, ['/tmp/Phase385Title.inkproj']);
 
     tester
@@ -271,7 +271,7 @@ void main() {
     expect(requestedPath, '/tmp/SecondProject.inkproj');
     expect(canvas.engine, same(openedEngine));
     expect(canvas.activeDocumentPath, '/tmp/SecondProject.inkproj');
-    expect(find.text('SecondProject  •  Pen'), findsOneWidget);
+    expect(find.textContaining('SecondProject'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -606,7 +606,9 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.tap(find.byTooltip('Comic workspace'));
+    await tester.tap(find.byTooltip('More actions and workspace settings'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Comics workspace').last);
     await tester.pump();
 
     expect(find.byType(ComicWorkspace), findsOneWidget);

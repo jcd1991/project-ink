@@ -73,7 +73,9 @@ class _RecordingBrushEngine extends InMemoryEngineApi {
     required int blue,
     required int alpha,
   }) async {
-    activeBrushColorUpdates.add((red << 24) | (green << 16) | (blue << 8) | alpha);
+    activeBrushColorUpdates.add(
+      (red << 24) | (green << 16) | (blue << 8) | alpha,
+    );
     await super.setActiveBrushColor(
       red: red,
       green: green,
@@ -167,14 +169,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byTooltip('Close Brush library'), findsOneWidget);
 
-      await tester.tap(find.byTooltip('Switch to Simple mode'));
+      await tester.tap(
+        find.byTooltip('Studio mode selected. Choose Simple or Studio.'),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Simple').last);
       await tester.pumpAndSettle();
       expect(find.byTooltip('Close Brush library'), findsNothing);
       expect(find.bySemanticsLabel('Brush opacity'), findsOneWidget);
 
-      await tester.tap(find.byTooltip('More drawing controls'));
+      await tester.tap(
+        find.byTooltip('Simple mode selected. Choose Simple or Studio.'),
+      );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Switch to Studio mode'));
+      await tester.tap(find.text('Studio').last);
       await tester.pumpAndSettle();
       expect(find.byTooltip('Close Brush library'), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -265,9 +273,7 @@ void main() {
       engine: engine,
     );
 
-    await tester.tap(find.byTooltip('More drawing controls'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Brush library'));
+    await tester.tap(find.byTooltip('Brush presets'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('HB Sketch Pencil'));
     await tester.pump(const Duration(milliseconds: 100));
@@ -281,14 +287,16 @@ void main() {
     expect(engine.settings.last.opacity, lessThan(1));
 
     engine.activeBrushColorUpdates.clear();
-    await tester.tap(find.byTooltip('Sub color'));
+    await tester.tap(find.byTooltip('Color selector'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit Sub color'));
     await tester.pumpAndSettle();
     expect(find.text('Sub color'), findsOneWidget);
     await tester.tap(find.text('Apply'));
     await tester.pump(const Duration(milliseconds: 100));
     expect(engine.activeBrushColorUpdates, isEmpty);
 
-    await tester.tap(find.byTooltip('Main color'));
+    await tester.tap(find.byTooltip('Edit Main color'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Apply'));
     await tester.pump(const Duration(milliseconds: 100));

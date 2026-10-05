@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../design_system/ink_components.dart';
@@ -114,6 +116,8 @@ class CanvasQuickControls extends StatelessWidget {
                 }
               },
               onChangeEnd: onBrushSizeChangeEnd,
+              semanticFormatter:
+                  (value) => '${value.toStringAsFixed(1)} pixels',
             ),
             const SizedBox(width: 8),
             _QuickSlider(
@@ -131,6 +135,7 @@ class CanvasQuickControls extends StatelessWidget {
                 }
               },
               onChangeEnd: onBrushOpacityChangeEnd,
+              semanticFormatter: (value) => '${(value * 100).round()} percent',
             ),
             const SizedBox(width: 4),
             Tooltip(
@@ -280,6 +285,7 @@ class _QuickSlider extends StatelessWidget {
     required this.height,
     required this.onChanged,
     this.onChangeEnd,
+    this.semanticFormatter,
   });
 
   final String label;
@@ -291,6 +297,7 @@ class _QuickSlider extends StatelessWidget {
   final double height;
   final ValueChanged<double> onChanged;
   final ValueChanged<double>? onChangeEnd;
+  final String Function(double)? semanticFormatter;
 
   @override
   Widget build(BuildContext context) => SizedBox(
@@ -301,12 +308,16 @@ class _QuickSlider extends StatelessWidget {
       children: [
         Text(label, style: Theme.of(context).textTheme.labelSmall),
         Expanded(
-          child: Slider(
-            value: value.clamp(min, max).toDouble(),
-            min: min,
-            max: max,
-            onChanged: enabled ? onChanged : null,
-            onChangeEnd: enabled ? onChangeEnd : null,
+          child: Semantics(
+            label: label == 'Size' ? 'Brush size' : 'Brush opacity',
+            child: Slider(
+              value: value.clamp(min, max).toDouble(),
+              min: min,
+              max: max,
+              semanticFormatterCallback: semanticFormatter,
+              onChanged: enabled ? onChanged : null,
+              onChangeEnd: enabled ? onChangeEnd : null,
+            ),
           ),
         ),
         SizedBox(
@@ -328,27 +339,57 @@ class CanvasColorSwatch extends StatelessWidget {
     required this.color,
     required this.size,
     required this.onTap,
+    this.semanticLabel = 'Color swatch',
+    this.hitSize,
+    this.selected = false,
   });
 
   final Color color;
   final double size;
   final VoidCallback onTap;
+  final String semanticLabel;
+  final double? hitSize;
+  final bool selected;
 
   @override
-  Widget build(BuildContext context) => Tooltip(
-    message: 'Color swatch',
-    child: InkWell(
-      customBorder: const CircleBorder(),
+  Widget build(BuildContext context) {
+    final targetSize = math.max(size, hitSize ?? size).toDouble();
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: semanticLabel,
       onTap: onTap,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(color: inkColors(context).panelBorder, width: 1.5),
+      child: ExcludeSemantics(
+        child: Tooltip(
+          message: semanticLabel,
+          excludeFromSemantics: true,
+          child: SizedBox(
+            width: targetSize,
+            height: targetSize,
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onTap,
+              child: Center(
+                child: Container(
+                  width: size,
+                  height: size,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color:
+                          selected
+                              ? Theme.of(context).colorScheme.primary
+                              : inkColors(context).panelBorder,
+                      width: selected ? 3 : 1.5,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }

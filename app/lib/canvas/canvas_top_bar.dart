@@ -125,35 +125,24 @@ class CanvasTopBar extends StatelessWidget {
     required this.documentName,
     required this.activeToolLabel,
     required this.activeBrushLabel,
+    required this.saveStatusLabel,
     required this.documentActionsEnabled,
     required this.documentActionRunning,
     required this.onOpen,
     required this.onSave,
-    required this.onExport,
     required this.onExportMenu,
-    this.onExportTimeLapse,
     required this.onGestureSettings,
-    required this.onBrushColor,
     required this.onAccessibilitySettings,
-    required this.largeControls,
-    required this.leftHanded,
-    required this.onTools,
-    required this.onBrushes,
-    required this.onLayers,
     required this.onComics,
     required this.onUndo,
     required this.onRedo,
     required this.onCommandSearch,
-    required this.onMirror,
     required this.mirrored,
     required this.tabletSimpleMode,
     required this.tabletStudioMode,
-    required this.onToggleTabletMode,
+    required this.tabletModePreference,
+    required this.onTabletModeSelected,
     required this.onToggleFocus,
-    required this.onToggleTransparent,
-    required this.transparentColorActive,
-    this.eraserActive = false,
-    required this.onEditSubColor,
     required this.workspaceId,
     required this.onWorkspaceSelected,
     required this.professionalDesktop,
@@ -174,35 +163,24 @@ class CanvasTopBar extends StatelessWidget {
   final String documentName;
   final String activeToolLabel;
   final String activeBrushLabel;
+  final String saveStatusLabel;
   final bool documentActionsEnabled;
   final bool documentActionRunning;
   final VoidCallback onOpen;
   final VoidCallback onSave;
-  final VoidCallback onExport;
   final VoidCallback onExportMenu;
-  final VoidCallback? onExportTimeLapse;
   final VoidCallback onGestureSettings;
-  final VoidCallback onBrushColor;
   final VoidCallback onAccessibilitySettings;
-  final bool largeControls;
-  final bool leftHanded;
-  final VoidCallback onTools;
-  final VoidCallback onBrushes;
-  final VoidCallback onLayers;
   final VoidCallback onComics;
   final VoidCallback onUndo;
   final VoidCallback onRedo;
   final VoidCallback onCommandSearch;
-  final VoidCallback onMirror;
   final bool mirrored;
   final bool tabletSimpleMode;
   final bool tabletStudioMode;
-  final VoidCallback onToggleTabletMode;
+  final TabletWorkspaceMode tabletModePreference;
+  final ValueChanged<TabletWorkspaceMode> onTabletModeSelected;
   final VoidCallback onToggleFocus;
-  final VoidCallback onToggleTransparent;
-  final bool transparentColorActive;
-  final bool eraserActive;
-  final VoidCallback onEditSubColor;
   final String workspaceId;
   final ValueChanged<String> onWorkspaceSelected;
   final bool professionalDesktop;
@@ -228,7 +206,8 @@ class CanvasTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (tabletSimpleMode) return _buildSimple(context);
+    if (tabletSimpleMode) return _buildTabletTopBar(context);
+    if (tabletStudioMode) return _buildTabletTopBar(context);
     // Keep the desktop command bar discoverable in narrow windows. The full
     // palette of commands moves into a labeled menu instead of becoming
     // reachable only by horizontally scrolling tiny icons.
@@ -236,19 +215,12 @@ class CanvasTopBar extends StatelessWidget {
     // At standard laptop/desktop sizes keep the active brush controls visible,
     // but move secondary command-bar items into More commands before the
     // contextual controls get clipped by the edge of the viewport.
-    final compactDesktop = availableWidth < 1600;
-    const compactVisibleCommands = {
-      'undo',
-      'redo',
-      'commandSearch',
-      'showBrushes',
-      'showLayers',
-      'showColorPicker',
-    };
+    final compactDesktop = availableWidth < 2400;
+    const compactVisibleCommands = {'undo', 'redo', 'commandSearch'};
     return SafeArea(
       bottom: false,
       child: Container(
-        height: tabletStudioMode ? 48 : 36,
+        height: 36,
         decoration: BoxDecoration(
           color: inkColors(context).panel,
           border: Border(
@@ -262,9 +234,9 @@ class CanvasTopBar extends StatelessWidget {
             children: [
               const SizedBox(width: 12),
               Text(
-                tabletStudioMode
-                    ? '$documentName  •  $activeToolLabel  •  $activeBrushLabel'
-                    : '$documentName  •  Pen',
+                availableWidth < 1100
+                    ? documentName
+                    : '$documentName  •  $activeToolLabel  •  $activeBrushLabel',
                 style: Theme.of(context).textTheme.labelLarge,
               ),
               PopupMenuButton<String>(
@@ -418,47 +390,6 @@ class CanvasTopBar extends StatelessWidget {
                   ),
                 const VerticalDivider(width: 8, indent: 7, endIndent: 7),
               ],
-              if (tabletStudioMode) ...[
-                InkCommandButton(
-                  icon: Icons.fullscreen,
-                  label: 'Canvas Focus',
-                  onPressed: onToggleFocus,
-                  hitSize: 48,
-                ),
-                InkCommandButton(
-                  icon: Icons.view_compact_alt_outlined,
-                  label: 'Switch to Simple mode',
-                  onPressed: onToggleTabletMode,
-                  hitSize: 48,
-                ),
-                InkCommandButton(
-                  icon: Icons.palette_outlined,
-                  label: 'Color',
-                  onPressed: onBrushColor,
-                  hitSize: 48,
-                ),
-                InkCommandButton(
-                  icon: Icons.cleaning_services_outlined,
-                  label: eraserActive ? 'Return to brush' : 'Eraser',
-                  selected: eraserActive,
-                  onPressed:
-                      () => onActionDispatch(EditorActionId.toggleEraser),
-                  hitSize: 48,
-                ),
-                InkCommandButton(
-                  icon: Icons.circle_outlined,
-                  label: 'Edit sub color',
-                  onPressed: onEditSubColor,
-                  hitSize: 48,
-                ),
-                InkCommandButton(
-                  icon: Icons.layers_clear,
-                  label: 'Transparent paint',
-                  selected: transparentColorActive,
-                  onPressed: onToggleTransparent,
-                  hitSize: 48,
-                ),
-              ],
               if (compactDesktop) ...[
                 for (final item in commandBarItems)
                   if (compactVisibleCommands.contains(item))
@@ -482,7 +413,7 @@ class CanvasTopBar extends StatelessWidget {
                 onPressed: onAccessibilitySettings,
                 hitSize: tabletStudioMode ? 48 : 32,
               ),
-              if (contextControls != null && !compactDesktop) ...[
+              if (contextControls != null && availableWidth >= 1600) ...[
                 const VerticalDivider(width: 12, indent: 7, endIndent: 7),
                 contextControls!,
               ],
@@ -520,7 +451,7 @@ class CanvasTopBar extends StatelessWidget {
                   ),
           ],
       child: const SizedBox(
-        width: 40,
+        width: 48,
         height: 36,
         child: Icon(Icons.more_horiz, size: 20),
       ),
@@ -555,168 +486,270 @@ class CanvasTopBar extends StatelessWidget {
     _ => action.label,
   };
 
-  Widget _buildSimple(BuildContext context) => SafeArea(
-    bottom: false,
-    child: Container(
-      height: 52,
-      decoration: BoxDecoration(
-        color: inkColors(context).panel,
-        border: Border(
-          bottom: BorderSide(color: inkColors(context).panelBorder),
+  Widget _buildTabletTopBar(BuildContext context) {
+    final status =
+        '$documentName  •  $activeToolLabel  •  $activeBrushLabel  •  $saveStatusLabel';
+    return SafeArea(
+      bottom: false,
+      child: Container(
+        height: 52,
+        decoration: BoxDecoration(
+          color: inkColors(context).panel,
+          border: Border(
+            bottom: BorderSide(color: inkColors(context).panelBorder),
+          ),
         ),
-      ),
-      child: Row(
-        children: [
-          const SizedBox(width: 6),
-          Flexible(
-            fit: FlexFit.tight,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Text(
-                '$documentName  •  Pen',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelLarge,
+        child: Row(
+          children: [
+            Expanded(
+              child: Tooltip(
+                message: status,
+                child: Text(
+                  status,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
               ),
             ),
-          ),
-          InkCommandButton(
-            icon: Icons.folder_open_outlined,
-            label: 'Open project',
-            identifier: 'open-project',
-            onPressed: onOpen,
-            hitSize: 48,
-          ),
-          if (documentActionsEnabled)
+            if (documentActionsEnabled)
+              InkCommandButton(
+                icon: Icons.save_outlined,
+                label: 'Save project',
+                identifier: 'save-project',
+                onPressed:
+                    _isDocumentActionDisabled(EditorActionId.saveProject)
+                        ? null
+                        : onSave,
+                hitSize: 48,
+              ),
             InkCommandButton(
-              icon: Icons.save_outlined,
-              label: 'Save project',
-              identifier: 'save-project',
-              onPressed: onSave,
+              icon: Icons.undo,
+              label: 'Undo',
+              identifier: 'undo',
+              onPressed: onUndo,
               hitSize: 48,
             ),
-          InkCommandButton(
-            icon: Icons.undo,
-            label: 'Undo',
-            identifier: 'undo',
-            onPressed: onUndo,
-            hitSize: 48,
-          ),
-          InkCommandButton(
-            icon: Icons.redo,
-            label: 'Redo',
-            identifier: 'redo',
-            onPressed: onRedo,
-            hitSize: 48,
-          ),
-          InkCommandButton(
-            icon: Icons.fullscreen,
-            label: 'Canvas Focus',
-            onPressed: onToggleFocus,
-            hitSize: 48,
-          ),
-          InkCommandButton(
-            icon: Icons.palette_outlined,
-            label: 'Color',
-            onPressed: onBrushColor,
-            hitSize: 48,
-          ),
-          InkCommandButton(
-            icon: Icons.view_compact_alt_outlined,
-            label: 'Switch to Studio mode',
-            onPressed: onToggleTabletMode,
-            hitSize: 48,
-          ),
-          PopupMenuButton<String>(
-            tooltip: 'More drawing controls',
-            onSelected: (value) {
-              switch (value) {
-                case 'focus':
-                  onToggleFocus();
-                case 'mode':
-                  onToggleTabletMode();
-                case 'tools':
-                  onTools();
-                case 'brushes':
-                  onBrushes();
-                case 'layers':
-                  onLayers();
-                case 'color':
-                  onBrushColor();
-                case 'subColor':
-                  onEditSubColor();
-                case 'transparent':
-                  onToggleTransparent();
-                case 'comics':
-                  onComics();
-                case 'open':
-                  onOpen();
-                case 'export':
-                  onExportMenu();
-                case 'settings':
-                  onGestureSettings();
-                case 'search':
-                  onCommandSearch();
-              }
-            },
-            itemBuilder:
-                (_) => [
-                  const PopupMenuItem(
-                    value: 'focus',
-                    child: Text('Canvas Focus'),
+            InkCommandButton(
+              icon: Icons.redo,
+              label: 'Redo',
+              identifier: 'redo',
+              onPressed: onRedo,
+              hitSize: 48,
+            ),
+            InkCommandButton(
+              icon: Icons.fullscreen,
+              label: 'Canvas Focus',
+              onPressed: onToggleFocus,
+              hitSize: 48,
+            ),
+            _tabletModeMenu(context),
+            _tabletMoreMenu(context),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _tabletModeMenu(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    final availableWidth = MediaQuery.sizeOf(context).width;
+    final modeButtonWidth = math.min(
+      math.max(80.0, MediaQuery.textScalerOf(context).scale(52)),
+      math.max(80.0, availableWidth - (documentActionsEnabled ? 240 : 192)),
+    );
+    final compactStudio =
+        tabletModePreference == TabletWorkspaceMode.studio && !tabletStudioMode;
+    final modeName =
+        tabletModePreference == TabletWorkspaceMode.studio
+            ? 'Studio'
+            : 'Simple';
+    final tooltip =
+        compactStudio
+            ? 'Studio mode selected. Compact controls are shown at this width.'
+            : '$modeName mode selected. Choose Simple or Studio.';
+    return PopupMenuButton<TabletWorkspaceMode>(
+      tooltip: tooltip,
+      onSelected: onTabletModeSelected,
+      itemBuilder:
+          (_) => [
+            CheckedPopupMenuItem(
+              value: TabletWorkspaceMode.simple,
+              checked: tabletModePreference == TabletWorkspaceMode.simple,
+              child: const Text('Simple'),
+            ),
+            CheckedPopupMenuItem(
+              value: TabletWorkspaceMode.studio,
+              checked: tabletModePreference == TabletWorkspaceMode.studio,
+              child: Text(compactStudio ? 'Studio (compact layout)' : 'Studio'),
+            ),
+          ],
+      child: Semantics(
+        label: tooltip,
+        child: ExcludeSemantics(
+          child: SizedBox(
+            width: modeButtonWidth,
+            height: 48,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    modeName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelMedium,
                   ),
-                  PopupMenuItem(
-                    value: 'mode',
-                    child: Text(
-                      'Switch to ${tabletSimpleMode ? 'Studio' : 'Simple'} mode',
-                    ),
-                  ),
-                  const PopupMenuDivider(),
-                  const PopupMenuItem(
-                    value: 'tools',
-                    child: Text('Tools and selection'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'brushes',
-                    child: Text('Brush library'),
-                  ),
-                  const PopupMenuItem(value: 'layers', child: Text('Layers')),
-                  const PopupMenuItem(value: 'color', child: Text('Color')),
-                  const PopupMenuItem(
-                    value: 'subColor',
-                    child: Text('Edit sub color'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'transparent',
-                    child: Text('Transparent paint'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'comics',
-                    child: Text('Comics and materials'),
-                  ),
-                  const PopupMenuDivider(),
-                  const PopupMenuItem(
-                    value: 'export',
-                    child: Text('Export image'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'search',
-                    child: Text('Search commands'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'settings',
-                    child: Text('Gesture settings'),
-                  ),
-                ],
-            child: const SizedBox(
-              width: 48,
-              height: 48,
-              child: Icon(Icons.more_horiz),
+                ),
+                if (availableWidth >= 600 && textScale <= 1.4)
+                  const Icon(Icons.arrow_drop_down, size: 12),
+              ],
             ),
           ),
-          const SizedBox(width: 4),
-        ],
+        ),
       ),
-    ),
+    );
+  }
+
+  Widget _tabletMoreMenu(BuildContext context) => PopupMenuButton<String>(
+    tooltip: 'More actions and workspace settings',
+    onSelected: (value) {
+      if (value.startsWith('workspace:')) {
+        onWorkspaceSelected(value.substring('workspace:'.length));
+        return;
+      }
+      if (value.startsWith('rename:')) {
+        onRenameWorkspace(value.substring('rename:'.length));
+        return;
+      }
+      if (value.startsWith('delete:')) {
+        onDeleteWorkspace(value.substring('delete:'.length));
+        return;
+      }
+      switch (value) {
+        case 'open':
+          onOpen();
+        case 'import':
+          onActionDispatch(EditorActionId.importPsd);
+        case 'new':
+          onActionDispatch(EditorActionId.newDocument);
+        case 'saveAs':
+          onActionDispatch(EditorActionId.saveProjectAs);
+        case 'export':
+          onExportMenu();
+        case 'comics':
+          onComics();
+        case 'search':
+          onCommandSearch();
+        case 'gesture':
+          onGestureSettings();
+        case 'accessibility':
+          onAccessibilitySettings();
+        case 'follow':
+          onFollowDocumentTypeChanged(!followDocumentType);
+        case 'resetCurrent':
+          onResetWorkspace(workspaceId);
+        case 'saveWorkspace':
+          onSaveWorkspaceAs();
+        case 'customize':
+          onCustomizeCommandBar();
+      }
+    },
+    itemBuilder: (_) {
+      final entries = <PopupMenuEntry<String>>[
+        PopupMenuItem(
+          value: 'new',
+          enabled: !_isDocumentActionDisabled(EditorActionId.newDocument),
+          child: const Text('New canvas'),
+        ),
+        PopupMenuItem(
+          value: 'open',
+          enabled: !_isDocumentActionDisabled(EditorActionId.openProject),
+          child: const Text('Open project…'),
+        ),
+        PopupMenuItem(
+          value: 'import',
+          enabled: !_isDocumentActionDisabled(EditorActionId.importPsd),
+          child: const Text('Import Photoshop document…'),
+        ),
+        PopupMenuItem(
+          value: 'saveAs',
+          enabled: !_isDocumentActionDisabled(EditorActionId.saveProjectAs),
+          child: const Text('Save project as…'),
+        ),
+        PopupMenuItem(
+          value: 'export',
+          enabled: !_isDocumentActionDisabled(EditorActionId.exportPng),
+          child: const Text('Export…'),
+        ),
+        const PopupMenuItem(value: 'comics', child: Text('Comics workspace')),
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(enabled: false, child: Text('Workspace')),
+        for (final layout in const [
+          ('illustration', 'Illustration'),
+          ('comic', 'Comic'),
+          ('minimal', 'Minimal'),
+        ])
+          CheckedPopupMenuItem<String>(
+            value: 'workspace:${layout.$1}',
+            checked: workspaceId == layout.$1,
+            child: Text('${layout.$2} workspace'),
+          ),
+        CheckedPopupMenuItem<String>(
+          value: 'follow',
+          checked: followDocumentType,
+          child: const Text('Follow document type'),
+        ),
+      ];
+      for (final layout in customWorkspaces) {
+        entries.add(
+          CheckedPopupMenuItem<String>(
+            value: 'workspace:${layout.id}',
+            checked: workspaceId == layout.id,
+            child: Text(layout.name),
+          ),
+        );
+        entries.add(
+          PopupMenuItem(
+            value: 'rename:${layout.id}',
+            child: Text('Rename “${layout.name}”…'),
+          ),
+        );
+        entries.add(
+          PopupMenuItem(
+            value: 'delete:${layout.id}',
+            child: Text('Delete “${layout.name}”…'),
+          ),
+        );
+      }
+      if (const {'illustration', 'comic', 'minimal'}.contains(workspaceId)) {
+        entries.add(const PopupMenuDivider());
+        entries.add(
+          const PopupMenuItem(
+            value: 'resetCurrent',
+            child: Text('Reset workspace layout…'),
+          ),
+        );
+      }
+      entries.addAll([
+        const PopupMenuItem(
+          value: 'saveWorkspace',
+          child: Text('Save workspace as…'),
+        ),
+        const PopupMenuItem(
+          value: 'customize',
+          child: Text('Customize command bar…'),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(value: 'search', child: Text('Search commands')),
+        const PopupMenuItem(value: 'gesture', child: Text('Gesture settings')),
+        const PopupMenuItem(
+          value: 'accessibility',
+          child: Text('Accessibility settings'),
+        ),
+      ]);
+      return entries;
+    },
+    child: const SizedBox(width: 48, height: 48, child: Icon(Icons.more_horiz)),
   );
 }

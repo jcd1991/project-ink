@@ -427,7 +427,11 @@ void main() {
       );
 
       expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
-      expect(find.bySemanticsLabel('Open project'), findsOneWidget);
+      await tester.tap(find.byTooltip('More actions and workspace settings'));
+      await tester.pumpAndSettle();
+      expect(find.text('Open project…'), findsOneWidget);
+      await tester.tapAt(const Offset(20, 700));
+      await tester.pumpAndSettle();
       expect(find.bySemanticsLabel('Brush size'), findsOneWidget);
       final exception = tester.takeException();
       expect(

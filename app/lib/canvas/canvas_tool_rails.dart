@@ -122,6 +122,11 @@ class TabletStudioToolRail extends StatelessWidget {
     required this.onEraser,
     required this.onLayers,
     required this.onComics,
+    required this.onProperties,
+    required this.onMaterials,
+    required this.onHistory,
+    required this.onQuickAccess,
+    this.leftHanded = false,
   });
 
   final IllustrationTool activeTool;
@@ -131,6 +136,11 @@ class TabletStudioToolRail extends StatelessWidget {
   final VoidCallback onEraser;
   final VoidCallback onLayers;
   final VoidCallback onComics;
+  final VoidCallback onProperties;
+  final VoidCallback onMaterials;
+  final VoidCallback onHistory;
+  final VoidCallback onQuickAccess;
+  final bool leftHanded;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -140,7 +150,14 @@ class TabletStudioToolRail extends StatelessWidget {
       decoration: BoxDecoration(
         color: inkColors(context).panel,
         border: Border(
-          right: BorderSide(color: inkColors(context).panelBorder),
+          left:
+              leftHanded
+                  ? BorderSide(color: inkColors(context).panelBorder)
+                  : BorderSide.none,
+          right:
+              leftHanded
+                  ? BorderSide.none
+                  : BorderSide(color: inkColors(context).panelBorder),
         ),
       ),
       child: SingleChildScrollView(
@@ -164,7 +181,7 @@ class TabletStudioToolRail extends StatelessWidget {
             ),
             InkCommandButton(
               icon: Icons.cleaning_services,
-              label: 'Erase',
+              label: eraserActive ? 'Use brush' : 'Eraser',
               selected: eraserActive,
               onPressed: onEraser,
               hitSize: 48,
@@ -180,6 +197,31 @@ class TabletStudioToolRail extends StatelessWidget {
               icon: Icons.auto_stories,
               label: 'Comics',
               onPressed: onComics,
+              hitSize: 48,
+            ),
+            InkCommandButton(
+              icon: Icons.tune,
+              label: 'Tool properties',
+              onPressed: onProperties,
+              hitSize: 48,
+            ),
+            InkCommandButton(
+              icon: Icons.collections_bookmark_outlined,
+              label: 'Materials',
+              onPressed: onMaterials,
+              hitSize: 48,
+            ),
+            const Divider(height: 8),
+            InkCommandButton(
+              icon: Icons.history,
+              label: 'History',
+              onPressed: onHistory,
+              hitSize: 48,
+            ),
+            InkCommandButton(
+              icon: Icons.bolt_outlined,
+              label: 'Quick Access',
+              onPressed: onQuickAccess,
               hitSize: 48,
             ),
           ],

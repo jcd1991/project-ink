@@ -358,7 +358,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Layers'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Selections'));
+    await tester.tap(find.byTooltip('Draw tools'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Select and fill'));
     await tester.pumpAndSettle();
@@ -448,13 +448,13 @@ void main() {
 
   testWidgets('four-finger tap toggles the interface', (tester) async {
     await _pumpCanvas(tester, _GestureEngine());
-    expect(find.text('Untitled  •  Pen'), findsOneWidget);
+    expect(find.text('Untitled'), findsOneWidget);
 
     await _tapWithFingers(tester, 4);
-    expect(find.text('Untitled  •  Pen'), findsNothing);
+    expect(find.text('Untitled'), findsNothing);
 
     await _tapWithFingers(tester, 4);
-    expect(find.text('Untitled  •  Pen'), findsOneWidget);
+    expect(find.text('Untitled'), findsOneWidget);
   });
 
   testWidgets('toolbar identifies the active saved project by filename', (
@@ -466,7 +466,7 @@ void main() {
       activeDocumentPath: '/tmp/Comic Draft.inkproj',
     );
 
-    expect(find.text('Comic Draft  •  Pen'), findsOneWidget);
+    expect(find.text('Comic Draft'), findsOneWidget);
   });
 
   testWidgets('toolbar handles native directory paths with trailing slash', (
@@ -478,7 +478,7 @@ void main() {
       activeDocumentPath: '/tmp/Comic Draft.inkproj/',
     );
 
-    expect(find.text('Comic Draft  •  Pen'), findsOneWidget);
+    expect(find.text('Comic Draft'), findsOneWidget);
   });
 
   testWidgets('toolbar falls back to Untitled when no project path is active', (
@@ -486,7 +486,7 @@ void main() {
   ) async {
     await _pumpCanvas(tester, _GestureEngine());
 
-    expect(find.text('Untitled  •  Pen'), findsOneWidget);
+    expect(find.text('Untitled'), findsOneWidget);
   });
 
   testWidgets('status bar distinguishes autosave lifecycle states', (
@@ -604,7 +604,10 @@ void main() {
     await _pumpCanvas(tester, engine);
     final initialColorUpdateCount = engine.colorUpdateCount;
 
-    await tester.tap(_toolbarCommand('Color'));
+    await _openOverflowCommand(tester, 'Color');
+    await tester.pumpAndSettle();
+    expect(find.text('Current colors'), findsOneWidget);
+    await tester.tap(find.byTooltip('Edit Main color'));
     await tester.pumpAndSettle();
     expect(find.text('Main color'), findsOneWidget);
     expect(find.text('Red'), findsOneWidget);
@@ -626,6 +629,9 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
     await tester.pumpAndSettle();
 
+    expect(find.text('Current colors'), findsOneWidget);
+    await tester.tap(find.byTooltip('Edit Main color'));
+    await tester.pumpAndSettle();
     expect(find.text('Main color'), findsOneWidget);
     expect(find.text('Red'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -693,7 +699,7 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(find.byTooltip('Selections'));
+      await tester.tap(find.byTooltip('Draw tools'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Select and fill'));
       await tester.pumpAndSettle();
@@ -938,7 +944,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Current colors'), findsOneWidget);
-    expect(find.text('Color selector'), findsOneWidget);
+    expect(find.byTooltip('Edit Main color'), findsOneWidget);
     await tester.drag(find.text('Current colors'), const Offset(0, -360));
     await tester.pumpAndSettle();
     expect(find.text('Recent colors'), findsOneWidget);
@@ -1171,7 +1177,7 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('Selections'));
+    await tester.tap(find.byTooltip('Draw tools'));
     await tester.pumpAndSettle();
     expect(find.text('Illustration tools'), findsOneWidget);
     await tester.tap(find.text('Select and fill'));
@@ -1215,7 +1221,7 @@ void main() {
     );
 
     final canvasState = tester.state(find.byType(CanvasScreen));
-    await tester.tap(_toolbarCommand('Brush library'));
+    await tester.tap(find.byTooltip('Brush presets').first);
     await tester.pumpAndSettle();
     expect(find.text('Technical Pen'), findsWidgets);
 
@@ -1343,7 +1349,7 @@ void main() {
       workspacePreferences: const WorkspacePreferences(),
     );
 
-    await tester.tap(_toolbarCommand('Brush library'));
+    await tester.tap(find.byTooltip('Brush presets').first);
     await tester.pumpAndSettle();
     final brush = find.bySemanticsLabel('Technical Pen');
     await tester.tap(brush);
@@ -1357,7 +1363,7 @@ void main() {
   ) async {
     await _pumpCanvas(tester, _RejectingLayerEngine());
 
-    await tester.tap(find.byTooltip('Layers'));
+    await _openOverflowCommand(tester, 'Layers');
     await tester.pumpAndSettle();
     expect(_layerVisibilityTooltip('Hide'), findsOneWidget);
 
@@ -1398,6 +1404,13 @@ Finder _toolbarCommand(String labelPrefix) => find.byWidgetPredicate(
   (widget) =>
       widget is Tooltip && (widget.message?.startsWith(labelPrefix) ?? false),
 );
+
+Future<void> _openOverflowCommand(WidgetTester tester, String label) async {
+  await tester.tap(find.byTooltip('More commands'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(label).last);
+  await tester.pumpAndSettle();
+}
 
 Finder _layerVisibilityTooltip(String action) => find.byWidgetPredicate(
   (widget) =>

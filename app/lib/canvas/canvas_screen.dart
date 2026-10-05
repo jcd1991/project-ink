@@ -780,6 +780,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   int _lastNativeInputArrivalUs = 0;
   Color _activeColor = const Color(0xff202124);
   Color _subColor = Colors.white;
+  final ValueNotifier<int> _colorPaletteRevision = ValueNotifier<int>(0);
   bool _activeColorInitialized = false;
   bool _hasUserSelectedColor = false;
   final CanvasInputSettingsController _inputSettings =
@@ -910,6 +911,7 @@ class _CanvasScreenState extends State<CanvasScreen>
           }
           if (subColor != null) _subColor = subColor;
         });
+        _colorPaletteRevision.value++;
         if (mainColor != null || subColor != null) {
           _workspaceLayoutActions.persistPreferences(
             activeColorArgb: mainColor?.toARGB32(),
@@ -1144,72 +1146,80 @@ class _CanvasScreenState extends State<CanvasScreen>
       updateState: (update) => setState(update),
     ),
   );
-  late final CanvasWorkspacePanelActions _workspacePanelActions =
-      CanvasWorkspacePanelActions(
-        CanvasWorkspacePanelActionHost(
-          setFloatingPanels:
-              (visibility) => setState(
-                () => _workspacePresentation.setFloatingPanels(visibility),
-              ),
-          selectDesktopDock: (side, groupIndex, panel, floatingPanels) {
-            final isLeft = side == CanvasDockSide.left;
-            setState(() {
-              _workspacePresentation.setFloatingPanels(floatingPanels);
-              _dockActions.selectPaletteState(
-                left: isLeft,
-                groupIndex: groupIndex,
-                tab: panel,
+  late final CanvasWorkspacePanelActions
+  _workspacePanelActions = CanvasWorkspacePanelActions(
+    CanvasWorkspacePanelActionHost(
+      setFloatingPanels:
+          (visibility) => setState(
+            () => _workspacePresentation.setFloatingPanels(visibility),
+          ),
+      selectDesktopDock: (side, groupIndex, panel, floatingPanels) {
+        final isLeft = side == CanvasDockSide.left;
+        setState(() {
+          _workspacePresentation.setFloatingPanels(floatingPanels);
+          _dockActions.selectPaletteState(
+            left: isLeft,
+            groupIndex: groupIndex,
+            tab: panel,
+          );
+          if (isLeft) {
+            _workspaceLeftDockCollapsed = false;
+          } else {
+            _workspaceDockCollapsed = false;
+          }
+          _temporaryDesktopPalette = null;
+        });
+        _dockActions.persistGroups(left: isLeft);
+      },
+      selectTemporaryPalette:
+          (palette) => setState(() => _temporaryDesktopPalette = palette),
+      rememberTabletPalette: _workspacePresentation.rememberTabletPalette,
+      persistLastDock:
+          (panel) =>
+              _workspaceLayoutActions.persistPreferences(lastDock: panel),
+      showQuickAccessSheet: (sheetContext) {
+        unawaited(
+          showCanvasQuickAccessSheet(
+            context: sheetContext,
+            sets:
+                widget.workspacePreferences?.quickAccessSets ??
+                defaultQuickAccessSets,
+            activeSetId:
+                widget.workspacePreferences?.activeQuickAccessSetId ??
+                'default',
+            onAction: _commands.dispatch,
+            onChanged: (sets, activeSetId) {
+              _workspaceLayoutActions.persistPreferences(
+                quickAccessSets: sets,
+                activeQuickAccessSetId: activeSetId,
               );
-              if (isLeft) {
-                _workspaceLeftDockCollapsed = false;
-              } else {
-                _workspaceDockCollapsed = false;
-              }
-              _temporaryDesktopPalette = null;
-            });
-            _dockActions.persistGroups(left: isLeft);
-          },
-          selectTemporaryPalette:
-              (palette) => setState(() => _temporaryDesktopPalette = palette),
-          rememberTabletPalette: _workspacePresentation.rememberTabletPalette,
-          persistLastDock:
-              (panel) =>
-                  _workspaceLayoutActions.persistPreferences(lastDock: panel),
-          showQuickAccessSheet: (sheetContext) {
-            unawaited(
-              showCanvasQuickAccessSheet(
-                context: sheetContext,
-                sets:
-                    widget.workspacePreferences?.quickAccessSets ??
-                    defaultQuickAccessSets,
-                activeSetId:
-                    widget.workspacePreferences?.activeQuickAccessSetId ??
-                    'default',
-                onAction: _commands.dispatch,
-                onChanged: (sets, activeSetId) {
-                  _workspaceLayoutActions.persistPreferences(
-                    quickAccessSets: sets,
-                    activeQuickAccessSetId: activeSetId,
-                  );
-                },
-              ),
-            );
-          },
-          showHistorySheet: (sheetContext) {
-            unawaited(
-              showCanvasHistorySheet(
-                context: sheetContext,
-                engine: widget.engine,
-                revisionToken: math.max(
-                  _renderRevision,
-                  widget.engine.revision,
-                ),
-                onNavigate: _historyActions.navigateHistory,
-              ),
-            );
-          },
-        ),
-      );
+            },
+          ),
+        );
+      },
+      showHistorySheet: (sheetContext) {
+        unawaited(
+          showCanvasHistorySheet(
+            context: sheetContext,
+            engine: widget.engine,
+            revisionToken: math.max(_renderRevision, widget.engine.revision),
+            onNavigate: _historyActions.navigateHistory,
+          ),
+        );
+      },
+      showColorSheet: (sheetContext) {
+        unawaited(
+          showCanvasColorPaletteSheet(
+            context: sheetContext,
+            child: ValueListenableBuilder<int>(
+              valueListenable: _colorPaletteRevision,
+              builder: (context, _, _) => _buildDockPalette('color', context),
+            ),
+          ),
+        );
+      },
+    ),
+  );
   late final CanvasEditorActionRouter
   _editorActionRouter = CanvasEditorActionRouter(
     CanvasEditorActionRouterHost(
@@ -1572,6 +1582,9 @@ class _CanvasScreenState extends State<CanvasScreen>
       }
     }
     if (oldWidget.workspacePreferences != widget.workspacePreferences) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _colorPaletteRevision.value++;
+      });
       _workspaceDockState.updatePreferences(
         previous: oldWidget.workspacePreferences,
         current: widget.workspacePreferences,
@@ -1655,6 +1668,13 @@ class _CanvasScreenState extends State<CanvasScreen>
     _workspaceLayoutActions.persistPreferences(tabletMode: nextMode);
   }
 
+  void _setTabletWorkspaceMode(TabletWorkspaceMode mode) {
+    final current =
+        widget.workspacePreferences?.tabletMode ?? TabletWorkspaceMode.simple;
+    if (mode == current) return;
+    _toggleTabletWorkspaceMode();
+  }
+
   void _toggleFocusMode() {
     if (_strokeActive) return;
     setState(_workspacePresentation.toggleFocusMode);
@@ -1678,8 +1698,10 @@ class _CanvasScreenState extends State<CanvasScreen>
         _exitFocusMode();
         _selectPanel('brushes', context);
       },
-      onColor:
-          () => unawaited(_brushColorActions.showColorPicker(context: context)),
+      onColor: () {
+        _exitFocusMode();
+        _selectPanel('color', context);
+      },
       onChanged: _brushActions.updateBrushDraft,
       onSizeChangeEnd: _brushActions.persistBrushSize,
       onOpacityChangeEnd: _brushActions.persistSelectedBrushSettings,
@@ -1688,6 +1710,7 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   void _toggleTransparentColor() {
     setState(() => _transparentColorActive = !_transparentColorActive);
+    _colorPaletteRevision.value++;
   }
 
   void _publishActiveColor(Color color) {
@@ -1697,6 +1720,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       _activeColorInitialized = true;
       _hasUserSelectedColor = true;
     });
+    _colorPaletteRevision.value++;
     _workspaceLayoutActions.persistPreferences(
       activeColorArgb: color.toARGB32(),
     );
@@ -1718,6 +1742,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     _finishStrokeAutosaveHold(reason: 'canvas_disposed');
     _disposed = true;
     _pencilHoverPosition.dispose();
+    _colorPaletteRevision.dispose();
     _tileSynchronization.dispose();
     _canvasDiagnostics.record('canvas.session_ended', <String, Object?>{
       'engineRevision': widget.engine.revision,
@@ -2174,12 +2199,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         actions: CanvasWorkspacePaletteActions(
           onBrushChanged: _brushActions.updateBrushDraft,
           onToggleEraser: () => setState(() => _eraserActive = !_eraserActive),
-          onBrushColor:
-              ({bool editSubColor = false}) =>
-                  _brushColorActions.showColorPicker(
-                    context: context,
-                    editSubColor: editSubColor,
-                  ),
+          onBrushColor: () => _selectPanel('color', context),
           onOpenLayers: () => _selectPanel('layers', context),
           onChooseColor:
               () => _brushColorActions.showColorPicker(context: context),
@@ -2189,6 +2209,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                 editSubColor: true,
               ),
           onSelectRecentColor: _brushColorActions.applyMainColor,
+          onSelectRecentSubColor: _brushColorActions.selectSubColor,
           onSwapColors: () => _commands.dispatch(EditorActionId.swapColors),
           onResetColors: () => _commands.dispatch(EditorActionId.resetColors),
           onTransparentColor: _toggleTransparentColor,
@@ -2370,47 +2391,27 @@ class _CanvasScreenState extends State<CanvasScreen>
                     ),
                     activeToolLabel: _activeTool.label,
                     activeBrushLabel: _brushLibrary.selected?.name ?? 'Brush',
+                    saveStatusLabel: _autosaveStatusLabel(widget.autosaveState),
                     documentActionsEnabled: documentActionsEnabled,
                     documentActionRunning: _documentActionRunning,
                     onOpen: _documentActions.openProject,
                     onSave: _documentActions.saveProject,
-                    onExport: _documentActions.exportPng,
                     onExportMenu: _documentActions.exportDocumentMenu,
-                    onExportTimeLapse:
-                        widget.documentPicker is DocumentExportPicker
-                            ? _documentActions.exportTimeLapse
-                            : null,
                     onGestureSettings: _showGestureSettings,
-                    onBrushColor:
-                        () => _brushColorActions.showColorPicker(
-                          context: context,
-                        ),
                     onAccessibilitySettings: _showAccessibilitySettings,
-                    largeControls: _inputSettings.largeControls,
-                    leftHanded: _leftHandedToolbar,
-                    onTools: () => _selectPanel('tools', context),
-                    onBrushes: () => _selectPanel('brushes', context),
-                    onLayers: () => _selectPanel('layers', context),
                     onComics: () => _selectPanel('comics', context),
                     onUndo: () => _commands.dispatch(EditorActionId.undo),
                     onRedo: () => _commands.dispatch(EditorActionId.redo),
                     onCommandSearch:
                         () => _commands.dispatch(EditorActionId.commandSearch),
-                    onMirror:
-                        () => _commands.dispatch(EditorActionId.mirrorCanvas),
                     mirrored: _viewportController.mirrored,
                     tabletSimpleMode: tabletSimpleMode,
                     tabletStudioMode: tabletStudioMode,
-                    eraserActive: _eraserActive,
-                    onToggleTabletMode: _toggleTabletWorkspaceMode,
+                    tabletModePreference:
+                        widget.workspacePreferences?.tabletMode ??
+                        TabletWorkspaceMode.simple,
+                    onTabletModeSelected: _setTabletWorkspaceMode,
                     onToggleFocus: _toggleFocusMode,
-                    onToggleTransparent: _toggleTransparentColor,
-                    transparentColorActive: _transparentColorActive,
-                    onEditSubColor:
-                        () => _brushColorActions.showColorPicker(
-                          context: context,
-                          editSubColor: true,
-                        ),
                     workspaceId:
                         widget.workspacePreferences?.workspaceId ??
                         'illustration',
@@ -2450,9 +2451,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                                           .persistSelectedBrushSettings(),
                               onBrushes: () => _selectPanel('brushes', context),
                               onBrushColor:
-                                  () => _brushColorActions.showColorPicker(
-                                    context: context,
-                                  ),
+                                  () => _selectPanel('color', context),
                               onToggleEraser:
                                   () => setState(
                                     () => _eraserActive = !_eraserActive,
@@ -2479,12 +2478,14 @@ class _CanvasScreenState extends State<CanvasScreen>
                   left: _leftHandedToolbar ? null : 8,
                   right: _leftHandedToolbar ? 8 : null,
                   top: safeAreaTop + 72,
+                  bottom: MediaQuery.paddingOf(context).bottom + 8,
                   width: math.max(
                     72,
                     MediaQuery.textScalerOf(context).scale(64),
                   ),
                   child: CanvasSimpleEdgeControls(
                     selectedBrush: _brushLibrary.selected,
+                    brushToolActive: _activeTool == IllustrationTool.brush,
                     eraserActive: _eraserActive,
                     onBrushChanged: _brushActions.updateBrushDraft,
                     onBrushSizeChangeEnd: _brushActions.persistBrushSize,
@@ -2494,23 +2495,14 @@ class _CanvasScreenState extends State<CanvasScreen>
                         () => _commands.dispatch(EditorActionId.eyedropper),
                     onTools: () => _selectPanel('tools', context),
                     onBrushes: () => _selectPanel('brushes', context),
+                    onSelectBrush: () => _selectTool(IllustrationTool.brush),
                     onLayers: () => _selectPanel('layers', context),
-                    onComics: () => _selectPanel('comics', context),
                     activeColor: _activeColor,
                     subColor: _subColor,
                     transparentColorActive: _transparentColorActive,
-                    onMainColor:
-                        () => _brushColorActions.showColorPicker(
-                          context: context,
-                        ),
-                    onSubColor:
-                        () => _brushColorActions.showColorPicker(
-                          context: context,
-                          editSubColor: true,
-                        ),
+                    onMainColor: () => _selectPanel('color', context),
                     onTransparentColor: _toggleTransparentColor,
-                    onToggleEraser:
-                        () => _commands.dispatch(EditorActionId.toggleEraser),
+                    onSelectEraser: () => _selectTool(IllustrationTool.eraser),
                   ),
                 ),
               Positioned.fill(
@@ -2518,6 +2510,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                   snapshot: CanvasEditorAuxiliaryOverlaySnapshot(
                     interfaceHidden: _workspacePresentation.interfaceHidden,
                     tabletStudioMode: tabletStudioMode,
+                    leftHanded: _leftHandedToolbar,
                     hasSelection: _selectionGeometry != null,
                     desktopDock: desktopDock,
                     showLeftDock: showLeftDock,
@@ -2530,6 +2523,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                     eraserActive: _eraserActive,
                     brush: _brushLibrary.selected,
                     color: _activeColor,
+                    subColor: _subColor,
                   ),
                   actions: CanvasEditorAuxiliaryOverlayActions(
                     onShowFocusControls: _showFocusQuickControls,
@@ -2557,10 +2551,14 @@ class _CanvasScreenState extends State<CanvasScreen>
                     onQuickBrushSizeChanged:
                         _brushActions.updateQuickBrushSizePreview,
                     onQuickBrushSizeChangeEnd: _brushActions.persistBrushSize,
-                    onShowBrushColor:
-                        () => _brushColorActions.showColorPicker(
-                          context: context,
-                        ),
+                    onShowBrushColor: () {
+                      _exitFocusMode();
+                      _selectPanel('color', context);
+                    },
+                    onBrushChanged: _brushActions.updateBrushDraft,
+                    onBrushSizeChangeEnd: _brushActions.persistBrushSize,
+                    onBrushOpacityChangeEnd:
+                        (_) => _brushActions.persistSelectedBrushSettings(),
                     onCloseQuickMenu:
                         () => setState(_workspacePresentation.closeQuickMenu),
                   ),
@@ -2684,9 +2682,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 interfaceHidden: _workspacePresentation.interfaceHidden,
                 desktopDock: desktopDock,
                 tabletStudioMode: tabletStudioMode,
+                leftHanded: _leftHandedToolbar,
                 safeAreaTop: safeAreaTop,
                 tools: _toolPaletteContent(),
                 brushes: _brushPaletteContent(),
+                properties: _buildDockPalette('properties', context),
+                materials: _buildDockPalette('materials', context),
                 layers: _layerPanelContent(),
                 comics: _comicPaletteContent(
                   onClose:
