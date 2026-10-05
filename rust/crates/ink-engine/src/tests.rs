@@ -371,7 +371,7 @@ fn opacity_only_builtin_brushes_project_their_pressure_curve_for_preview() {
     assert_eq!(airbrush.pressure_size, 0.0);
     assert_eq!(airbrush.pressure_opacity, 0.85);
     assert_eq!(airbrush.pressure_curve_points.get(2), Some(&0.003));
-    assert_eq!(airbrush.pressure_curve_points.get(3), Some(&0.02));
+    assert_eq!(airbrush.pressure_curve_points.get(3), Some(&0.005));
 }
 
 #[test]
@@ -706,6 +706,19 @@ fn redundant_edge_samples_are_compacted_but_sensor_and_stationary_changes_remain
         compact_stationary_samples(Some(edge), vec![stationary_tick], 10.0),
         vec![stationary_tick]
     );
+
+    let mut up = sample(255.0, 32_768, 2, 3);
+    up.phase = Phase::Up;
+    assert_eq!(
+        compact_stationary_samples(Some(edge), vec![up], 0.0),
+        vec![up]
+    );
+    let mut cancel = up;
+    cancel.phase = Phase::Cancel;
+    assert_eq!(
+        compact_stationary_samples(Some(edge), vec![cancel], 0.0),
+        vec![cancel]
+    );
 }
 #[test]
 fn document_revisions_and_tiles_change_on_stroke() {
@@ -731,6 +744,9 @@ fn document_revisions_and_tiles_change_on_stroke() {
     bytes[16..20].copy_from_slice(&10.0f32.to_le_bytes());
     bytes[20..24].copy_from_slice(&1.0f32.to_le_bytes());
     doc.push_pointer_packet(&bytes).expect("packet");
+    let mut up = bytes.clone();
+    up[11] = Phase::Up as u8;
+    doc.push_pointer_packet(&up).expect("stationary tap ends");
     let events = doc.drain_events().expect("events");
     assert!(
         events
@@ -1117,6 +1133,9 @@ fn gpu_live_preview_tracks_committed_cpu_technical_pen_geometry() {
     .expect("begin");
     doc.push_pointer_packet(&ink_test_support::one_sample(32.0, 32.0, 1.0))
         .expect("sample");
+    let mut up = ink_test_support::one_sample(32.0, 32.0, 1.0);
+    up[11] = Phase::Up as u8;
+    doc.push_pointer_packet(&up).expect("stationary tap ends");
     let dabs = doc.drain_live_dabs(64).expect("drain live dabs");
     assert_eq!(dabs.len(), 1);
     let cpu = doc
@@ -2486,6 +2505,9 @@ fn predicted_samples_are_visible_but_never_persisted() {
     confirmed[8..10].copy_from_slice(&flags::ACTUAL.to_le_bytes());
     doc.push_pointer_packet(&confirmed)
         .expect("confirmed sample");
+    let mut up = confirmed.clone();
+    up[11] = Phase::Up as u8;
+    doc.push_pointer_packet(&up).expect("stationary tap ends");
     assert_ne!(
         doc.read_tile(layer, TileCoord { x: 0, y: 0 })
             .expect("confirmed tile"),
@@ -2564,6 +2586,11 @@ fn rust_generates_bounded_live_dabs_without_persisting_them() {
     .expect("begin");
     doc.push_pointer_packet(&ink_test_support::one_sample(18.0, 18.0, 1.0))
         .expect("sample");
+    doc.flush_input()
+        .expect("stationary contact reaches renderer");
+    assert!(lock_recover(&doc.live_dabs).is_empty());
+    doc.push_pointer_packet(&ink_test_support::one_sample(22.0, 18.0, 1.0))
+        .expect("first movement confirms stroke");
     let dabs = doc.drain_live_dabs(32).expect("live dabs");
     assert!(!dabs.is_empty());
     assert!(dabs.iter().all(|dab| dab.stroke_id == stroke.0));
@@ -2600,6 +2627,8 @@ fn cancelling_a_stroke_removes_queued_gpu_preview_dabs() {
     .expect("begin");
     doc.push_pointer_packet(&ink_test_support::one_sample(18.0, 18.0, 1.0))
         .expect("sample");
+    doc.push_pointer_packet(&ink_test_support::one_sample(22.0, 18.0, 1.0))
+        .expect("first movement confirms stroke");
     doc.flush_input().expect("sample reaches CPU renderer");
     assert!(!lock_recover(&doc.live_dabs).is_empty());
 
@@ -2654,7 +2683,9 @@ fn live_preview_queue_overflow_never_aborts_cpu_stroke() {
     }
 
     doc.push_pointer_packet(&ink_test_support::one_sample(24.0, 24.0, 1.0))
-        .expect("CPU stroke remains healthy");
+        .expect("CPU stroke begins");
+    doc.push_pointer_packet(&ink_test_support::one_sample(25.0, 24.0, 1.0))
+        .expect("CPU stroke remains healthy after movement");
     assert!(doc.take_live_dab_overflow_count().expect("overflow signal") > 0);
     assert!(
         doc.snapshot()
@@ -6435,6 +6466,9 @@ fn save_and_reopen_preserves_revision_layers_and_pixels() {
     .expect("begin");
     doc.push_pointer_packet(&ink_test_support::one_sample(10.0, 10.0, 1.0))
         .expect("sample");
+    let mut up = ink_test_support::one_sample(10.0, 10.0, 1.0);
+    up[11] = Phase::Up as u8;
+    doc.push_pointer_packet(&up).expect("stationary tap ends");
     let root = std::env::temp_dir().join(format!("project-ink-engine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("temp root");
@@ -6745,6 +6779,8 @@ fn canceled_stroke_restores_pixels_and_history() {
     .expect("begin");
     doc.push_pointer_packet(&ink_test_support::one_sample(10.0, 10.0, 1.0))
         .expect("sample");
+    doc.push_pointer_packet(&ink_test_support::one_sample(20.0, 10.0, 1.0))
+        .expect("movement commits ink before cancellation");
     assert_ne!(
         doc.read_tile(layer, TileCoord { x: 0, y: 0 })
             .expect("inked"),

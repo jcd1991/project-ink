@@ -9,18 +9,18 @@ use ink_model::{LayerKind, Rgba8};
 use ink_raster::{TILE_SIZE, TileCoord, TileStore};
 
 #[derive(Clone, Copy)]
-struct MaskDabInput<'a> {
-    preset: BrushPreset,
-    compiled_dabs: Option<&'a [BrushDab]>,
-    legacy_dabs: &'a [Dab],
-    resources: &'a BTreeMap<[u8; 32], BrushResource>,
-    selection: Option<&'a SelectionMask>,
-    eraser: bool,
-    width_px: u32,
-    height_px: u32,
+pub(super) struct MaskDabInput<'a> {
+    pub(super) preset: BrushPreset,
+    pub(super) compiled_dabs: Option<&'a [BrushDab]>,
+    pub(super) legacy_dabs: &'a [Dab],
+    pub(super) resources: &'a BTreeMap<[u8; 32], BrushResource>,
+    pub(super) selection: Option<&'a SelectionMask>,
+    pub(super) eraser: bool,
+    pub(super) width_px: u32,
+    pub(super) height_px: u32,
 }
 
-fn render_mask_dabs(mask: &mut TileStore, input: MaskDabInput<'_>) -> Vec<TileCoord> {
+pub(super) fn render_mask_dabs(mask: &mut TileStore, input: MaskDabInput<'_>) -> Vec<TileCoord> {
     let MaskDabInput {
         preset,
         compiled_dabs,
@@ -250,7 +250,14 @@ pub(super) fn compact_stationary_samples(
                 let interval_ns = (1_000_000_000.0 / stationary_rate_hz).ceil() as u64;
                 sample.timestamp_ns.saturating_sub(previous.timestamp_ns) >= interval_ns
             });
-        if last.is_some_and(|previous| same_brush_sample(previous, sample)) && !stationary_dab_due {
+        let is_terminal = matches!(
+            sample.phase,
+            ink_input::Phase::Up | ink_input::Phase::Cancel
+        );
+        if !is_terminal
+            && last.is_some_and(|previous| same_brush_sample(previous, sample))
+            && !stationary_dab_due
+        {
             continue;
         }
         compacted.push(sample);
@@ -778,11 +785,10 @@ pub(super) fn consume_packet_with_sample_limit(
             let preview_eraser = active.preview_eraser;
             let brush_dabs = if let Some(compiled) = active.compiled_brush.as_ref() {
                 let mut preview_state = active.compiled_brush_state.clone_for_prediction();
-                Some(
-                    compiled
-                        .render_incremental(&predicted, &mut preview_state)
-                        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?,
-                )
+                let preview = compiled
+                    .render_incremental(&predicted, &mut preview_state)
+                    .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+                Some(preview)
             } else {
                 None
             };

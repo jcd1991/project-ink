@@ -195,11 +195,13 @@ first confirmed move, then gives the start sample the pressure from the
 earliest confirmed measured move. A contact that ends without moving preserves
 its initial pressure and remains a tap.
 
-Technical Pen suppresses the first dab only when that initial batch contains a
-drawn segment. This removes the isolated start mark on moving Pencil strokes
-while preserving the mark from a stationary tap. Its pressure-size binding
-reaches +100% diameter, with a stronger response through the ordinary-to-firm
-Pencil range.
+Every pressure-bound built-in brush defers its first dab until movement or a
+stationary tap is confirmed, then ramps dab radius and opacity by confirmed
+travel distance over one base brush diameter. Motion is detected before
+spacing resampling, so a short first segment cannot jump to a full-size,
+fully opaque dab; stationary taps keep their normal mark. Technical Pen's
+pressure-size binding reaches +100% diameter, with a wider size response
+through the measured light-force range and continued growth at firmer pressure.
 
 ## Parameter bindings
 
@@ -207,12 +209,12 @@ Size, opacity, flow, density, spacing, rotation, scatter, grain strength,
 pickup, smudge, color shift, and other configurable values share one mapping
 system.
 
-Starter pressure bindings put their steepest response below normalized `0.02`,
-where ordinary Apple Pencil samples clustered in physical-device diagnostics.
-The curve continues rising through firmer pressure instead of reaching its
-maximum at the first light-force samples. Binding strength remains
-brush-specific, and the brush editor's pressure size and response-curve
-controls tune each brush independently.
+Starter pressure bindings span more of the ordinary Apple Pencil force range:
+their response rises from roughly 0.45 at normalized pressure `0.02` to 0.78
+at `0.08`, where samples reached in physical-device diagnostics. The curve
+continues rising through firmer pressure instead of reaching its maximum at
+light force. Binding strength remains brush-specific, and the brush editor's
+pressure size and response-curve controls tune each brush independently.
 
 The same low-force-friendly pressure curve is used by built-in bindings; the
 binding amount and target vary by brush. `+N%` means the parameter reaches up to
@@ -221,7 +223,7 @@ brushes deliberately omit a pressure binding.
 
 | Built-in brush | Default size (canvas px) | Pressure response |
 | --- | ---: | --- |
-| Technical Pen | 4 | Diameter +100%; moving-stroke start taper |
+| Technical Pen | 4 | Diameter +100%; wider light-force range; extended firm ramp |
 | HB Sketch Pencil | 6 | Diameter +55%; opacity +35% |
 | Opaque Round | 24 | Fixed |
 | Soft Airbrush | 80 | Opacity +85% |
@@ -235,7 +237,7 @@ brushes deliberately omit a pressure binding.
 | Acrylic Rake | 30 | Diameter +45% |
 | Soft Graphite | 8 | Diameter +62%; opacity +35% |
 | Charcoal | 18 | Diameter +62%; opacity +40% |
-| Brush Pen | 18 | Diameter +62%; start/end taper |
+| Brush Pen | 18 | Diameter +62%; end taper |
 | Dry Ink | 7 | Diameter +62%; end taper |
 | Flat Paint | 32 | Diameter +25% |
 | Soft Blender | 36 | Diameter +25%; opacity +30% |
@@ -317,10 +319,14 @@ Undo/Redo command path; invalid drafts are discarded transactionally.
 - ruler/symmetry snapping capability flags;
 - post-stroke correction capability for vector ink only.
 
-Smoothing is evaluated before resampling. Taper and dynamics are evaluated at
-resampled positions. Confirmed samples are the source of truth. Predicted
-samples render into the existing ephemeral preview tiles and never enter undo,
-journal, time-lapse, or saved brush state.
+Smoothing is evaluated before resampling. Dynamics and end taper are evaluated
+at resampled positions. A configured start taper uses confirmed travel distance
+from the initial contact, normalized by the base brush diameter; it does not
+advance by packet or dab count. It scales dab radius and opacity together, so
+short initial samples cannot jump straight to a full-size, fully opaque dab.
+Stationary taps keep their normal mark. Confirmed samples are the source of
+truth. Predicted samples render into the existing ephemeral preview tiles and
+never enter undo, journal, time-lapse, or saved brush state.
 
 Stationary deposition is generated at a bounded frequency from monotonic input
 time. It stops immediately on pointer up/cancel and may never run from a wall

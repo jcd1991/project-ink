@@ -2772,7 +2772,7 @@ fn flush_deferred_dual_dabs(
     state: &mut EngineState,
     stroke: StrokeId,
 ) -> Result<Vec<TileCoord>, EngineError> {
-    let (layer_id, sequence, pending) = {
+    let (layer_id, sequence, preset, pending) = {
         let active = state
             .active_stroke
             .as_mut()
@@ -2796,6 +2796,7 @@ fn flush_deferred_dual_dabs(
             active
                 .last_confirmed_sample
                 .map_or(0, |sample| sample.sequence),
+            active.brush,
             pending,
         )
     };
@@ -2817,6 +2818,7 @@ fn flush_deferred_dual_dabs(
             .get_mut(&layer_id)
             .ok_or(EngineError::InvalidLayer)?;
         let alpha_lock = layer_state.layer.alpha_lock;
+        let is_mask = layer_state.layer.kind == LayerKind::Mask;
         let mut start = 0;
         while start < pending.len() {
             let eraser = pending[start].1;
@@ -2828,21 +2830,37 @@ fn flush_deferred_dual_dabs(
                 .iter()
                 .map(|(dab, _)| *dab)
                 .collect::<Vec<_>>();
-            dirty.extend(render_brush_dabs(
-                &mut layer_state.tiles,
-                &dabs,
-                &resources,
-                selection.as_ref(),
-                eraser,
-                false,
-                alpha_lock,
-                width_px,
-                height_px,
-            ));
+            if is_mask {
+                dirty.extend(render_mask_dabs(
+                    &mut layer_state.tiles,
+                    MaskDabInput {
+                        preset,
+                        compiled_dabs: Some(&dabs),
+                        legacy_dabs: &[],
+                        resources: &resources,
+                        selection: selection.as_ref(),
+                        eraser,
+                        width_px,
+                        height_px,
+                    },
+                ));
+            } else {
+                dirty.extend(render_brush_dabs(
+                    &mut layer_state.tiles,
+                    &dabs,
+                    &resources,
+                    selection.as_ref(),
+                    eraser,
+                    false,
+                    alpha_lock,
+                    width_px,
+                    height_px,
+                ));
+            }
             start = end;
         }
     }
-    for (dab_index, dab) in all_dabs.into_iter().enumerate() {
+    for (dab_index, dab) in all_dabs.iter().copied().enumerate() {
         queue_live_dab(
             state,
             ink_live_render::LiveDab {
@@ -2861,6 +2879,21 @@ fn flush_deferred_dual_dabs(
     }
     dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
     dirty.dedup();
+    if let Some(active) = state.active_stroke.as_mut() {
+        for dab in &all_dabs {
+            if let Some((previous_x, previous_y)) = active.compiled_dab_last_position {
+                let step = (dab.x - previous_x).hypot(dab.y - previous_y);
+                active.compiled_dab_path_length += f64::from(step);
+                active.compiled_dab_max_step = active.compiled_dab_max_step.max(step);
+            }
+            active.compiled_dab_last_position = Some((dab.x, dab.y));
+        }
+        active.compiled_rendered_dabs =
+            active.compiled_rendered_dabs.saturating_add(all_dabs.len());
+        active.compiled_cpu_tile_updates =
+            active.compiled_cpu_tile_updates.saturating_add(dirty.len());
+        active.cpu_tile_updates = active.cpu_tile_updates.saturating_add(dirty.len());
+    }
     Ok(dirty)
 }
 
@@ -3265,6 +3298,7 @@ fn queue_live_dab(state: &mut EngineState, dab: ink_live_render::LiveDab) {
 
 mod strokes;
 use strokes::consume_packet;
+use strokes::{MaskDabInput, render_mask_dabs};
 #[cfg(test)]
 use strokes::{
     compact_stationary_samples, consume_packet_with_sample_limit, render_compiled_confirmed_bounded,

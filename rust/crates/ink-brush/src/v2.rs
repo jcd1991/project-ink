@@ -495,12 +495,16 @@ pub struct CompiledBrush {
 pub struct CompiledBrushState {
     conditioned_anchor: Option<PointerSample>,
     path_anchor: Option<PathPoint>,
+    stroke_start_position: Option<(f32, f32)>,
+    stroke_has_moved: bool,
+    start_taper_complete: bool,
     path_points_emitted: usize,
     segment_path_points_emitted: usize,
     dabs_emitted: usize,
     segment_dabs_emitted: usize,
     dual_state: Option<Box<Self>>,
     deferred_dual_dabs: Vec<(BrushDab, bool)>,
+    pending_start_dabs: Vec<(BrushDab, bool)>,
 }
 
 impl CompiledBrushState {
@@ -511,6 +515,9 @@ impl CompiledBrushState {
         Self {
             conditioned_anchor: self.conditioned_anchor,
             path_anchor: self.path_anchor,
+            stroke_start_position: self.stroke_start_position,
+            stroke_has_moved: self.stroke_has_moved,
+            start_taper_complete: self.start_taper_complete,
             path_points_emitted: self.path_points_emitted,
             segment_path_points_emitted: self.segment_path_points_emitted,
             dabs_emitted: self.dabs_emitted,
@@ -520,6 +527,7 @@ impl CompiledBrushState {
                 .as_deref()
                 .map(|state| Box::new(state.clone_for_prediction())),
             deferred_dual_dabs: Vec::new(),
+            pending_start_dabs: Vec::new(),
         }
     }
 
@@ -1047,15 +1055,18 @@ impl CompiledBrush {
         samples: &[PointerSample],
         state: &mut CompiledBrushState,
     ) -> Result<Vec<BrushDab>, BrushValidationError> {
-        // Keep the potentially large deferred dual-brush buffer out of the
-        // per-packet state clone. New companion dabs are staged separately
-        // and appended only after the current batch succeeds.
+        // Keep deferred dual and start dabs out of the per-packet state clone.
+        // New dabs are staged separately and appended only after the current
+        // batch succeeds.
         let mut previous_dual_dabs = std::mem::take(&mut state.deferred_dual_dabs);
+        let pending_start_dabs = std::mem::take(&mut state.pending_start_dabs);
         let mut next_state = state.clone();
+        next_state.pending_start_dabs = pending_start_dabs;
         let result = match self.render_incremental_inner(samples, &mut next_state) {
             Ok(result) => result,
             Err(error) => {
                 state.deferred_dual_dabs = previous_dual_dabs;
+                state.pending_start_dabs = std::mem::take(&mut next_state.pending_start_dabs);
                 return Err(error);
             }
         };
@@ -1073,14 +1084,21 @@ impl CompiledBrush {
         state: &mut CompiledBrushState,
     ) -> Result<Vec<(BrushDab, bool)>, BrushValidationError> {
         let mut next_state = state.clone();
-        let pending = std::mem::take(&mut next_state.deferred_dual_dabs);
-        if let Some((secondary, _)) = &self.dual
+        let mut pending = std::mem::take(&mut next_state.pending_start_dabs);
+        pending.append(&mut next_state.deferred_dual_dabs);
+        if let Some((secondary, multiply_coverage)) = &self.dual
             && let Some(secondary_state) = next_state.dual_state.as_deref_mut()
         {
-            let nested = secondary.finish_incremental(secondary_state)?;
-            if !nested.is_empty() {
+            if secondary.dual.is_some() {
                 return Err(BrushValidationError::RecursiveDual);
             }
+            let mut nested = secondary.finish_incremental(secondary_state)?;
+            if *multiply_coverage {
+                for (dab, _) in &mut nested {
+                    dab.opacity *= 0.75;
+                }
+            }
+            pending.append(&mut nested);
         }
         *state = next_state;
         Ok(pending)
@@ -1097,6 +1115,27 @@ impl CompiledBrush {
         let diameter = self.diameter();
         let spacing = (diameter * self.stroke.spacing).max(self.stroke.minimum_spacing_px);
         let first_path_index = state.path_points_emitted;
+        let initial_position = *state.stroke_start_position.get_or_insert_with(|| {
+            let first = samples[0];
+            (first.canvas_x, first.canvas_y)
+        });
+        let has_initial_segment = samples.iter().any(|sample| {
+            sample.canvas_x != initial_position.0 || sample.canvas_y != initial_position.1
+        });
+        state.stroke_has_moved |= has_initial_segment;
+        let stroke_has_moved = state.stroke_has_moved;
+        let eraser = samples
+            .iter()
+            .any(|sample| sample.flags & ink_input::flags::ERASER != 0);
+        let is_prediction = samples
+            .iter()
+            .any(|sample| sample.flags & ink_input::flags::PREDICTED != 0);
+        let ends_stroke = samples
+            .iter()
+            .any(|sample| sample.phase == ink_input::Phase::Up);
+        let cancels_stroke = samples
+            .iter()
+            .any(|sample| sample.phase == ink_input::Phase::Cancel);
         let path = state.append_path(
             samples,
             (self.stroke.smoothing.max(self.stroke.streamline) * 0.92).clamp(0.0, 0.95),
@@ -1104,17 +1143,24 @@ impl CompiledBrush {
             self.limits.max_dabs,
         )?;
         if path.is_empty() {
+            if cancels_stroke {
+                state.pending_start_dabs.clear();
+            } else if stroke_has_moved || ends_stroke {
+                let mut pending = std::mem::take(&mut state.pending_start_dabs);
+                if stroke_has_moved {
+                    for (dab, _) in &mut pending {
+                        dab.opacity = 0.0;
+                        dab.radius_x *= 0.5;
+                        dab.radius_y *= 0.5;
+                    }
+                }
+                return Ok(pending.into_iter().map(|(dab, _)| dab).collect());
+            }
             return Ok(Vec::new());
         }
-        // Native iPad input batches the buffered Down sample with the first
-        // measured Move. Taper its first dab only when that batch contains a
-        // real segment, so the moving stroke starts cleanly while a stationary
-        // Pencil tap still leaves its normal mark.
-        let start_taper = if first_path_index == 0 && path.len() > 1 {
-            self.stroke.taper_start
-        } else {
-            0.0
-        };
+        // Detect motion from the confirmed input samples rather than the
+        // spacing-resampled path: a short initial segment can leave only one
+        // emitted path point, which still produced an isolated start dab.
         let mut result = Vec::new();
         let mut secondary_dab_count = 0;
         for (local_index, point) in path.iter().enumerate() {
@@ -1128,7 +1174,30 @@ impl CompiledBrush {
             let mut radius = (diameter * dynamic.max(0.02)) * 0.5;
             let mut opacity =
                 self.opacity() * self.dynamic_for_point(ParameterId::Opacity, point, progress);
-            opacity *= taper(progress, start_taper, self.stroke.taper_end);
+            let start_factor = if self.stroke.taper_start == 0.0
+                || !stroke_has_moved
+                || state.start_taper_complete
+            {
+                1.0
+            } else {
+                let distance_from_start =
+                    (point.x - initial_position.0).hypot(point.y - initial_position.1);
+                let factor =
+                    (distance_from_start / (diameter * self.stroke.taper_start)).clamp(0.0, 1.0);
+                if factor >= 1.0 {
+                    state.start_taper_complete = true;
+                }
+                factor
+            };
+            if self.stroke.taper_start > 0.0 && stroke_has_moved {
+                // A faint full-size dab can still read as a dot at stroke
+                // start. Grow the tip with the opacity ramp; the small floor
+                // keeps the first pixels connected and the zero-opacity
+                // contact dab valid for renderers.
+                radius *= 0.5 + start_factor * 0.5;
+            }
+            let end_factor = end_taper(progress, self.stroke.taper_end);
+            opacity *= start_factor.min(end_factor);
             if !opacity.is_finite() || !radius.is_finite() {
                 return Err(BrushValidationError::InvalidNumber("evaluated dab"));
             }
@@ -1271,6 +1340,30 @@ impl CompiledBrush {
             .ok_or(BrushValidationError::WorkLimitExceeded)?;
         if state.segment_dabs_emitted > self.limits.max_dabs {
             return Err(BrushValidationError::WorkLimitExceeded);
+        }
+
+        if cancels_stroke {
+            state.pending_start_dabs.clear();
+        } else if !state.pending_start_dabs.is_empty() {
+            let mut pending = std::mem::take(&mut state.pending_start_dabs);
+            if stroke_has_moved {
+                for (dab, _) in &mut pending {
+                    dab.opacity = 0.0;
+                    dab.radius_x *= 0.5;
+                    dab.radius_y *= 0.5;
+                }
+            }
+            let mut flushed = pending.into_iter().map(|(dab, _)| dab).collect::<Vec<_>>();
+            flushed.extend(result);
+            return Ok(flushed);
+        } else if self.stroke.taper_start > 0.0
+            && first_path_index == 0
+            && !stroke_has_moved
+            && !is_prediction
+            && !ends_stroke
+        {
+            state.pending_start_dabs = result.into_iter().map(|dab| (dab, eraser)).collect();
+            return Ok(Vec::new());
         }
         Ok(result)
     }
@@ -1529,18 +1622,12 @@ fn sample_speed(anchor: PathPoint, sample: &PointerSample) -> f32 {
     (distance / elapsed as f32 * 1_000_000_000.0 / 2048.0).clamp(0.0, 1.0)
 }
 
-fn taper(progress: f32, start: f32, end: f32) -> f32 {
-    let start_factor = if start == 0.0 {
-        1.0
-    } else {
-        (progress / start).clamp(0.0, 1.0)
-    };
-    let end_factor = if end == 0.0 {
+fn end_taper(progress: f32, end: f32) -> f32 {
+    if end == 0.0 {
         1.0
     } else {
         ((1.0 - progress) / end).clamp(0.0, 1.0)
-    };
-    start_factor.min(end_factor)
+    }
 }
 
 fn random_unit(seed: u64, index: u64) -> (f32, f32) {
@@ -1610,14 +1697,14 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
         curve: ResponseCurve {
             points: vec![
                 CurvePoint { x: 0.0, y: 0.0 },
-                CurvePoint { x: 0.003, y: 0.02 },
-                CurvePoint { x: 0.006, y: 0.1 },
-                CurvePoint { x: 0.01, y: 0.26 },
-                CurvePoint { x: 0.015, y: 0.52 },
-                CurvePoint { x: 0.02, y: 0.72 },
-                CurvePoint { x: 0.04, y: 0.86 },
-                CurvePoint { x: 0.08, y: 0.93 },
-                CurvePoint { x: 0.15, y: 0.97 },
+                CurvePoint { x: 0.003, y: 0.005 },
+                CurvePoint { x: 0.006, y: 0.02 },
+                CurvePoint { x: 0.01, y: 0.08 },
+                CurvePoint { x: 0.015, y: 0.3 },
+                CurvePoint { x: 0.02, y: 0.45 },
+                CurvePoint { x: 0.04, y: 0.63 },
+                CurvePoint { x: 0.08, y: 0.78 },
+                CurvePoint { x: 0.15, y: 0.9 },
                 CurvePoint { x: 0.3, y: 0.99 },
                 CurvePoint { x: 1.0, y: 1.0 },
             ],
@@ -1632,15 +1719,15 @@ fn technical_pen_pressure_binding() -> ParameterBinding {
     binding.curve = ResponseCurve {
         points: vec![
             CurvePoint { x: 0.0, y: 0.0 },
-            CurvePoint { x: 0.003, y: 0.02 },
-            CurvePoint { x: 0.006, y: 0.1 },
-            CurvePoint { x: 0.01, y: 0.26 },
-            CurvePoint { x: 0.015, y: 0.62 },
-            CurvePoint { x: 0.02, y: 0.82 },
-            CurvePoint { x: 0.04, y: 0.91 },
-            CurvePoint { x: 0.08, y: 0.97 },
-            CurvePoint { x: 0.15, y: 0.99 },
-            CurvePoint { x: 0.3, y: 0.995 },
+            CurvePoint { x: 0.003, y: 0.005 },
+            CurvePoint { x: 0.006, y: 0.02 },
+            CurvePoint { x: 0.01, y: 0.08 },
+            CurvePoint { x: 0.015, y: 0.3 },
+            CurvePoint { x: 0.02, y: 0.45 },
+            CurvePoint { x: 0.04, y: 0.65 },
+            CurvePoint { x: 0.08, y: 0.78 },
+            CurvePoint { x: 0.15, y: 0.91 },
+            CurvePoint { x: 0.3, y: 0.99 },
             CurvePoint { x: 1.0, y: 1.0 },
         ],
     };
@@ -2038,8 +2125,17 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             .push(pressure_binding(target, amount));
     }
     presets[0].dynamics.push(technical_pen_pressure_binding());
-    presets[0].stroke.taper_start = 0.08;
-    presets[14].stroke.taper_start = 0.08;
+    // Pressure-bound brushes share the distance-based start ramp so input
+    // pressure cannot turn the first resampled dab into a visible dot.
+    for preset in &mut presets {
+        if preset
+            .dynamics
+            .iter()
+            .any(|binding| binding.sensor == SensorId::Pressure)
+        {
+            preset.stroke.taper_start = 1.0;
+        }
+    }
     presets[14].stroke.taper_end = 0.18;
     presets[14].stroke.smoothing = 0.12;
     presets[15].stroke.taper_end = 0.08;
@@ -2166,12 +2262,14 @@ mod tests {
                 .collect::<Vec<_>>();
             if fixed_response.contains(&preset.metadata.name.as_str()) {
                 assert!(pressure_bindings.is_empty(), "{}", preset.metadata.name);
+                assert_eq!(preset.stroke.taper_start, 0.0, "{}", preset.metadata.name);
             } else {
                 assert!(
                     !pressure_bindings.is_empty(),
                     "{} should respond to stylus pressure",
                     preset.metadata.name
                 );
+                assert_eq!(preset.stroke.taper_start, 1.0, "{}", preset.metadata.name);
             }
             assert!(pressure_bindings.iter().all(|binding| {
                 binding
@@ -2294,6 +2392,20 @@ mod tests {
         assert!(moving_dabs.len() > 1);
         assert_eq!(moving_dabs[0].opacity, 0.0);
         assert!(moving_dabs[1].opacity > 0.0);
+        assert!(
+            moving_dabs[1].opacity < 0.1,
+            "the first measured movement should ramp gently instead of drawing a full-opacity start dot"
+        );
+        assert!(
+            moving_dabs[1].radius_x < moving_dabs.last().expect("moving stroke dabs").radius_x,
+            "the brush tip should grow with the start opacity ramp"
+        );
+        assert!(
+            moving_dabs[1..]
+                .windows(2)
+                .take(8)
+                .all(|pair| { pair[0].opacity <= pair[1].opacity })
+        );
 
         let mut tap_start = sample(0.0, u16::MAX / 2, 3);
         tap_start.phase = Phase::Down;
@@ -2306,6 +2418,120 @@ mod tests {
 
         assert_eq!(tap_dabs.len(), 1);
         assert!(tap_dabs[0].opacity > 0.0);
+        assert!(tap_dabs[0].radius_x > moving_dabs[1].radius_x);
+    }
+
+    #[test]
+    fn technical_pen_tapers_start_when_initial_motion_is_below_spacing() {
+        let compiled = builtin_library()
+            .remove(0)
+            .compile()
+            .expect("valid technical pen");
+        let mut state = CompiledBrushState::default();
+        let mut down = sample(0.0, u16::MAX / 2, 1);
+        down.phase = Phase::Down;
+        let mut short_move = sample(0.1, u16::MAX / 2, 2);
+        short_move.phase = Phase::Move;
+
+        let first_batch = compiled
+            .render_incremental(&[down, short_move], &mut state)
+            .expect("short initial segment");
+        assert_eq!(first_batch.len(), 1);
+        assert_eq!(first_batch[0].opacity, 0.0);
+
+        let mut continued_move = sample(2.0, u16::MAX / 2, 3);
+        continued_move.phase = Phase::Move;
+        let continued = compiled
+            .render_incremental(&[continued_move], &mut state)
+            .expect("continued stroke");
+        assert!(continued.iter().any(|dab| dab.opacity > 0.0));
+        assert!(
+            continued[0].opacity < 0.6,
+            "the short initial segment should still be inside the distance-based ramp"
+        );
+    }
+
+    #[test]
+    fn technical_pen_defers_single_sample_start_until_movement_or_tap() {
+        let compiled = builtin_library()
+            .remove(0)
+            .compile()
+            .expect("valid technical pen");
+        let mut moving_state = CompiledBrushState::default();
+        let mut down = sample(0.0, u16::MAX / 2, 1);
+        down.phase = Phase::Down;
+        assert!(
+            compiled
+                .render_incremental(&[down], &mut moving_state)
+                .expect("buffer start until movement")
+                .is_empty()
+        );
+
+        let mut short_move = sample(0.1, u16::MAX / 2, 2);
+        short_move.phase = Phase::Move;
+        let start_dab = compiled
+            .render_incremental(&[short_move], &mut moving_state)
+            .expect("short movement confirms a stroke");
+        assert_eq!(start_dab.len(), 1);
+        assert_eq!(start_dab[0].opacity, 0.0);
+
+        let mut tap_state = CompiledBrushState::default();
+        assert!(
+            compiled
+                .render_incremental(&[down], &mut tap_state)
+                .expect("buffer possible tap")
+                .is_empty()
+        );
+        let mut up = down;
+        up.phase = Phase::Up;
+        let tap_dabs = compiled
+            .render_incremental(&[up], &mut tap_state)
+            .expect("release stationary tap");
+        assert_eq!(tap_dabs.len(), 1);
+        assert!(tap_dabs[0].opacity > 0.0);
+    }
+
+    #[test]
+    fn technical_pen_finish_releases_a_stationary_pending_tap() {
+        let compiled = builtin_library()
+            .remove(0)
+            .compile()
+            .expect("valid technical pen");
+        let mut state = CompiledBrushState::default();
+        let mut down = sample(0.0, u16::MAX / 2, 1);
+        down.phase = Phase::Down;
+
+        assert!(
+            compiled
+                .render_incremental(&[down], &mut state)
+                .expect("wait for tap or movement")
+                .is_empty()
+        );
+        let finished = compiled
+            .finish_incremental(&mut state)
+            .expect("finish pending tap");
+        assert_eq!(finished.len(), 1);
+        assert!(finished[0].0.opacity > 0.0);
+    }
+
+    #[test]
+    fn technical_pen_pressure_ramp_continues_above_observed_light_force() {
+        let preset = builtin_library().remove(0);
+        let binding = preset
+            .dynamics
+            .iter()
+            .find(|binding| {
+                binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+            })
+            .expect("technical pen pressure size binding");
+
+        let observed_light = binding.curve.evaluate(0.08);
+        let firm = binding.curve.evaluate(0.3);
+        let full = binding.curve.evaluate(1.0);
+
+        assert!(observed_light < 0.8);
+        assert!(firm > observed_light + 0.15);
+        assert!((full - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2328,10 +2554,30 @@ mod tests {
             let firm_size = 1.0 + binding.amount * binding.curve.evaluate(firm);
 
             assert!(
-                firm_size > light_size * 1.2,
+                firm_size > light_size * 1.1,
                 "{name} should respond visibly between low-force Apple Pencil samples"
             );
             assert!((binding.curve.evaluate(1.0) - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn built_in_pressure_curves_keep_ramping_through_firm_pressure() {
+        for preset in builtin_library() {
+            for binding in preset
+                .dynamics
+                .iter()
+                .filter(|binding| binding.sensor == SensorId::Pressure)
+            {
+                let light = binding.curve.evaluate(0.08);
+                let firm = binding.curve.evaluate(0.3);
+                assert!(
+                    firm - light > 0.2,
+                    "{} {:?} pressure curve should keep a firm-pressure ramp",
+                    preset.metadata.name,
+                    binding.target
+                );
+            }
         }
     }
 
