@@ -1,12 +1,52 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../app/editor_action.dart';
 import '../app/workspace_preferences.dart';
 import '../bridge/engine_api.dart';
+import '../design_system/ink_components.dart';
 import '../tools/brush_library.dart';
 import 'canvas_compact_controls.dart';
 import 'canvas_history_panel.dart';
 import 'canvas_quick_access_panel.dart';
+
+/// Presents the full color-role palette from one compact color entry point.
+Future<void> showCanvasColorPaletteSheet({
+  required BuildContext context,
+  required Widget child,
+}) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (sheetContext) {
+      final height = math.min(
+        MediaQuery.sizeOf(sheetContext).height * 0.78,
+        680.0,
+      );
+      return SizedBox(
+        height: height,
+        child: Column(
+          children: [
+            InkDockHeader(
+              title: 'Color',
+              actions: [
+                IconButton(
+                  tooltip: 'Close color selector',
+                  onPressed: () => Navigator.of(sheetContext).pop(),
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+            Expanded(child: child),
+          ],
+        ),
+      );
+    },
+  );
+}
 
 /// Presents the Quick Access sheet without owning workspace preference state.
 Future<void> showCanvasQuickAccessSheet({

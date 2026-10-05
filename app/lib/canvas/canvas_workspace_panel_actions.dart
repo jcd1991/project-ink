@@ -38,6 +38,7 @@ class CanvasWorkspacePanelActionHost {
     required this.persistLastDock,
     required this.showQuickAccessSheet,
     required this.showHistorySheet,
+    required this.showColorSheet,
   });
 
   final void Function(CanvasFloatingPanelVisibility visibility)
@@ -54,6 +55,7 @@ class CanvasWorkspacePanelActionHost {
   final ValueChanged<String> persistLastDock;
   final void Function(BuildContext context) showQuickAccessSheet;
   final void Function(BuildContext context) showHistorySheet;
+  final void Function(BuildContext context) showColorSheet;
 }
 
 /// Owns panel-selection branching while the screen supplies snapshots/effects.
@@ -78,6 +80,9 @@ class CanvasWorkspacePanelActions {
     );
 
     switch (selection.sheet) {
+      case CanvasPanelSheet.color:
+        host.showColorSheet(context);
+        return;
       case CanvasPanelSheet.quickAccess:
         if (snapshot.tabletStudio) {
           host.setFloatingPanels(selection.floatingPanels);

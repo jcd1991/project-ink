@@ -6,6 +6,39 @@ import 'package:project_ink/bridge/engine_api.dart';
 import 'package:project_ink/canvas/canvas_workspace_panel_sheets.dart';
 
 void main() {
+  testWidgets('Color sheet has a labeled title and close action', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder:
+              (context) => Scaffold(
+                body: TextButton(
+                  onPressed:
+                      () => showCanvasColorPaletteSheet(
+                        context: context,
+                        child: const Center(child: Text('Color roles')),
+                      ),
+                  child: const Text('Open Color'),
+                ),
+              ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open Color'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Color'), findsOneWidget);
+    expect(find.text('Color roles'), findsOneWidget);
+    expect(find.byTooltip('Close color selector'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close color selector'));
+    await tester.pumpAndSettle();
+    expect(find.text('Color roles'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Quick Access sheet dispatches selected actions', (tester) async {
     final dispatched = <EditorActionId>[];
     await tester.pumpWidget(

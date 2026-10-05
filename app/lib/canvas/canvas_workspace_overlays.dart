@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'canvas_compact_controls.dart';
@@ -37,6 +39,7 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
     required this.interfaceHidden,
     required this.desktopDock,
     required this.tabletStudioMode,
+    this.leftHanded = false,
     required this.safeAreaTop,
     super.key,
   });
@@ -45,6 +48,7 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
   final bool interfaceHidden;
   final bool desktopDock;
   final bool tabletStudioMode;
+  final bool leftHanded;
   final double safeAreaTop;
 
   @override
@@ -52,6 +56,15 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
     final canShowPanels = !interfaceHidden && !desktopDock;
     final studioOffset = tabletStudioMode ? 60.0 : 72.0;
     final top = safeAreaTop + studioOffset;
+    final availableWidth = MediaQuery.sizeOf(context).width;
+    final leftInset =
+        tabletStudioMode
+            ? (leftHanded ? 92.0 : 60.0)
+            : (leftHanded ? 12.0 : 84.0);
+    final rightInset =
+        tabletStudioMode
+            ? (leftHanded ? 60.0 : 92.0)
+            : (leftHanded ? 84.0 : 12.0);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -59,13 +72,23 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
           for (final overlay in overlays)
             if (overlay.visible)
               Positioned(
-                left:
-                    overlay.rightAligned ? null : (tabletStudioMode ? 56 : 12),
-                right:
-                    overlay.rightAligned ? (tabletStudioMode ? 8 : 12) : null,
+                left: overlay.rightAligned ? null : leftInset,
+                right: overlay.rightAligned ? rightInset : null,
                 top: top,
-                bottom: 12,
-                width: tabletStudioMode ? overlay.studioWidth : overlay.width,
+                bottom: MediaQuery.paddingOf(context).bottom + 12,
+                width: math.min(
+                  tabletStudioMode && availableWidth < 1000
+                      ? math.min(overlay.studioWidth, 300)
+                      : tabletStudioMode
+                      ? overlay.studioWidth
+                      : overlay.width,
+                  math.max(
+                    0.0,
+                    availableWidth -
+                        (overlay.rightAligned ? rightInset : leftInset) -
+                        12.0,
+                  ),
+                ),
                 child: _buildPanel(overlay),
               ),
       ],
@@ -102,9 +125,12 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
     required this.interfaceHidden,
     required this.desktopDock,
     required this.tabletStudioMode,
+    this.leftHanded = false,
     required this.safeAreaTop,
     required this.tools,
     required this.brushes,
+    this.properties = const SizedBox.shrink(),
+    this.materials = const SizedBox.shrink(),
     required this.layers,
     required this.comics,
   });
@@ -114,9 +140,12 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
   final bool interfaceHidden;
   final bool desktopDock;
   final bool tabletStudioMode;
+  final bool leftHanded;
   final double safeAreaTop;
   final Widget tools;
   final Widget brushes;
+  final Widget properties;
+  final Widget materials;
   final Widget layers;
   final Widget comics;
 
@@ -129,6 +158,7 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
     interfaceHidden: interfaceHidden,
     desktopDock: desktopDock,
     tabletStudioMode: tabletStudioMode,
+    leftHanded: leftHanded,
     safeAreaTop: safeAreaTop,
     overlays: [
       CanvasWorkspaceOverlay(
@@ -146,6 +176,23 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
         studioWidth: 320,
         onClose: () => _close(CanvasFloatingPanel.brushes),
         child: brushes,
+      ),
+      CanvasWorkspaceOverlay(
+        title: 'Tool properties',
+        visible: visibility.properties,
+        width: 300,
+        studioWidth: 320,
+        onClose: () => _close(CanvasFloatingPanel.properties),
+        child: properties,
+      ),
+      CanvasWorkspaceOverlay(
+        title: 'Materials',
+        visible: visibility.materials,
+        width: 320,
+        studioWidth: 340,
+        rightAligned: true,
+        onClose: () => _close(CanvasFloatingPanel.materials),
+        child: materials,
       ),
       CanvasWorkspaceOverlay(
         title: 'Layers',

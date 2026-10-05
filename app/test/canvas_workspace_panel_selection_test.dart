@@ -14,6 +14,10 @@ void main() {
     expect(canvasWorkspacePanelForAction(EditorActionId.showLayers), 'layers');
     expect(canvasWorkspacePanelForAction(EditorActionId.showComics), 'comics');
     expect(
+      canvasWorkspacePanelForAction(EditorActionId.showColorPicker),
+      'color',
+    );
+    expect(
       canvasWorkspacePanelForAction(EditorActionId.showToolProperties),
       'properties',
     );
@@ -87,6 +91,21 @@ void main() {
 
     expect(selection.sheet, CanvasPanelSheet.history);
     expect(selection.floatingPanels.lastVisiblePanel, isNull);
+  });
+
+  test('Color sheet preserves the currently open Studio palette', () {
+    final selection = selectCanvasWorkspacePanel(
+      panel: 'color',
+      wideDesktop: false,
+      tabletStudio: true,
+      layout: illustrationWorkspace,
+      leftGroups: const [],
+      rightGroups: const [],
+      floatingPanels: const CanvasFloatingPanelVisibility(layers: true),
+    );
+
+    expect(selection.sheet, CanvasPanelSheet.color);
+    expect(selection.floatingPanels.layers, isTrue);
   });
 
   test('desktop selection routes panels to the matching dock group', () {

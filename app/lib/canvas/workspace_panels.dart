@@ -158,7 +158,7 @@ class InkMaterialsPanel extends StatelessWidget {
             Text('Materials', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 4),
             Text(
-              'Local brushes, textures, templates, and balloon styles.',
+              'Project metadata for brushes, textures, templates, and balloon styles. These entries do not insert artwork onto the canvas.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
@@ -173,7 +173,7 @@ class InkMaterialsPanel extends StatelessWidget {
                     InkToolButton(
                       onPressed: onOpenComics,
                       icon: Icons.add,
-                      label: 'Open Comics materials',
+                      label: 'Open Comics workspace',
                     ),
                   ],
                 ),

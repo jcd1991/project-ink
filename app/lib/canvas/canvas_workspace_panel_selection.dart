@@ -2,7 +2,7 @@ import '../app/editor_action.dart';
 import '../app/workspace_preferences.dart';
 import 'canvas_floating_panel_visibility.dart';
 
-enum CanvasPanelSheet { history, quickAccess }
+enum CanvasPanelSheet { color, history, quickAccess }
 
 /// Resolves panel-oriented editor commands to the workspace panel identifier.
 String? canvasWorkspacePanelForAction(EditorActionId action) =>
@@ -11,6 +11,7 @@ String? canvasWorkspacePanelForAction(EditorActionId action) =>
       EditorActionId.showBrushes => 'brushes',
       EditorActionId.showLayers => 'layers',
       EditorActionId.showComics => 'comics',
+      EditorActionId.showColorPicker => 'color',
       EditorActionId.showToolProperties => 'properties',
       EditorActionId.showMaterials => 'materials',
       EditorActionId.showHistory => 'history',
@@ -88,6 +89,7 @@ CanvasWorkspacePanelSelection selectCanvasWorkspacePanel({
   }
 
   final sheet = switch (panel) {
+    'color' => CanvasPanelSheet.color,
     'history' => CanvasPanelSheet.history,
     'quickAccess' => CanvasPanelSheet.quickAccess,
     _ => null,

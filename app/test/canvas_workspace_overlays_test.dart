@@ -105,7 +105,7 @@ void main() {
       tester
           .getTopLeft(find.byKey(const Key('canvas-workspace-overlay-Tools')))
           .dx,
-      12,
+      84,
     );
     expect(
       tester
@@ -113,6 +113,65 @@ void main() {
           .dx,
       greaterThan(500),
     );
+  });
+
+  testWidgets('left-handed Simple palettes stay clear of edge controls', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 800,
+            height: 600,
+            child: Stack(
+              children: [
+                CanvasWorkspaceOverlays(
+                  overlays: [
+                    CanvasWorkspaceOverlay(
+                      title: 'Tools',
+                      visible: true,
+                      width: 280,
+                      studioWidth: 320,
+                      onClose: () {},
+                      child: const SizedBox(key: Key('tools-content')),
+                    ),
+                    CanvasWorkspaceOverlay(
+                      title: 'Layers',
+                      visible: true,
+                      width: 280,
+                      studioWidth: 360,
+                      rightAligned: true,
+                      onClose: () {},
+                      child: const SizedBox(key: Key('layers-content')),
+                    ),
+                  ],
+                  interfaceHidden: false,
+                  desktopDock: false,
+                  tabletStudioMode: false,
+                  leftHanded: true,
+                  safeAreaTop: 0,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      tester
+          .getTopLeft(find.byKey(const Key('canvas-workspace-overlay-Tools')))
+          .dx,
+      12,
+    );
+    expect(
+      tester
+          .getTopLeft(find.byKey(const Key('canvas-workspace-overlay-Layers')))
+          .dx,
+      436,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('hides overlays in desktop dock and focus layouts', (

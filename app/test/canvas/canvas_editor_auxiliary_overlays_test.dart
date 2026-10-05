@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/canvas/canvas_editor_auxiliary_overlays.dart';
+import 'package:project_ink/tools/brush_library.dart';
 import 'package:project_ink/tools/illustration_tools.dart';
 
 void main() {
@@ -44,6 +45,41 @@ void main() {
     expect(deselected, isTrue);
     expect(fitRequested, isTrue);
   });
+
+  testWidgets('Studio exposes labeled drawing controls and palette routes', (
+    tester,
+  ) async {
+    final selectedPanels = <String>[];
+    await tester.pumpWidget(
+      _harness(
+        snapshot: _snapshot(tabletStudioMode: true),
+        actions: _actions(onSelectPanel: selectedPanels.add),
+      ),
+    );
+
+    for (final label in [
+      'Draw tools',
+      'Brush presets',
+      'Eraser',
+      'Layers',
+      'Comics',
+      'Tool properties',
+      'Materials',
+      'History',
+      'Quick Access',
+    ]) {
+      expect(find.byTooltip(label), findsOneWidget, reason: label);
+    }
+
+    expect(find.byTooltip('Color: Main #FF000000'), findsOneWidget);
+    expect(find.bySemanticsLabel('Brush size'), findsOneWidget);
+    expect(find.bySemanticsLabel('Brush opacity'), findsOneWidget);
+    expect(tester.getSize(find.byTooltip('Color: Main #FF000000')).width, 72);
+    expect(tester.getSize(find.byTooltip('Color: Main #FF000000')).height, 68);
+    await tester.tap(find.byTooltip('Tool properties'));
+    await tester.tap(find.byTooltip('Materials'));
+    expect(selectedPanels, ['properties', 'materials']);
+  });
 }
 
 Widget _harness({
@@ -68,9 +104,11 @@ CanvasEditorAuxiliaryOverlaySnapshot _snapshot({
   bool showLeftDock = false,
   bool showRightDock = false,
   bool quickMenuVisible = false,
+  bool leftHanded = false,
 }) => CanvasEditorAuxiliaryOverlaySnapshot(
   interfaceHidden: interfaceHidden,
   tabletStudioMode: tabletStudioMode,
+  leftHanded: leftHanded,
   hasSelection: hasSelection,
   desktopDock: desktopDock,
   showLeftDock: showLeftDock,
@@ -83,6 +121,7 @@ CanvasEditorAuxiliaryOverlaySnapshot _snapshot({
   eraserActive: false,
   brush: null,
   color: Colors.black,
+  subColor: Colors.white,
 );
 
 CanvasEditorAuxiliaryOverlayActions _actions({
@@ -100,6 +139,9 @@ CanvasEditorAuxiliaryOverlayActions _actions({
   ValueChanged<double> onQuickBrushSizeChanged = _ignoreDouble,
   ValueChanged<double> onQuickBrushSizeChangeEnd = _ignoreDouble,
   VoidCallback onShowBrushColor = _noop,
+  ValueChanged<BrushPresetView> onBrushChanged = _ignoreBrush,
+  ValueChanged<double> onBrushSizeChangeEnd = _ignoreDouble,
+  ValueChanged<double> onBrushOpacityChangeEnd = _ignoreDouble,
   VoidCallback onCloseQuickMenu = _noop,
 }) => CanvasEditorAuxiliaryOverlayActions(
   onShowFocusControls: onShowFocusControls,
@@ -116,6 +158,9 @@ CanvasEditorAuxiliaryOverlayActions _actions({
   onQuickBrushSizeChanged: onQuickBrushSizeChanged,
   onQuickBrushSizeChangeEnd: onQuickBrushSizeChangeEnd,
   onShowBrushColor: onShowBrushColor,
+  onBrushChanged: onBrushChanged,
+  onBrushSizeChangeEnd: onBrushSizeChangeEnd,
+  onBrushOpacityChangeEnd: onBrushOpacityChangeEnd,
   onCloseQuickMenu: onCloseQuickMenu,
 );
 
@@ -124,3 +169,5 @@ void _noop() {}
 void _ignoreString(String _) {}
 
 void _ignoreDouble(double _) {}
+
+void _ignoreBrush(BrushPresetView _) {}

@@ -40,4 +40,22 @@ void main() {
     );
     expect(CanvasFloatingPanelVisibility.fromName('history'), isNull);
   });
+
+  test('Studio property and material palettes toggle exclusively', () {
+    const initial = CanvasFloatingPanelVisibility();
+    final properties = initial.toggleExclusive(CanvasFloatingPanel.properties);
+    final materials = properties.toggleExclusive(CanvasFloatingPanel.materials);
+
+    expect(properties.properties, isTrue);
+    expect(materials.properties, isFalse);
+    expect(materials.materials, isTrue);
+    expect(
+      CanvasFloatingPanelVisibility.fromName('properties'),
+      CanvasFloatingPanel.properties,
+    );
+    expect(
+      CanvasFloatingPanelVisibility.fromName('materials'),
+      CanvasFloatingPanel.materials,
+    );
+  });
 }

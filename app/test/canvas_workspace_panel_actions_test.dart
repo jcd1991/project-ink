@@ -28,6 +28,7 @@ void main() {
         persistLastDock: (panel) => persistedPanel = panel,
         showQuickAccessSheet: (_) => fail('unexpected sheet'),
         showHistorySheet: (_) => fail('unexpected sheet'),
+        showColorSheet: (_) => fail('unexpected sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -70,6 +71,7 @@ void main() {
         persistLastDock: (panel) => persistedPanel = panel,
         showQuickAccessSheet: (_) => fail('unexpected sheet'),
         showHistorySheet: (_) => fail('unexpected sheet'),
+        showColorSheet: (_) => fail('unexpected sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -114,6 +116,7 @@ void main() {
         persistLastDock: (_) => fail('unexpected preference write'),
         showQuickAccessSheet: (_) => quickAccessShown = true,
         showHistorySheet: (_) => fail('unexpected history sheet'),
+        showColorSheet: (_) => fail('unexpected color sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -143,6 +146,50 @@ void main() {
 
     expect(updatedPanels, const CanvasFloatingPanelVisibility());
     expect(quickAccessShown, isTrue);
+  });
+
+  testWidgets('Color opens its sheet while preserving the Studio palette', (
+    tester,
+  ) async {
+    CanvasFloatingPanelVisibility? updatedPanels;
+    var colorShown = false;
+    final actions = CanvasWorkspacePanelActions(
+      CanvasWorkspacePanelActionHost(
+        setFloatingPanels: (visibility) => updatedPanels = visibility,
+        selectDesktopDock: (_, _, _, _) => fail('unexpected desktop dock'),
+        selectTemporaryPalette: (_) => fail('unexpected temporary palette'),
+        rememberTabletPalette: (_) => fail('unexpected tablet preference'),
+        persistLastDock: (_) => fail('unexpected preference write'),
+        showQuickAccessSheet: (_) => fail('unexpected Quick Access sheet'),
+        showHistorySheet: (_) => fail('unexpected History sheet'),
+        showColorSheet: (_) => colorShown = true,
+      ),
+    );
+    late BuildContext actionContext;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) {
+            actionContext = context;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    actions.selectPanel(
+      panel: 'color',
+      context: actionContext,
+      snapshot: _snapshot(
+        tabletStudio: true,
+        tabletPlatform: true,
+        tabletMode: TabletWorkspaceMode.studio,
+        floatingPanels: const CanvasFloatingPanelVisibility(layers: true),
+      ),
+    );
+
+    expect(colorShown, isTrue);
+    expect(updatedPanels, isNull);
   });
 }
 

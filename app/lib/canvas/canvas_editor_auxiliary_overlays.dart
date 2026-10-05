@@ -11,6 +11,7 @@ class CanvasEditorAuxiliaryOverlaySnapshot {
   const CanvasEditorAuxiliaryOverlaySnapshot({
     required this.interfaceHidden,
     required this.tabletStudioMode,
+    required this.leftHanded,
     required this.hasSelection,
     required this.desktopDock,
     required this.showLeftDock,
@@ -23,10 +24,12 @@ class CanvasEditorAuxiliaryOverlaySnapshot {
     required this.eraserActive,
     required this.brush,
     required this.color,
+    required this.subColor,
   });
 
   final bool interfaceHidden;
   final bool tabletStudioMode;
+  final bool leftHanded;
   final bool hasSelection;
   final bool desktopDock;
   final bool showLeftDock;
@@ -39,6 +42,7 @@ class CanvasEditorAuxiliaryOverlaySnapshot {
   final bool eraserActive;
   final BrushPresetView? brush;
   final Color color;
+  final Color subColor;
 }
 
 /// User actions available to the auxiliary canvas controls.
@@ -58,6 +62,9 @@ class CanvasEditorAuxiliaryOverlayActions {
     required this.onQuickBrushSizeChanged,
     required this.onQuickBrushSizeChangeEnd,
     required this.onShowBrushColor,
+    required this.onBrushChanged,
+    required this.onBrushSizeChangeEnd,
+    required this.onBrushOpacityChangeEnd,
     required this.onCloseQuickMenu,
   });
 
@@ -75,6 +82,9 @@ class CanvasEditorAuxiliaryOverlayActions {
   final ValueChanged<double> onQuickBrushSizeChanged;
   final ValueChanged<double> onQuickBrushSizeChangeEnd;
   final VoidCallback onShowBrushColor;
+  final ValueChanged<BrushPresetView> onBrushChanged;
+  final ValueChanged<double> onBrushSizeChangeEnd;
+  final ValueChanged<double> onBrushOpacityChangeEnd;
   final VoidCallback onCloseQuickMenu;
 }
 
@@ -122,9 +132,10 @@ class CanvasEditorAuxiliaryOverlays extends StatelessWidget {
           ),
         if (!state.interfaceHidden && state.tabletStudioMode)
           Positioned(
-            left: 0,
+            left: state.leftHanded ? null : 0,
+            right: state.leftHanded ? 0 : null,
             top: state.safeAreaTop + 52,
-            bottom: 0,
+            bottom: MediaQuery.paddingOf(context).bottom + 8,
             width: 48,
             child: TabletStudioToolRail(
               activeTool: state.activeTool,
@@ -134,6 +145,26 @@ class CanvasEditorAuxiliaryOverlays extends StatelessWidget {
               onEraser: callbacks.onToggleEraser,
               onLayers: () => callbacks.onSelectPanel('layers'),
               onComics: () => callbacks.onSelectPanel('comics'),
+              onProperties: () => callbacks.onSelectPanel('properties'),
+              onMaterials: () => callbacks.onSelectPanel('materials'),
+              onHistory: () => callbacks.onSelectPanel('history'),
+              onQuickAccess: () => callbacks.onSelectPanel('quickAccess'),
+              leftHanded: state.leftHanded,
+            ),
+          ),
+        if (!state.interfaceHidden && state.tabletStudioMode)
+          Positioned(
+            left: state.leftHanded ? 0 : null,
+            right: state.leftHanded ? null : 0,
+            top: state.safeAreaTop + 52,
+            child: CanvasStudioDrawingControls(
+              brush: state.brush,
+              mainColor: state.color,
+              subColor: state.subColor,
+              onColor: callbacks.onShowBrushColor,
+              onBrushChanged: callbacks.onBrushChanged,
+              onSizeChangeEnd: callbacks.onBrushSizeChangeEnd,
+              onOpacityChangeEnd: callbacks.onBrushOpacityChangeEnd,
             ),
           ),
         if (!state.interfaceHidden && state.hasSelection)
