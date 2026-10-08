@@ -199,8 +199,16 @@ resulting project revisions.
   process reopen → undo → redo → save and reopen again.
 - [ ] Edit, reorder, hide, group, mask, and delete layers; exercise primary
   targeting, locks, rollback, undo/redo, persistence, and reopen.
+  - [x] Basic raster path: create/select, rename, reorder, hide/show, opacity,
+    selected-layer drawing, delete/undo, save, and reopen (macOS integration
+    evidence dated 2026-10-08 below).
+  - [ ] Groups, masks, locks, rollback failures, and broader undo/redo coverage
+    remain open.
 - [ ] Edit a custom brush, preview it, cancel and commit drafts, export/import
   it, select it, and prove the committed settings change rendered output.
+  - [x] Custom-brush draft edit, preview, discard, save, rendered-output change,
+    and persisted settings (macOS integration evidence dated 2026-10-08 below).
+  - [ ] Custom-brush package export/import round-trip remains open.
 - [ ] Verify adjustment visibility, order, parameters, undo/redo, save/reopen,
   and deterministic export for the supported adjustment set.
 - [ ] Create and edit a multi-page comic with panels and dialogue, save/reopen,
@@ -253,6 +261,45 @@ evidence remain separate hardware gates.
 
 ## Current evidence snapshot
 
+- **macOS illustration alpha workflow (2026-10-08).**
+  `flutter test --no-pub integration_test/illustration_alpha_workflow_test.dart
+  -d macos` passed 1/1 with the production Rust bridge and the desktop-dock
+  canvas. The run set `PROJECT_INK_TEST_DOCUMENTS_PATH` to
+  `Library/Containers/org.projectink.studio/Data/Documents/ProjectInkAlphaValidation/manual-20261008-02`
+  and `PROJECT_INK_PRESERVE_ALPHA_FIXTURES=true`. The scenario created and
+  selected raster layers, renamed and reordered the
+  target, hid/showed it, changed opacity, drew only on that selected layer,
+  deleted a spare layer and restored it with Undo, then saved and reopened the
+  project in a new Rust engine in the same test process. Two built-in brush
+  families drew marks after UI size changes; the RGB picker UI set red and blue
+  colors, and pixel digests confirmed each brush changed the target layer only.
+  A duplicated custom brush was previewed, edited and discarded (size and preview
+  unchanged), then edited and saved (size and rendered preview changed); its
+  settings matched after reopen. PNG export from the reopened project decoded to
+  512×512, had alpha 0 at the untouched page corner, and contained 2,797 red and
+  2,935 blue pixels. This is an automated macOS integration run with synthetic
+  Flutter pointer input, not a signed-install or physical mouse/tablet session,
+  and reopen was not a fresh app-process launch. The preserved disposable
+  artifact is under
+  `Library/Containers/org.projectink.studio/Data/Documents/ProjectInkAlphaValidation/manual-20261008-02/project-ink-illustration-alpha-Tm0p5S/`;
+  its manifest revision is 218. SHA-256 records:
+
+  Flutter printed `Failed to foreground app; open returned 1` during startup;
+  the integration case itself completed successfully. This run is not manual
+  installed-app signoff.
+
+  | Artifact | SHA-256 |
+  | --- | --- |
+  | `illustration.inkproj/manifest.json` | `5cf00d60f05eb6d21354a8a2c3ac75425c8704e84ba97879032ad6a3aabf06eb` |
+  | `illustration.inkproj/document.sqlite` | `3b15990713c7aa15f2d9af9c3cb56fc90c18ef1b50e73b218b1f65c0fa910243` |
+  | `illustration.inkproj/history.json.zst` | `2ba40f31cafcdcaaa8005d6fbe6a597088892fa0953aeab3d522ec74c95dbd94` |
+  | `illustration.inkproj/vectors.json.zst` | `0402abf9f915f3ae8fb67f6a26454e8fb08de085cf8f2d7988330f0e812fa66c` |
+  | `illustration.inkproj/brushes.json.zst` | `5f9d36951ebb751ee2f681689c01e5d2b3c339df88902701c4e086e6a086f703` |
+  | `illustration.inkproj/tiles/.../0_0.tile.zst` | `986ef971bcfa7da5e0918250b8758684a54e760bf8f0a7eed5527a4b93aa87ac` |
+  | `illustration.inkproj/tiles/.../0_1.tile.zst` | `16508139c6d82f0de00c1d342fba76e2c6e231788b2471e9ab1d1d1775353f95` |
+  | `illustration.inkproj/tiles/.../1_0.tile.zst` | `c9b42762ad400ec0b75c1e25170c9986afad47a43429fff05f754b817abbc8ca` |
+  | `illustration.inkproj/tiles/.../1_1.tile.zst` | `31442c6b584eaefa8ba2f142ef547fd4dd926ace6d478c0d48fe49a43688efb1` |
+  | `illustration.png` | `d58a0c0ed6f2a0757e9b26d46205b7c7663eb3816f85fa38122a2ada319ada2c` |
 - **macOS acceptance refresh (2026-10-03, 17:00–17:25 EDT).** A fresh run of
   `app/tool/run_macos_alpha_checks.sh --workflows-only` passed Flutter analysis,
   all 597 Flutter tests, seven Rust-backed disk journeys (layer round-trip,
