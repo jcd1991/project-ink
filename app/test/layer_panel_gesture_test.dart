@@ -791,7 +791,7 @@ void main() {
     expect(selection.selected, <int>{2});
   });
 
-  testWidgets('primary edit target is visibly labeled in the layer list', (
+  testWidgets('active paint target is visibly labeled in the layer list', (
     tester,
   ) async {
     final selection =
@@ -818,8 +818,8 @@ void main() {
       ),
     );
 
-    expect(find.text('Primary'), findsOneWidget);
-    expect(find.byTooltip('Primary editing target'), findsOneWidget);
+    expect(find.text('Active'), findsOneWidget);
+    expect(find.byTooltip('Active paint layer'), findsOneWidget);
     expect(find.text('Sketch'), findsOneWidget);
     expect(find.text('Ink'), findsOneWidget);
   });

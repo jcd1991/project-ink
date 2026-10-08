@@ -1051,7 +1051,7 @@ class LayerPanel extends StatelessWidget {
         subtitle: Row(
           children: [
             Flexible(child: Text(_friendlyStatus(layer, orderedLayers))),
-            if (selection.primaryId == layer.id) const _PrimaryLayerBadge(),
+            if (selection.primaryId == layer.id) const _ActiveLayerBadge(),
             if (soloLayerId == layer.id)
               const _LayerBadge(icon: Icons.filter_center_focus, label: 'Solo'),
             if (layer.alphaLock)
@@ -2130,8 +2130,8 @@ class _LayerBadge extends StatelessWidget {
   );
 }
 
-class _PrimaryLayerBadge extends StatelessWidget {
-  const _PrimaryLayerBadge();
+class _ActiveLayerBadge extends StatelessWidget {
+  const _ActiveLayerBadge();
 
   @override
   Widget build(BuildContext context) {
@@ -2140,9 +2140,9 @@ class _PrimaryLayerBadge extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(left: 6),
       child: Tooltip(
-        message: 'Primary editing target',
+        message: 'Active paint layer',
         child: Semantics(
-          label: 'Primary layer target',
+          label: 'Active paint layer',
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
             decoration: BoxDecoration(
@@ -2150,7 +2150,7 @@ class _PrimaryLayerBadge extends StatelessWidget {
               borderRadius: BorderRadius.circular(5),
             ),
             child: Text(
-              'Primary',
+              'Active',
               style: textStyle?.copyWith(
                 color: colorScheme.onPrimary,
                 fontWeight: FontWeight.w700,
