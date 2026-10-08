@@ -79,6 +79,20 @@ adb install -r app/build/app/outputs/flutter-apk/app-debug.apk
 adb shell dumpsys meminfo org.projectink.studio > android-meminfo.txt
 ```
 
+### Android touch Undo/Redo check
+
+On the Galaxy S23 Ultra, draw and commit one visible S Pen stroke, then use
+two-finger tap to Undo and three-finger tap to Redo. Confirm the original
+pixels return. Also start a one-finger touch stroke, add a second finger to
+cancel it, then verify the earlier Redo remains available. Save the project,
+reopen it, and Redo once more. The first contact in a multi-finger chord can
+temporarily start a touch stroke; cancellation must preserve the prior history
+branch. Keep any captured canvas diagnostic trace local and private.
+
+Record this as a separate interaction result from S Pen pressure and long-
+stroke acceptance. A classified gesture event proves the app received and
+mapped the chord, but only restored pixels prove the history command succeeded.
+
 After the run, list and copy the trace from the app sandbox (the exact file
 name is printed by the app):
 

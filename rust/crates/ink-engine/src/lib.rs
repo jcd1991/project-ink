@@ -2603,7 +2603,13 @@ impl Document {
                 EditorCommand::CancelStroke { .. } => {
                     command_history.discard_last();
                 }
-                EditorCommand::EndStroke { .. } => {}
+                EditorCommand::EndStroke { .. } => command_history.clear_redo(),
+                command @ EditorCommand::BeginStroke { .. } => {
+                    command_history.push_preserving_redo(Transaction {
+                        label: history_label(&command),
+                        command,
+                    });
+                }
                 command => command_history.push(Transaction {
                     label: history_label(&command),
                     command,

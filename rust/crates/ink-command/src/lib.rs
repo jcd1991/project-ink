@@ -1531,8 +1531,25 @@ impl History {
     }
     /// Commit a new transaction and discard redo states.
     pub fn push(&mut self, transaction: Transaction) {
-        self.undo.push(transaction);
+        self.push_undo(transaction);
         self.redo.clear();
+    }
+
+    /// Append a provisional transaction while preserving the redo branch.
+    ///
+    /// A stroke is provisional until `EndStroke`; a canceled stroke removes
+    /// this entry with [`History::discard_last`] and must leave redo available.
+    pub fn push_preserving_redo(&mut self, transaction: Transaction) {
+        self.push_undo(transaction);
+    }
+
+    /// Discard the redo branch after a provisional transaction commits.
+    pub fn clear_redo(&mut self) {
+        self.redo.clear();
+    }
+
+    fn push_undo(&mut self, transaction: Transaction) {
+        self.undo.push(transaction);
         if self.undo.len() > self.capacity {
             self.undo.remove(0);
         }
@@ -1609,6 +1626,31 @@ mod tests {
             command,
             label: "hide again".into(),
         });
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn canceled_provisional_transaction_keeps_redo_available() {
+        let command = EditorCommand::SetLayerVisibility {
+            layer: LayerId::from_u128(1),
+            visible: false,
+        };
+        let mut history = History::new(4);
+        history.push(Transaction {
+            command: command.clone(),
+            label: "hide".into(),
+        });
+        assert!(history.undo().is_some());
+
+        history.push_preserving_redo(Transaction {
+            command: command.clone(),
+            label: "provisional stroke".into(),
+        });
+        assert!(history.can_redo());
+        assert!(history.discard_last().is_some());
+
+        assert!(history.can_redo());
+        assert_eq!(history.redo().map(|entry| entry.label), Some("hide".into()));
         assert!(!history.can_redo());
     }
 

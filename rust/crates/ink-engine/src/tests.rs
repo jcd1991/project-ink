@@ -6929,6 +6929,95 @@ fn canceled_stroke_restores_pixels_and_history() {
 }
 
 #[test]
+fn canceled_touch_stroke_preserves_redo_through_save_and_reopen() {
+    let spec = DocumentSpec {
+        width_px: 128,
+        height_px: 128,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(41), spec).expect("valid doc");
+    let layer = doc.layers()[0].id;
+    let original_stroke = StrokeId::from_u128(42);
+    doc.dispatch(EditorCommand::BeginStroke {
+        stroke: original_stroke,
+        layer,
+        brush: BrushPreset::starters()[0].id,
+    })
+    .expect("begin original stroke");
+    doc.push_pointer_packet(&ink_test_support::one_sample(32.0, 32.0, 1.0))
+        .expect("queue original stroke sample");
+    doc.dispatch(EditorCommand::EndStroke {
+        stroke: original_stroke,
+    })
+    .expect("commit original stroke");
+    let original_tile = doc
+        .read_tile(layer, TileCoord { x: 0, y: 0 })
+        .expect("read original ink");
+    assert!(original_tile.iter().any(|channel| *channel != 0));
+
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo original stroke");
+    let blank_tile = doc
+        .read_tile(layer, TileCoord { x: 0, y: 0 })
+        .expect("read undone tile");
+    assert!(blank_tile.iter().all(|channel| *channel == 0));
+
+    // A three-finger Redo chord starts as a one-finger touch stroke, then the
+    // editor cancels that provisional stroke when the second finger arrives.
+    let canceled_stroke = StrokeId::from_u128(43);
+    doc.dispatch(EditorCommand::BeginStroke {
+        stroke: canceled_stroke,
+        layer,
+        brush: BrushPreset::starters()[0].id,
+    })
+    .expect("begin provisional touch stroke");
+    doc.push_pointer_packet(&ink_test_support::one_sample(80.0, 80.0, 1.0))
+        .expect("queue provisional touch sample");
+    doc.dispatch(EditorCommand::CancelStroke {
+        stroke: canceled_stroke,
+    })
+    .expect("cancel provisional touch stroke");
+
+    assert_eq!(
+        doc.read_tile(layer, TileCoord { x: 0, y: 0 })
+            .expect("read canceled tile"),
+        blank_tile,
+    );
+    let history_before_save = doc.history_snapshot(100).expect("read history");
+    assert_eq!(history_before_save.cursor, 0);
+    assert_eq!(history_before_save.entries.len(), 1);
+    assert!(!history_before_save.entries[0].applied);
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-canceled-touch-redo-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).expect("create isolated fixture root");
+    let path = root.join("drawing.inkproj");
+    doc.save_as(&path).expect("save canceled touch stroke");
+    let mut reopened = Document::open(&path).expect("reopen canceled touch stroke");
+    let history_after_reopen = reopened
+        .history_snapshot(100)
+        .expect("read reopened history");
+    assert_eq!(history_after_reopen.cursor, 0);
+    assert_eq!(history_after_reopen.entries.len(), 1);
+    assert!(!history_after_reopen.entries[0].applied);
+
+    reopened
+        .dispatch(EditorCommand::Redo)
+        .expect("redo original stroke after reopen");
+    assert_eq!(
+        reopened
+            .read_tile(layer, TileCoord { x: 0, y: 0 })
+            .expect("read redone tile"),
+        original_tile,
+    );
+    std::fs::remove_dir_all(root).expect("remove isolated fixture root");
+}
+
+#[test]
 fn oversized_png_export_fails_before_allocating_a_full_frame() {
     let spec = DocumentSpec {
         width_px: 32_768,

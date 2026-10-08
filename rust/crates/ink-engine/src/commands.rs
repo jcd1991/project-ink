@@ -3418,6 +3418,11 @@ pub(super) fn dispatch_state(
             stroke_dirty.extend(deferred_dual_dirty);
             stroke_dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
             stroke_dirty.dedup();
+            // A stroke only creates a new history branch once its input has
+            // committed. If this stroke was canceled, its redo branch remains
+            // available.
+            state.redo_states.clear();
+            state.history.clear_redo();
             if !stroke_dirty.is_empty() {
                 state.events.push(EngineEvent::TilesDirty {
                     revision: state.revision,
@@ -3440,7 +3445,6 @@ pub(super) fn dispatch_state(
             if let Some(previous) = state.undo_states.pop() {
                 state.layers = previous;
                 state.history.discard_last();
-                state.redo_states.clear();
             }
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {
@@ -3704,20 +3708,26 @@ pub(super) fn dispatch_state(
     if let Some(before_layers) = before_layers {
         state.undo_states.push(before_layers);
         trim_history_snapshots(&mut state.undo_states);
-        state.redo_states.clear();
+        if !matches!(command, EditorCommand::BeginStroke { .. }) {
+            state.redo_states.clear();
+        }
     }
     state.journal.push(encode_command(&command));
-    if !matches!(
-        command,
+    match command {
+        command @ EditorCommand::BeginStroke { .. } => {
+            state.history.push_preserving_redo(Transaction {
+                label: history_label(&command),
+                command,
+            });
+        }
         EditorCommand::Undo
-            | EditorCommand::Redo
-            | EditorCommand::EndStroke { .. }
-            | EditorCommand::CancelStroke { .. }
-    ) {
-        state.history.push(Transaction {
+        | EditorCommand::Redo
+        | EditorCommand::EndStroke { .. }
+        | EditorCommand::CancelStroke { .. } => {}
+        command => state.history.push(Transaction {
             label: history_label(&command),
             command,
-        });
+        }),
     }
     state.events.push(EngineEvent::DocumentChanged {
         revision: state.revision,

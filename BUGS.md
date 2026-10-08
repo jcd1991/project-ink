@@ -72,6 +72,17 @@ and verify both inventory and process list are clear after cleanup.
   highlighted, so confirm brush identity reporting separately. The user's
   other chat owns the canvas refactor; do not modify its canvas screen here.
 
+- [x] **Canceled touch chords preserve Redo (2026-10-08).** On the Galaxy S23
+  Ultra, the opt-in canvas trace classified three-finger taps as the configured
+  `redo` action. Each chord also began a one-finger touch stroke, then canceled
+  it when the second finger arrived. Rust had already discarded the redo branch
+  at `BeginStroke`, so the correctly dispatched Redo had no artwork to restore.
+  Provisional strokes now keep the branch until `EndStroke`; cancellation
+  removes only the provisional entry, and journal reconstruction preserves the
+  same behavior after save/reopen. `canceled_touch_stroke_preserves_redo_through_save_and_reopen`
+  covers pixel restore and a fresh document open. The source and automated
+  regression are fixed; installed Android retest remains open.
+
 - [ ] **P0 Closing a dirty document offers no Save/Discard/Cancel choice
   (live macOS reproduction, 2026-09-30).** In a fresh debug app, created a
   blank Untitled document, drew one disposable mouse stroke, then clicked the

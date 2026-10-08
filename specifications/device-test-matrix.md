@@ -28,7 +28,7 @@ platform's UI pass:
 | --- | --- | --- |
 | iOS/iPadOS | One-finger split and divider drag; confirm Pencil/touch coordinates align | Gutter/border, Undo/Redo, save/reopen with existing pixels intact |
 | macOS | Mouse and tablet drag preview/split; divider drag | Same save/reopen and structural Undo/Redo |
-| Android | Touch and Galaxy S Pen split/drag | Same save/reopen and structural Undo/Redo |
+| Android | Touch and Galaxy S Pen split/drag; test two-finger Undo and three-finger Redo after a canceled touch start | Save/reopen, confirm the stroke returns, then verify Redo remains available |
 
 Run the interaction in both Simple and Studio. Verify the 2-, 3-, and 4-panel
 presets on a blank panel map, then split an existing panel; adjust both gutter

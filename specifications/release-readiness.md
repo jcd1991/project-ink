@@ -217,6 +217,11 @@ resulting project revisions.
   then produce and inspect one useful export with references intact.
 - [ ] Verify live preview-to-committed tile equivalence, long-stroke undo
   grouping, and memory/performance limits on physical pen devices.
+- [x] Rust engine regression preserves an available Redo when a touch stroke
+  begins and is canceled; save/reopen and the three-finger gesture route are
+  covered by automated tests (2026-10-08).
+- [ ] Retest three-finger Redo on the installed Galaxy S23 build and confirm
+  the restored mark is visible after save/reopen.
 
 Automated engine tests, Flutter tests, desktop mouse checks, and stylus/print
 acceptance are separate evidence classes. Do not substitute one for another.
