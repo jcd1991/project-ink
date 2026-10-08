@@ -220,8 +220,14 @@ resulting project revisions.
 - [x] Rust engine regression preserves an available Redo when a touch stroke
   begins and is canceled; save/reopen and the three-finger gesture route are
   covered by automated tests (2026-10-08).
-- [ ] Retest three-finger Redo on the installed Galaxy S23 build and confirm
-  the restored mark is visible after save/reopen.
+- [x] Retest three-finger Redo on the installed Galaxy S23 profile build; the
+  user confirmed that the mark returned after the three-finger gesture. The
+  app-private recovery checkpoint was then reopened after a force-stop and the
+  marks were visible again (2026-10-08). This verifies recovery reopen, not a
+  named-project save or Redo after reopen; both remain open.
+- [ ] Verify active-layer targeting and long-stroke behavior with real S Pen
+  input on the Galaxy S23. The installed app is staged on a blank layer marked
+  Primary; physical input confirmation is pending (2026-10-08).
 
 Automated engine tests, Flutter tests, desktop mouse checks, and stylus/print
 acceptance are separate evidence classes. Do not substitute one for another.
