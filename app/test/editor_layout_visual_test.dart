@@ -23,7 +23,7 @@ class _VisualComicController extends ComicWorkspaceController {
   _VisualComicController() : super();
 
   @override
-  Future<void> ensureExampleLoaded() async {}
+  Future<void> ensureProjectLoaded() async {}
 }
 
 void main() {
@@ -40,7 +40,7 @@ void main() {
           tester,
           theme: theme,
           platform: TargetPlatform.macOS,
-          mode: WorkspaceMode.desktop,
+          mode: CanvasLayoutMode.desktop,
           preferences: WorkspacePreferences(
             workspaceId: workspaceId,
             followDocumentType: false,
@@ -81,7 +81,7 @@ void main() {
             tester,
             theme: theme,
             platform: TargetPlatform.macOS,
-            mode: WorkspaceMode.desktop,
+            mode: CanvasLayoutMode.desktop,
             preferences: WorkspacePreferences(
               workspaceId: workspaceId,
               followDocumentType: false,
@@ -117,7 +117,7 @@ void main() {
       tester,
       theme: InkTheme.dark(),
       platform: TargetPlatform.macOS,
-      mode: WorkspaceMode.desktop,
+      mode: CanvasLayoutMode.desktop,
       preferences: const WorkspacePreferences(followDocumentType: false),
     );
 
@@ -139,7 +139,7 @@ void main() {
       tester,
       theme: InkTheme.dark(),
       platform: TargetPlatform.macOS,
-      mode: WorkspaceMode.desktop,
+      mode: CanvasLayoutMode.desktop,
       preferences: const WorkspacePreferences(
         dockWidth: 480,
         leftDockWidth: 480,
@@ -165,7 +165,7 @@ void main() {
       tester,
       theme: InkTheme.dark(),
       platform: TargetPlatform.macOS,
-      mode: WorkspaceMode.desktop,
+      mode: CanvasLayoutMode.desktop,
       preferences: const WorkspacePreferences(
         dockWidth: 280,
         leftDockWidth: 280,
@@ -200,9 +200,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  for (final tabletMode in TabletWorkspaceMode.values) {
+  for (final editorMode in EditorMode.values) {
     for (final (themeName, theme) in _themes) {
-      testWidgets('tablet ${tabletMode.name} $themeName layout', (
+      testWidgets('tablet ${editorMode.name} $themeName layout', (
         tester,
       ) async {
         await _setViewport(tester, const Size(834, 1194), 2);
@@ -210,15 +210,15 @@ void main() {
           tester,
           theme: theme,
           platform: TargetPlatform.iOS,
-          mode: WorkspaceMode.expandedTouch,
+          mode: CanvasLayoutMode.expandedTouch,
           preferences: WorkspacePreferences(
-            tabletMode: tabletMode,
+            editorMode: editorMode,
             followDocumentType: false,
           ),
         );
 
         expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
-        if (tabletMode == TabletWorkspaceMode.simple) {
+        if (editorMode == EditorMode.simple) {
           expect(find.bySemanticsLabel('Brush size'), findsOneWidget);
           expect(find.bySemanticsLabel('Brush opacity'), findsOneWidget);
           expect(find.bySemanticsLabel('Undo'), findsOneWidget);
@@ -233,13 +233,13 @@ void main() {
           isNull,
           reason: _exceptionDetails(
             exception,
-            'tablet ${tabletMode.name} / $themeName',
+            'tablet ${editorMode.name} / $themeName',
           ),
         );
         await expectLater(
           find.byType(CanvasScreen),
           matchesGoldenFile(
-            'goldens/editor_layout/tablet_${tabletMode.name}_$themeName.png',
+            'goldens/editor_layout/tablet_${editorMode.name}_$themeName.png',
           ),
         );
       });
@@ -253,9 +253,9 @@ void main() {
         tester,
         theme: theme,
         platform: TargetPlatform.iOS,
-        mode: WorkspaceMode.expandedTouch,
+        mode: CanvasLayoutMode.expandedTouch,
         preferences: const WorkspacePreferences(
-          tabletMode: TabletWorkspaceMode.simple,
+          editorMode: EditorMode.simple,
           followDocumentType: false,
         ),
       );
@@ -281,9 +281,9 @@ void main() {
     });
   }
 
-  for (final tabletMode in TabletWorkspaceMode.values) {
+  for (final editorMode in EditorMode.values) {
     for (final (themeName, theme) in _themes) {
-      testWidgets('Android tablet ${tabletMode.name} $themeName layout', (
+      testWidgets('Android tablet ${editorMode.name} $themeName layout', (
         tester,
       ) async {
         await _setViewport(tester, const Size(1280, 800), 1);
@@ -291,15 +291,15 @@ void main() {
           tester,
           theme: theme,
           platform: TargetPlatform.android,
-          mode: WorkspaceMode.expandedTouch,
+          mode: CanvasLayoutMode.expandedTouch,
           preferences: WorkspacePreferences(
-            tabletMode: tabletMode,
+            editorMode: editorMode,
             followDocumentType: false,
           ),
         );
 
         expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
-        if (tabletMode == TabletWorkspaceMode.simple) {
+        if (editorMode == EditorMode.simple) {
           expect(find.bySemanticsLabel('Brush size'), findsOneWidget);
           expect(find.bySemanticsLabel('Undo'), findsOneWidget);
         } else {
@@ -312,13 +312,13 @@ void main() {
           isNull,
           reason: _exceptionDetails(
             exception,
-            'Android tablet ${tabletMode.name} / $themeName',
+            'Android tablet ${editorMode.name} / $themeName',
           ),
         );
         await expectLater(
           find.byType(CanvasScreen),
           matchesGoldenFile(
-            'goldens/editor_layout/android_tablet_${tabletMode.name}_$themeName.png',
+            'goldens/editor_layout/android_tablet_${editorMode.name}_$themeName.png',
           ),
         );
       });
@@ -332,9 +332,9 @@ void main() {
         tester,
         theme: theme,
         platform: TargetPlatform.iOS,
-        mode: WorkspaceMode.expandedTouch,
+        mode: CanvasLayoutMode.expandedTouch,
         preferences: const WorkspacePreferences(
-          tabletMode: TabletWorkspaceMode.studio,
+          editorMode: EditorMode.studio,
           followDocumentType: false,
         ),
       );
@@ -366,9 +366,9 @@ void main() {
       tester,
       theme: InkTheme.dark(),
       platform: TargetPlatform.iOS,
-      mode: WorkspaceMode.expandedTouch,
+      mode: CanvasLayoutMode.expandedTouch,
       preferences: const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.simple,
+        editorMode: EditorMode.simple,
         followDocumentType: false,
       ),
     );
@@ -391,9 +391,9 @@ void main() {
       tester,
       theme: InkTheme.dark(),
       platform: TargetPlatform.iOS,
-      mode: WorkspaceMode.expandedTouch,
+      mode: CanvasLayoutMode.expandedTouch,
       preferences: const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.studio,
+        editorMode: EditorMode.studio,
         followDocumentType: false,
       ),
     );
@@ -417,22 +417,31 @@ void main() {
         tester,
         theme: theme,
         platform: TargetPlatform.iOS,
-        mode: WorkspaceMode.compactTouch,
+        mode: CanvasLayoutMode.compactTouch,
         // Phone layouts stay canvas-first even if a saved tablet preference
         // was left in Studio mode.
         preferences: const WorkspacePreferences(
-          tabletMode: TabletWorkspaceMode.studio,
+          editorMode: EditorMode.studio,
           followDocumentType: false,
         ),
       );
 
       expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
+      expect(find.byTooltip('More drawing controls'), findsOneWidget);
       await tester.tap(find.byTooltip('More actions and workspace settings'));
       await tester.pumpAndSettle();
       expect(find.text('Open project…'), findsOneWidget);
       await tester.tapAt(const Offset(20, 700));
       await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Brush size'), findsOneWidget);
+      final brushControlsButton = find.byTooltip('Brush controls');
+      expect(brushControlsButton, findsOneWidget);
+      await tester.tap(brushControlsButton);
+      await tester.pumpAndSettle();
+      expect(find.text('Brush size'), findsOneWidget);
+      expect(find.text('Brush opacity'), findsOneWidget);
+      expect(find.byType(Slider), findsNWidgets(2));
+      tester.state<NavigatorState>(find.byType(Navigator)).pop();
+      await tester.pumpAndSettle();
       final exception = tester.takeException();
       expect(
         exception,
@@ -454,9 +463,9 @@ void main() {
       tester,
       theme: InkTheme.dark(),
       platform: TargetPlatform.iOS,
-      mode: WorkspaceMode.expandedTouch,
+      mode: CanvasLayoutMode.expandedTouch,
       preferences: const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.studio,
+        editorMode: EditorMode.studio,
         followDocumentType: false,
       ),
     );
@@ -470,7 +479,14 @@ void main() {
   });
 
   final scaledLayouts = <
-    (String, Size, double, TargetPlatform, WorkspaceMode, WorkspacePreferences)
+    (
+      String,
+      Size,
+      double,
+      TargetPlatform,
+      CanvasLayoutMode,
+      WorkspacePreferences,
+    )
   >[
     for (final workspaceId in desktopWorkspaces)
       (
@@ -478,27 +494,27 @@ void main() {
         const Size(1440, 900),
         1,
         TargetPlatform.macOS,
-        WorkspaceMode.desktop,
+        CanvasLayoutMode.desktop,
         WorkspacePreferences(
           workspaceId: workspaceId,
           followDocumentType: false,
         ),
       ),
-    for (final tabletMode in TabletWorkspaceMode.values)
+    for (final editorMode in EditorMode.values)
       (
-        'tablet_${tabletMode.name}',
+        'tablet_${editorMode.name}',
         const Size(1194, 834),
         2,
         TargetPlatform.iOS,
-        WorkspaceMode.expandedTouch,
-        WorkspacePreferences(tabletMode: tabletMode, followDocumentType: false),
+        CanvasLayoutMode.expandedTouch,
+        WorkspacePreferences(editorMode: editorMode, followDocumentType: false),
       ),
     (
       'phone_simple',
       const Size(390, 844),
       3,
       TargetPlatform.iOS,
-      WorkspaceMode.compactTouch,
+      CanvasLayoutMode.compactTouch,
       const WorkspacePreferences(followDocumentType: false),
     ),
   ];
@@ -544,34 +560,35 @@ void main() {
   testWidgets('large text keeps essential editor controls available', (
     tester,
   ) async {
-    final cases =
-        <(Size, double, TargetPlatform, WorkspaceMode, WorkspacePreferences)>[
-          (
-            const Size(1024, 640),
-            2,
-            TargetPlatform.macOS,
-            WorkspaceMode.desktop,
-            const WorkspacePreferences(
-              workspaceId: 'illustration',
-              followDocumentType: false,
-            ),
-          ),
-          for (final mode in TabletWorkspaceMode.values)
-            (
-              const Size(834, 1194),
-              2,
-              TargetPlatform.iOS,
-              WorkspaceMode.expandedTouch,
-              WorkspacePreferences(tabletMode: mode, followDocumentType: false),
-            ),
-          (
-            const Size(390, 844),
-            3,
-            TargetPlatform.iOS,
-            WorkspaceMode.compactTouch,
-            const WorkspacePreferences(followDocumentType: false),
-          ),
-        ];
+    final cases = <
+      (Size, double, TargetPlatform, CanvasLayoutMode, WorkspacePreferences)
+    >[
+      (
+        const Size(1024, 640),
+        2,
+        TargetPlatform.macOS,
+        CanvasLayoutMode.desktop,
+        const WorkspacePreferences(
+          workspaceId: 'illustration',
+          followDocumentType: false,
+        ),
+      ),
+      for (final mode in EditorMode.values)
+        (
+          const Size(834, 1194),
+          2,
+          TargetPlatform.iOS,
+          CanvasLayoutMode.expandedTouch,
+          WorkspacePreferences(editorMode: mode, followDocumentType: false),
+        ),
+      (
+        const Size(390, 844),
+        3,
+        TargetPlatform.iOS,
+        CanvasLayoutMode.compactTouch,
+        const WorkspacePreferences(followDocumentType: false),
+      ),
+    ];
     for (final textScale in <double>[1.5, 2]) {
       for (final (size, ratio, platform, mode, preferences) in cases) {
         for (final (_, theme) in _themes) {
@@ -617,7 +634,7 @@ Future<void> _pumpEditor(
   WidgetTester tester, {
   required ThemeData theme,
   required TargetPlatform platform,
-  required WorkspaceMode mode,
+  required CanvasLayoutMode mode,
   required WorkspacePreferences preferences,
   double textScale = 1,
 }) async {
@@ -637,7 +654,7 @@ Future<void> _pumpEditor(
                 comicWorkspaceController: _VisualComicController(),
                 targetPlatform: platform,
                 desktopDockEnabled: true,
-                workspaceModeOverride: mode,
+                layoutModeOverride: mode,
                 workspacePreferences: preferences,
                 nativePointerPacketsOverride: const Stream.empty(),
                 nativePointerReadyOverride: const Stream.empty(),

@@ -25,6 +25,7 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
     required this.onMainColor,
     required this.onTransparentColor,
     required this.onSelectEraser,
+    this.compactPhone = false,
   });
 
   final BrushPresetView? selectedBrush;
@@ -44,6 +45,7 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
   final VoidCallback onMainColor;
   final VoidCallback onTransparentColor;
   final VoidCallback onSelectEraser;
+  final bool compactPhone;
 
   static const _minimumBrushSize = 0.25;
   static const _maximumBrushSize = 512.0;
@@ -64,6 +66,7 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final brush = selectedBrush;
     final useSliderSheets =
+        compactPhone ||
         MediaQuery.sizeOf(context).height < 560 ||
         MediaQuery.textScalerOf(context).scale(1) > 1.4;
     return DecoratedBox(
@@ -177,8 +180,9 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
                 label: 'Brush size',
                 value: '${brush.size.toStringAsFixed(1)} px',
                 displayValue: '${brush.size.round()} px',
+                compact: compactPhone,
                 onPressed:
-                    () => _showBrushAdjustmentSheet(
+                    () => showCanvasBrushAdjustmentSheet(
                       context,
                       brush: brush,
                       size: true,
@@ -214,8 +218,9 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
               _StudioControlButton(
                 label: 'Brush opacity',
                 value: '${(brush.opacity * 100).round()}%',
+                compact: compactPhone,
                 onPressed:
-                    () => _showBrushAdjustmentSheet(
+                    () => showCanvasBrushAdjustmentSheet(
                       context,
                       brush: brush,
                       size: false,
@@ -313,7 +318,7 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
       '#${color.toARGB32().toRadixString(16).padLeft(8, '0').toUpperCase()}';
 }
 
-Future<void> _showBrushAdjustmentSheet(
+Future<void> showCanvasBrushAdjustmentSheet(
   BuildContext context, {
   required BrushPresetView brush,
   required bool size,
@@ -740,6 +745,7 @@ class _StudioControlButton extends StatelessWidget {
     required this.onPressed,
     required this.child,
     this.displayValue,
+    this.compact = false,
   });
 
   final String label;
@@ -747,6 +753,7 @@ class _StudioControlButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final Widget child;
   final String? displayValue;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -764,8 +771,8 @@ class _StudioControlButton extends StatelessWidget {
             onTap: onPressed,
             borderRadius: BorderRadius.circular(10),
             child: SizedBox(
-              width: 72,
-              height: 68,
+              width: compact ? 56 : 72,
+              height: compact ? 56 : 68,
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [

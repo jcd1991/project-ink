@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +9,65 @@ import 'package:project_ink/canvas/pointer_packet.dart';
 import 'package:project_ink/tools/illustration_tools.dart';
 
 void main() {
+  test('native stylus diagnostics use cross-platform labels', () async {
+    final documents = await Directory.systemTemp.createTemp(
+      'project-ink-native-diagnostics-',
+    );
+    final diagnostics = CanvasDiagnosticRecorder.forTesting(
+      documentsDirectory: documents,
+    );
+    try {
+      await diagnostics.startCapture();
+      var nextSequence = 0;
+      final coordinator = NativePencilInputCoordinator(
+        NativePencilInputHost(
+          documentReplacementInProgress: () => false,
+          disposed: () => false,
+          activeTool: () => IllustrationTool.brush,
+          diagnostics: diagnostics,
+          discardConcurrentTouchGesture: () {},
+          beginStrokeAutosaveHold: () {},
+          markPacketReceived: (_) {},
+          transformPosition: (position, _) => position,
+          nextSequence: () => nextSequence++,
+          appendPreviewBatch: (_, {required beginsStroke}) {},
+          schedulePreviewFrameDiagnostic: () {},
+          previewIndexForSequence: (_) => null,
+          strokeConstraintMode: () => 'none',
+          setStylusLastPosition: (_) {},
+          recordInputArrival: (_) {},
+          armDrawAndHold: (_) {},
+          handleSerialPacket: (_) async {},
+          abortStrokeAfterPacketError: () async {},
+          scheduleDrain: () {},
+          onQueueIdle: () {},
+        ),
+      );
+      coordinator.handlePacket(_packet(InkPointerPhase.down, 1));
+      await coordinator.drainQueue();
+      final logPath = await diagnostics.stopCapture();
+      final rows = File(logPath!).readAsLinesSync().map(
+        (line) => jsonDecode(line) as Map<String, dynamic>,
+      );
+
+      expect(
+        rows.singleWhere(
+          (row) => row['type'] == 'input.native_packet',
+        )['stage'],
+        'native_pointer_event_channel',
+      );
+      expect(
+        rows.singleWhere(
+          (row) => row['type'] == 'canvas.live_input_accepted',
+        )['device'],
+        'stylus',
+      );
+    } finally {
+      if (diagnostics.isRecording) await diagnostics.stopCapture();
+      await documents.delete(recursive: true);
+    }
+  });
+
   test(
     'hover packets update the pointer without entering the stroke queue',
     () async {

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:project_ink/canvas/canvas_compact_controls.dart';
 import 'package:project_ink/canvas/canvas_editor_auxiliary_overlays.dart';
+import 'package:project_ink/canvas/canvas_tool_rails.dart';
 import 'package:project_ink/tools/brush_library.dart';
 import 'package:project_ink/tools/illustration_tools.dart';
 
@@ -52,7 +54,7 @@ void main() {
     final selectedPanels = <String>[];
     await tester.pumpWidget(
       _harness(
-        snapshot: _snapshot(tabletStudioMode: true),
+        snapshot: _snapshot(studioTouchLayout: true),
         actions: _actions(onSelectPanel: selectedPanels.add),
       ),
     );
@@ -80,6 +82,70 @@ void main() {
     await tester.tap(find.byTooltip('Materials'));
     expect(selectedPanels, ['properties', 'materials']);
   });
+
+  testWidgets('Studio keeps drawing controls on the Simple handedness edge', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _harness(
+        snapshot: _snapshot(studioTouchLayout: true),
+        actions: _actions(),
+      ),
+    );
+
+    final drawingControlsPosition = tester.widget<Positioned>(
+      find
+          .ancestor(
+            of: find.byType(CanvasStudioDrawingControls),
+            matching: find.byType(Positioned),
+          )
+          .first,
+    );
+    final toolRailPosition = tester.widget<Positioned>(
+      find
+          .ancestor(
+            of: find.byType(TabletStudioToolRail),
+            matching: find.byType(Positioned),
+          )
+          .first,
+    );
+    expect(drawingControlsPosition.left, 0);
+    expect(drawingControlsPosition.right, isNull);
+    expect(toolRailPosition.left, isNull);
+    expect(toolRailPosition.right, 0);
+  });
+
+  testWidgets('left-handed Studio mirrors both workspace rails', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _harness(
+        snapshot: _snapshot(studioTouchLayout: true, leftHanded: true),
+        actions: _actions(),
+      ),
+    );
+
+    final drawingControlsPosition = tester.widget<Positioned>(
+      find
+          .ancestor(
+            of: find.byType(CanvasStudioDrawingControls),
+            matching: find.byType(Positioned),
+          )
+          .first,
+    );
+    final toolRailPosition = tester.widget<Positioned>(
+      find
+          .ancestor(
+            of: find.byType(TabletStudioToolRail),
+            matching: find.byType(Positioned),
+          )
+          .first,
+    );
+    expect(drawingControlsPosition.left, isNull);
+    expect(drawingControlsPosition.right, 0);
+    expect(toolRailPosition.left, 0);
+    expect(toolRailPosition.right, isNull);
+  });
 }
 
 Widget _harness({
@@ -98,7 +164,7 @@ Widget _harness({
 
 CanvasEditorAuxiliaryOverlaySnapshot _snapshot({
   bool interfaceHidden = false,
-  bool tabletStudioMode = false,
+  bool studioTouchLayout = false,
   bool hasSelection = false,
   bool desktopDock = false,
   bool showLeftDock = false,
@@ -107,7 +173,7 @@ CanvasEditorAuxiliaryOverlaySnapshot _snapshot({
   bool leftHanded = false,
 }) => CanvasEditorAuxiliaryOverlaySnapshot(
   interfaceHidden: interfaceHidden,
-  tabletStudioMode: tabletStudioMode,
+  studioTouchLayout: studioTouchLayout,
   leftHanded: leftHanded,
   hasSelection: hasSelection,
   desktopDock: desktopDock,

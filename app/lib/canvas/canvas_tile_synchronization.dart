@@ -10,6 +10,7 @@ import 'canvas_composite_tile_snapshot_reader.dart';
 import 'canvas_cpu_acknowledgement_batch.dart';
 import 'canvas_preview_synchronization.dart';
 import 'canvas_stroke_preview_actions.dart';
+import 'live_stroke_coordinator.dart';
 import 'tile_cache.dart';
 
 const int _maxCpuHandoffSnapshotTiles = 256;
@@ -449,9 +450,12 @@ class CanvasTileSynchronization {
         tileImages.promoteRevision(previousRevision, revision);
         _renderRevision = revision;
       }
-      var acknowledgedPreviewThrough = -1;
-      final publishedCpuAcknowledgements = <StrokeAcknowledgement>[];
       final publishedPixelAcknowledgements = <StrokeAcknowledgement>[];
+      final coverageByAcknowledgement =
+          <StrokeAcknowledgement, CanvasPreviewCoverage>{};
+      final publishedByPreview =
+          <LiveStrokePreview, Set<StrokeAcknowledgement>>{};
+      final candidateCoverage = <LiveStrokePreview, int>{};
       for (final acknowledgement in selectedCpuAcknowledgements) {
         if (acknowledgement.revision > revision) continue;
         final matchingCompositeTiles =
@@ -479,11 +483,14 @@ class CanvasTileSynchronization {
         if (hasPublishedPixels) {
           publishedPixelAcknowledgements.add(acknowledgement);
         }
-        final previewIndex =
+        final coverage =
             hasPublishedPixels
-                ? _previewIndexForAcknowledgement(acknowledgement)
-                : -1;
-        if (previewIndex < 0) continue;
+                ? strokePreviewActions.coverageForAcknowledgement(
+                  acknowledgement,
+                )
+                : null;
+        if (coverage == null) continue;
+        coverageByAcknowledgement[acknowledgement] = coverage;
         previewSynchronization.lastPublishedPreviewAcknowledgement =
             acknowledgement;
         diagnostics.record('canvas.cpu_commit_handoff', {
@@ -495,7 +502,7 @@ class CanvasTileSynchronization {
           'matchingCompositeTiles': matchingCompositeTiles,
           'fullRedraw': batch.fullRedraw,
           'hasPublishedPixels': hasPublishedPixels,
-          'previewIndex': previewIndex,
+          'previewIndex': coverage.index,
           'confirmedSampleCount': acknowledgement.confirmedSampleCount,
           'pathLength': acknowledgement.pathLength,
           'directLength': acknowledgement.directLength,
@@ -506,113 +513,108 @@ class CanvasTileSynchronization {
           'workSegments': acknowledgement.workSegments,
           'workLimitReached': acknowledgement.workLimitReached,
         });
-        publishedCpuAcknowledgements.add(acknowledgement);
-        acknowledgedPreviewThrough = math.max(
-          acknowledgedPreviewThrough,
-          previewIndex,
+        (publishedByPreview[coverage.preview] ??= <StrokeAcknowledgement>{})
+            .add(acknowledgement);
+        candidateCoverage[coverage.preview] = math.max(
+          candidateCoverage[coverage.preview] ?? -1,
+          coverage.index,
         );
       }
-      if (acknowledgedPreviewThrough >= 0) {
-        // Keep the visible prefix contiguous: a later acknowledgement cannot
-        // retire the live path across an earlier commit whose matching CPU
-        // pixels have not been published yet. Source sequences can skip due
-        // to discarded prediction samples, so use preview indices for order.
-        final publishedSet = publishedCpuAcknowledgements.toSet();
+      final coverageByPreview = <LiveStrokePreview, int>{};
+      for (final entry in candidateCoverage.entries) {
+        var acknowledgedThrough = entry.value;
+        final publishedSet = publishedByPreview[entry.key] ?? const {};
+        // Keep each preview's visible prefix contiguous: a later CPU tile
+        // acknowledgement cannot retire across an earlier un-published one.
         for (final acknowledgement in _pendingCpuStrokeAcks) {
           if (publishedSet.contains(acknowledgement)) continue;
-          final pendingIndex = _previewIndexForAcknowledgement(acknowledgement);
-          // A missing index means this acknowledgement refers to a prefix
-          // already compacted/retired from the live path (or a sample clipped
-          // before it entered the preview). It must not block later coverage.
-          if (pendingIndex >= 0 && pendingIndex <= acknowledgedPreviewThrough) {
-            acknowledgedPreviewThrough = math.min(
-              acknowledgedPreviewThrough,
-              pendingIndex - 1,
+          final pendingCoverage = strokePreviewActions
+              .coverageForAcknowledgement(acknowledgement);
+          if (identical(pendingCoverage?.preview, entry.key) &&
+              pendingCoverage!.index <= acknowledgedThrough) {
+            acknowledgedThrough = math.min(
+              acknowledgedThrough,
+              pendingCoverage.index - 1,
             );
             break;
           }
         }
+        if (acknowledgedThrough >= 0) {
+          coverageByPreview[entry.key] = acknowledgedThrough;
+        }
       }
-      final previewProgressChanged = acknowledgedPreviewThrough >= 0;
-      final cpuCoverageFrameFields =
-          acknowledgedPreviewThrough >= 0
-              ? <String, Object?>{
-                'cpuCoveragePreviewIndex': acknowledgedPreviewThrough,
-                'cpuCoverageCommitId': cpuCommitBatchId,
-              }
-              : const <String, Object?>{};
-      Map<String, Object?>? retiredPreviewFields;
+      final previewProgressChanged = coverageByPreview.isNotEmpty;
+      final cpuCoverageFrameFields = <String, Object?>{
+        if (coverageByPreview.length == 1)
+          'cpuCoveragePreviewIndex': coverageByPreview.values.single,
+        if (coverageByPreview.isNotEmpty)
+          'cpuCoveragePreviewIndices': [
+            for (final entry in coverageByPreview.entries)
+              <String, Object?>{
+                'previewRevision': entry.key.revision,
+                'throughIndex': entry.value,
+              },
+          ],
+        if (coverageByPreview.isNotEmpty)
+          'cpuCoverageCommitId': cpuCommitBatchId,
+      };
       // A pixel commit is complete even if its source sequence no longer has
       // a retained preview index. The preview prefix was already compacted,
       // clipped, or ended, so keeping this acknowledgement cannot advance UI
       // coverage and would cause the same tile snapshot to be reread forever.
-      _pendingCpuStrokeAcks.removeWhere(
-        (acknowledgement) =>
-            publishedPixelAcknowledgements.contains(acknowledgement) &&
-            (previewSynchronization.strokePreview.value == null ||
-                _previewIndexForAcknowledgement(acknowledgement) < 0),
-      );
+      _pendingCpuStrokeAcks.removeWhere((acknowledgement) {
+        if (!publishedPixelAcknowledgements.contains(acknowledgement)) {
+          return false;
+        }
+        final coverage =
+            coverageByAcknowledgement[acknowledgement] ??
+            strokePreviewActions.coverageForAcknowledgement(acknowledgement);
+        if (coverage == null) return true;
+        final through = coverageByPreview[coverage.preview];
+        return through != null &&
+            (publishedByPreview[coverage.preview]?.contains(acknowledgement) ??
+                false) &&
+            coverage.index <= through;
+      });
       // A full redraw with no tiles is a valid empty document (for example,
       // undoing the only stroke). The cache has already retired the previous
       // frame above, so repaint even when no replacement image was decoded.
       if ((changed || fullRedraw || previewProgressChanged) && host.isMounted) {
-        final livePreview = previewSynchronization.strokePreview.value;
-        if (livePreview != null) {
-          final candidateThrough = acknowledgedPreviewThrough;
-          if (candidateThrough >= 0) {
-            final confirmedThrough =
-                (candidateThrough + 1)
-                    .clamp(
-                      livePreview.confirmedThrough,
-                      livePreview.points.length,
-                    )
-                    .toInt();
-            previewSynchronization.setStrokePreview(
-              livePreview.copyWith(
-                confirmedThrough: confirmedThrough,
-                revision: livePreview.revision + 1,
-              ),
-            );
-            _pendingCpuStrokeAcks.removeWhere((acknowledgement) {
-              final index = _previewIndexForAcknowledgement(acknowledgement);
-              return publishedCpuAcknowledgements.contains(acknowledgement) &&
-                  (index < 0 || index <= candidateThrough);
-            });
-            strokePreviewActions.retireThrough(candidateThrough);
-          }
-          final committedPreview = previewSynchronization.strokePreview.value;
-          if (!host.strokeActive &&
-              previewSynchronization.awaitingPreviewCommit &&
-              committedPreview != null &&
-              committedPreview.confirmedThrough >=
-                  committedPreview.points.length) {
-            final terminalAcknowledgement =
-                publishedCpuAcknowledgements
-                    .where(
-                      (acknowledgement) =>
-                          _previewIndexForAcknowledgement(acknowledgement) >=
-                          candidateThrough,
-                    )
-                    .lastOrNull ??
-                publishedCpuAcknowledgements.lastOrNull ??
-                previewSynchronization.lastPublishedPreviewAcknowledgement;
-            retiredPreviewFields = <String, Object?>{
-              'strokeId': terminalAcknowledgement?.stroke.toString(),
-              'throughSourceSequence':
-                  terminalAcknowledgement?.highestCommittedSequence ??
-                  committedPreview.points.last.sourceSequence,
-              'previewIndex': committedPreview.confirmedThrough - 1,
-              'pointCount': committedPreview.points.length,
-              'cpuRevision': revision,
-              'commitId': cpuCommitBatchId,
-              'terminalAcknowledgementInCurrentRefresh':
-                  publishedCpuAcknowledgements.isNotEmpty,
-            };
-            previewSynchronization.setStrokePreview(null);
-            strokePreviewActions.clear();
+        if (coverageByPreview.isNotEmpty) {
+          strokePreviewActions.advanceCoverage(coverageByPreview);
+        }
+        final retiredPreviews = strokePreviewActions.retireCpuCoveredPreviews();
+        for (final retiredPreview in retiredPreviews) {
+          final trackedPreview =
+              publishedByPreview.keys
+                  .where(
+                    (preview) =>
+                        identical(preview.points, retiredPreview.points),
+                  )
+                  .firstOrNull;
+          final previewAcknowledgements =
+              publishedByPreview[trackedPreview] ??
+              const <StrokeAcknowledgement>{};
+          final terminalAcknowledgement =
+              previewAcknowledgements.lastOrNull ??
+              previewSynchronization.lastPublishedPreviewAcknowledgement;
+          diagnostics.record('canvas.live_preview_retired', {
+            'strokeId': terminalAcknowledgement?.stroke.toString(),
+            'throughSourceSequence':
+                terminalAcknowledgement?.highestCommittedSequence ??
+                retiredPreview.points.lastOrNull?.sourceSequence,
+            'previewIndex': retiredPreview.confirmedThrough - 1,
+            'pointCount': retiredPreview.points.length,
+            'cpuRevision': revision,
+            'commitId': cpuCommitBatchId,
+            'terminalAcknowledgementInCurrentRefresh':
+                previewAcknowledgements.isNotEmpty,
+          });
+          if (identical(
+            previewSynchronization.lastPublishedPreviewAcknowledgement,
+            terminalAcknowledgement,
+          )) {
             previewSynchronization.lastPublishedPreviewAcknowledgement = null;
-            previewSynchronization.awaitingPreviewCommit = false;
-            _pendingCpuStrokeAcks.clear();
           }
         }
         final packetMicros = host.captureSnapshot().lastPacketMicros;
@@ -649,10 +651,6 @@ class CanvasTileSynchronization {
             'gpuPreviewReady':
                 previewSynchronization.surface?.gpuFrameReady.value ?? false,
           });
-          final retired = retiredPreviewFields;
-          if (retired != null) {
-            diagnostics.record('canvas.live_preview_retired', retired);
-          }
         });
         _scheduleLiveStrokeAcknowledgements(revision);
         if (packetMicros != null) {
@@ -665,16 +663,6 @@ class CanvasTileSynchronization {
             );
           });
         }
-      }
-      // CPU pixels may arrive after the UI preview has already ended (for
-      // example after a tool/document transition). Once a commit's immutable
-      // pixels are present, there is no live geometry left for it to retire;
-      // discard its acknowledgement instead of snapshotting it on every poll.
-      if (previewSynchronization.strokePreview.value == null &&
-          publishedCpuAcknowledgements.isNotEmpty) {
-        _pendingCpuStrokeAcks.removeWhere(
-          publishedCpuAcknowledgements.contains,
-        );
       }
     } catch (error, stack) {
       if (host.isSessionCurrent(session)) {
@@ -719,7 +707,4 @@ class CanvasTileSynchronization {
       }
     });
   }
-
-  int _previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement) =>
-      strokePreviewActions.previewIndexForAcknowledgement(acknowledgement);
 }

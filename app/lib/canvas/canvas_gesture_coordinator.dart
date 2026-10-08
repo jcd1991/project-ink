@@ -16,6 +16,7 @@ class CanvasGestureActionHost {
     required this.sampleColor,
     required this.enableStraighten,
     required this.enableConstrain,
+    this.recordDiagnostic,
   });
 
   final GestureDefaults Function() defaults;
@@ -25,6 +26,8 @@ class CanvasGestureActionHost {
   final void Function(Offset position) sampleColor;
   final void Function() enableStraighten;
   final void Function() enableConstrain;
+  final void Function(String event, Map<String, Object?> fields)?
+  recordDiagnostic;
 }
 
 /// Owns touch-contact tracking and maps completed touch gestures to editor
@@ -57,6 +60,16 @@ class CanvasGestureCoordinator {
             host.defaults().bindings['longPress'],
             position: position,
           ),
+      onSequenceCompleted: (gesture, duration, moved, pointerCount) {
+        if (gesture == null && pointerCount >= 2) {
+          host.recordDiagnostic?.call('input.touch_gesture_rejected', {
+            'pointerCount': pointerCount,
+            'durationMs': duration.inMilliseconds,
+            'moved': moved,
+            'reason': moved ? 'movement' : 'duration_or_unsupported_chord',
+          });
+        }
+      },
       onGesture: (gesture) {
         final bindingName = switch (gesture) {
           TouchGestureKind.twoFingerTap => 'twoFingerTap',
@@ -65,6 +78,14 @@ class CanvasGestureCoordinator {
           TouchGestureKind.fourFingerTap => 'fourFingerTap',
           TouchGestureKind.longPress => null,
         };
+        host.recordDiagnostic?.call('input.touch_gesture_classified', {
+          'gesture': gesture.name,
+          'binding': bindingName,
+          'action':
+              bindingName == null
+                  ? null
+                  : host.defaults().bindings[bindingName]?.name,
+        });
         if (bindingName != null) {
           dispatchMapped(host.defaults().bindings[bindingName]);
         }

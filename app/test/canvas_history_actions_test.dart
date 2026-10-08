@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/app/editor_action.dart';
 import 'package:project_ink/bridge/engine_api.dart';
@@ -20,13 +22,36 @@ class _HistoryEngine extends InMemoryEngineApi {
 }
 
 void main() {
-  test('undo drains strokes before mutation and projection refresh', () async {
+  test(
+    'undo drains strokes and starts canvas refresh before projections',
+    () async {
+      final events = <String>[];
+      final actions = _actions(events);
+
+      await actions.undo();
+
+      expect(events, ['drain', 'undo', 'dirty', 'tiles', 'layers']);
+    },
+  );
+
+  test('undo completes while the layer projection is still loading', () async {
     final events = <String>[];
-    final actions = _actions(events);
+    final projection = Completer<void>();
+    final actions = _actions(
+      events,
+      refreshLayerProjection: () async {
+        events.add('layers-start');
+        await projection.future;
+        events.add('layers-finish');
+      },
+    );
 
     await actions.undo();
 
-    expect(events, ['drain', 'undo', 'dirty', 'layers', 'tiles']);
+    expect(events, ['drain', 'undo', 'dirty', 'tiles', 'layers-start']);
+    projection.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(events.last, 'layers-finish');
   });
 
   test('redo command dispatch routes to the history owner', () async {
@@ -36,7 +61,7 @@ void main() {
     expect(actions.dispatchEditorAction(EditorActionId.redo), isTrue);
     await Future<void>.delayed(Duration.zero);
 
-    expect(events, ['drain', 'redo', 'dirty', 'layers', 'tiles']);
+    expect(events, ['drain', 'redo', 'dirty', 'tiles', 'layers']);
     expect(actions.dispatchEditorAction(EditorActionId.fitCanvas), isFalse);
   });
 
@@ -57,12 +82,16 @@ void main() {
   });
 }
 
-CanvasHistoryActions _actions(List<String> events) => CanvasHistoryActions(
+CanvasHistoryActions _actions(
+  List<String> events, {
+  Future<void> Function()? refreshLayerProjection,
+}) => CanvasHistoryActions(
   CanvasHistoryActionHost(
     engine: () => _HistoryEngine(events),
     waitForStrokeOperations: () async => events.add('drain'),
     markDirty: () => events.add('dirty'),
-    refreshLayerProjection: () async => events.add('layers'),
+    refreshLayerProjection:
+        refreshLayerProjection ?? (() async => events.add('layers')),
     refreshTiles: () async => events.add('tiles'),
     loadPhase2Projections: () async => events.add('phase2'),
     loadVectorSelection: () async => events.add('vectors'),

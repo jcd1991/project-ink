@@ -24,7 +24,7 @@ class CanvasLayerPanelContent extends StatelessWidget {
     required this.selectedVectorLayerId,
     required this.layerActions,
     required this.vectorActions,
-    required this.tabletMode,
+    required this.editorMode,
     required this.targetPlatform,
     required this.onPanelChanged,
     super.key,
@@ -37,7 +37,7 @@ class CanvasLayerPanelContent extends StatelessWidget {
   final int? selectedVectorLayerId;
   final CanvasLayerActions layerActions;
   final CanvasVectorActions vectorActions;
-  final TabletWorkspaceMode tabletMode;
+  final EditorMode editorMode;
   final TargetPlatform? targetPlatform;
   final VoidCallback onPanelChanged;
 
@@ -51,8 +51,7 @@ class CanvasLayerPanelContent extends StatelessWidget {
     // remain reachable without stacking the inspector above a compressed list.
     final studioMode =
         size.height >= 700 &&
-        (!isTablet ||
-            (size.width >= 600 && tabletMode == TabletWorkspaceMode.studio));
+        (!isTablet || (size.width >= 600 && editorMode == EditorMode.studio));
 
     return Column(
       children: [
@@ -122,6 +121,8 @@ class CanvasLayerPanelContent extends StatelessWidget {
                 ),
             onDeleteLayer:
                 (layer) => unawaited(layerActions.deleteLayer(layer)),
+            onClearLayer:
+                (layer) => unawaited(layerActions.clearLayerContent(layer)),
             onDuplicateLayer:
                 (layer) => unawaited(layerActions.duplicateLayer(layer)),
             onPresentationChanged: layerActions.applyLayerPresentation,

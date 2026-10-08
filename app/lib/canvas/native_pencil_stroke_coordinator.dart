@@ -98,9 +98,10 @@ class NativePencilStrokeCoordinator {
       return;
     }
 
+    final captureAlreadyEnded = host.captureEndedAtBoundary();
     final observation = _metrics.observePacket(
       packet,
-      captureAlreadyEnded: host.captureEndedAtBoundary(),
+      captureAlreadyEnded: captureAlreadyEnded,
       isInsideDocument: (position) {
         final size = engine.documentInfo;
         return position.dx >= 0 &&
@@ -109,12 +110,20 @@ class NativePencilStrokeCoordinator {
             position.dy < size.heightPx;
       },
     );
-    if (host.captureEndedAtBoundary()) {
-      if (hasUp || hasCancel) {
-        _logTerminal(hasCancel: hasCancel, edgeExit: true, includeEvent: false);
-        await _finishBoundaryStroke(engine: engine, cancelled: hasCancel);
+    final reentrySampleIndex = observation.reentrySampleIndex;
+    if (captureAlreadyEnded) {
+      if (reentrySampleIndex == null) {
+        if (hasUp || hasCancel) {
+          _logTerminal(
+            hasCancel: hasCancel,
+            edgeExit: true,
+            includeEvent: false,
+          );
+          await _finishBoundaryStroke(engine: engine, cancelled: hasCancel);
+        }
+        return;
       }
-      return;
+      host.setCaptureEndedAtBoundary(false);
     }
 
     final crossingSampleCount = observation.crossingSampleCount ?? 0;
@@ -133,29 +142,48 @@ class NativePencilStrokeCoordinator {
       if (position != null) host.armDrawAndHold(position);
     }
 
-    final boundedPacket =
-        crossingSampleCount == 0
-            ? packet
-            : truncatePointerPacket(packet, crossingSampleCount);
-    final rasterPacket =
-        host.eraserEnabled()
-            ? addPointerPacketFlags(boundedPacket, inkPointerEraser)
-            : boundedPacket;
-    diagnostics.recordPacket(
-      'input.engine_packet',
-      'native_pencil_after_transform_clip_and_flags',
-      rasterPacket,
-      fields: <String, Object?>{
-        'strokeActive': host.strokeActive(),
-        'captureEndedAtBoundary': host.captureEndedAtBoundary(),
-      },
-    );
+    final reenteredWithinPacket =
+        !captureAlreadyEnded &&
+        crossingSampleCount > 0 &&
+        reentrySampleIndex != null;
+    final boundedPackets =
+        reenteredWithinPacket
+            ? <Uint8List>[
+              truncatePointerPacket(packet, crossingSampleCount),
+              slicePointerPacket(packet, reentrySampleIndex),
+            ]
+            : <Uint8List>[
+              reentrySampleIndex != null
+                  ? slicePointerPacket(packet, reentrySampleIndex)
+                  : crossingSampleCount == 0
+                  ? packet
+                  : truncatePointerPacket(packet, crossingSampleCount),
+            ];
     try {
-      await engine.pushPointerPacket(rasterPacket);
-      host.livePreviewSurface()?.pump();
+      for (var index = 0; index < boundedPackets.length; index++) {
+        final boundedPacket = boundedPackets[index];
+        final rasterPacket =
+            host.eraserEnabled()
+                ? addPointerPacketFlags(boundedPacket, inkPointerEraser)
+                : boundedPacket;
+        diagnostics.recordPacket(
+          'input.engine_packet',
+          'native_pencil_after_transform_clip_and_flags',
+          rasterPacket,
+          fields: <String, Object?>{
+            'strokeActive': host.strokeActive(),
+            'captureEndedAtBoundary': host.captureEndedAtBoundary(),
+          },
+        );
+        await engine.pushPointerPacket(rasterPacket);
+        host.livePreviewSurface()?.pump();
+        if (reenteredWithinPacket && index == 0) {
+          host.setCaptureEndedAtBoundary(false);
+        }
+      }
     } catch (error, stack) {
       if (host.performanceSnapshotsEnabled) {
-        host.performanceTrace.markPacketRejected(rasterPacket);
+        host.performanceTrace.markPacketRejected(packet);
       }
       diagnostics.recordError('native_pointer_engine_push', error, stack);
       debugPrint('Project Ink pointer packet rejected: $error\n$stack');

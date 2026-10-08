@@ -9,23 +9,23 @@ import 'canvas_workspace_panel_selection.dart';
 class CanvasWorkspacePanelActionSnapshot {
   const CanvasWorkspacePanelActionSnapshot({
     required this.wideDesktop,
-    required this.tabletStudio,
-    required this.tabletPlatform,
-    required this.tabletMode,
+    required this.studioTouchLayout,
+    required this.editorMode,
     required this.layout,
     required this.leftGroups,
     required this.rightGroups,
     required this.floatingPanels,
+    this.compactPhone = false,
   });
 
   final bool wideDesktop;
-  final bool tabletStudio;
-  final bool tabletPlatform;
-  final TabletWorkspaceMode tabletMode;
+  final bool studioTouchLayout;
+  final EditorMode editorMode;
   final WorkspaceLayout layout;
   final List<DockGroupLayout> leftGroups;
   final List<DockGroupLayout> rightGroups;
   final CanvasFloatingPanelVisibility floatingPanels;
+  final bool compactPhone;
 }
 
 /// Effect boundary for workspace panel routing.
@@ -34,11 +34,12 @@ class CanvasWorkspacePanelActionHost {
     required this.setFloatingPanels,
     required this.selectDesktopDock,
     required this.selectTemporaryPalette,
-    required this.rememberTabletPalette,
+    required this.rememberStudioPalette,
     required this.persistLastDock,
     required this.showQuickAccessSheet,
     required this.showHistorySheet,
     required this.showColorSheet,
+    required this.showLayersSheet,
   });
 
   final void Function(CanvasFloatingPanelVisibility visibility)
@@ -51,11 +52,12 @@ class CanvasWorkspacePanelActionHost {
   )
   selectDesktopDock;
   final ValueChanged<String> selectTemporaryPalette;
-  final ValueChanged<TabletWorkspaceMode> rememberTabletPalette;
+  final ValueChanged<EditorMode> rememberStudioPalette;
   final ValueChanged<String> persistLastDock;
   final void Function(BuildContext context) showQuickAccessSheet;
   final void Function(BuildContext context) showHistorySheet;
   final void Function(BuildContext context) showColorSheet;
+  final void Function(BuildContext context) showLayersSheet;
 }
 
 /// Owns panel-selection branching while the screen supplies snapshots/effects.
@@ -72,7 +74,8 @@ class CanvasWorkspacePanelActions {
     final selection = selectCanvasWorkspacePanel(
       panel: panel,
       wideDesktop: snapshot.wideDesktop,
-      tabletStudio: snapshot.tabletStudio,
+      studioTouchLayout: snapshot.studioTouchLayout,
+      compactPhone: snapshot.compactPhone,
       layout: snapshot.layout,
       leftGroups: snapshot.leftGroups,
       rightGroups: snapshot.rightGroups,
@@ -81,19 +84,26 @@ class CanvasWorkspacePanelActions {
 
     switch (selection.sheet) {
       case CanvasPanelSheet.color:
+        if (snapshot.compactPhone) {
+          host.setFloatingPanels(selection.floatingPanels);
+        }
         host.showColorSheet(context);
         return;
       case CanvasPanelSheet.quickAccess:
-        if (snapshot.tabletStudio) {
+        if (snapshot.studioTouchLayout) {
           host.setFloatingPanels(selection.floatingPanels);
         }
         host.showQuickAccessSheet(context);
         return;
       case CanvasPanelSheet.history:
-        if (snapshot.tabletStudio) {
+        if (snapshot.studioTouchLayout) {
           host.setFloatingPanels(selection.floatingPanels);
         }
         host.showHistorySheet(context);
+        return;
+      case CanvasPanelSheet.layers:
+        host.setFloatingPanels(selection.floatingPanels);
+        host.showLayersSheet(context);
         return;
       case null:
         break;
@@ -116,9 +126,7 @@ class CanvasWorkspacePanelActions {
     if (temporaryPalette != null) {
       host.selectTemporaryPalette(temporaryPalette);
     }
-    if (snapshot.tabletPlatform) {
-      host.rememberTabletPalette(snapshot.tabletMode);
-    }
+    host.rememberStudioPalette(snapshot.editorMode);
     host.persistLastDock(panel);
   }
 }

@@ -308,7 +308,7 @@ void main() {
           engine: engine,
           targetPlatform: TargetPlatform.iOS,
           workspacePreferences: const WorkspacePreferences(
-            tabletMode: TabletWorkspaceMode.studio,
+            editorMode: EditorMode.studio,
           ),
         ),
       ),
@@ -1013,111 +1013,112 @@ void main() {
     },
   );
 
-  testWidgets(
-    'native stylus packets stop at the page edge and the next stroke works',
-    (tester) async {
-      final engine = _RecordingPointerEngine();
-      final packets = StreamController<Uint8List>.broadcast();
-      addTearDown(packets.close);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: CanvasScreen(
-            engine: engine,
-            targetPlatform: TargetPlatform.macOS,
-            nativePointerPacketsOverride: packets.stream,
-          ),
+  testWidgets('native stylus resumes a separate segment after re-entry', (
+    tester,
+  ) async {
+    final engine = _RecordingPointerEngine();
+    final packets = StreamController<Uint8List>.broadcast();
+    addTearDown(packets.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.macOS,
+          nativePointerPacketsOverride: packets.stream,
         ),
-      );
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
 
-      final center = tester.getCenter(find.byType(CanvasScreen));
-      Uint8List packet(
-        InkPointerPhase phase,
-        Offset point,
-        int sequence, {
-        int flags = inkPointerActual,
-      }) => encodePointerPacket(
-        pointerId: 9,
-        device: InkPointerDevice.stylus,
-        phase: phase,
-        x: point.dx,
-        y: point.dy,
-        pressure: 1,
-        timestampNs: sequence * 1_000_000,
-        sequence: sequence,
-        flags: flags,
-      );
+    final center = tester.getCenter(find.byType(CanvasScreen));
+    Uint8List packet(
+      InkPointerPhase phase,
+      Offset point,
+      int sequence, {
+      int flags = inkPointerActual,
+    }) => encodePointerPacket(
+      pointerId: 9,
+      device: InkPointerDevice.stylus,
+      phase: phase,
+      x: point.dx,
+      y: point.dy,
+      pressure: 1,
+      timestampNs: sequence * 1_000_000,
+      sequence: sequence,
+      flags: flags,
+    );
 
-      packets.add(packet(InkPointerPhase.down, center, 1));
-      await tester.pump(const Duration(milliseconds: 20));
-      packets.add(
-        packet(InkPointerPhase.move, center + const Offset(10000, 0), 2),
-      );
-      await tester.pump(const Duration(milliseconds: 20));
-      for (var sequence = 3; sequence < 103; sequence++) {
-        packets.add(
-          packet(
-            InkPointerPhase.move,
-            center + Offset((10000 + sequence).toDouble(), 0),
-            sequence,
-          ),
-        );
-      }
-      packets.add(
-        packet(InkPointerPhase.up, center + const Offset(10103, 0), 103),
-      );
-      await tester.pump(const Duration(milliseconds: 300));
-
-      // Only the contact and first clipped edge sample reach the engine; the
-      // captured off-page stream is ignored, while release still closes it.
-      expect(engine.pushCount, 2);
-      expect(engine.endCount, 1);
-      expect(engine.cancelCount, 0);
-      expect(tester.takeException(), isNull);
-
-      final packetsAfterClippedStroke = engine.pushCount;
-      final samplesAfterClippedStroke = engine.positions.length;
-      packets.add(packet(InkPointerPhase.down, center, 104));
-      packets.add(
-        packet(InkPointerPhase.move, center + const Offset(12, 8), 105),
-      );
-      packets.add(
-        packet(InkPointerPhase.up, center + const Offset(16, 12), 106),
-      );
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(engine.beginCount, 2);
-      expect(engine.pushCount, greaterThan(packetsAfterClippedStroke));
-      expect(engine.positions.length, greaterThan(samplesAfterClippedStroke));
-      expect(engine.endCount, 2);
-
-      // A predicted point outside the page must not stop a confirmed stroke
-      // that continues inside the page.
-      final packetsBeforePredictedStroke = engine.pushCount;
-      packets.add(packet(InkPointerPhase.down, center, 107));
+    packets.add(packet(InkPointerPhase.down, center, 1));
+    await tester.pump(const Duration(milliseconds: 20));
+    packets.add(
+      packet(InkPointerPhase.move, center + const Offset(10000, 0), 2),
+    );
+    await tester.pump(const Duration(milliseconds: 20));
+    for (var sequence = 3; sequence < 103; sequence++) {
       packets.add(
         packet(
           InkPointerPhase.move,
-          center + const Offset(10000, 0),
-          108,
-          flags: inkPointerPredicted,
+          center + Offset((10000 + sequence).toDouble(), 0),
+          sequence,
         ),
       );
-      packets.add(
-        packet(InkPointerPhase.move, center + const Offset(20, 10), 109),
-      );
-      packets.add(
-        packet(InkPointerPhase.up, center + const Offset(30, 20), 110),
-      );
-      await tester.pump(const Duration(milliseconds: 300));
+    }
+    packets.add(
+      packet(InkPointerPhase.move, center + const Offset(20, 12), 103),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
 
-      expect(engine.beginCount, 3);
-      expect(engine.pushCount, greaterThan(packetsBeforePredictedStroke));
-      expect(engine.endCount, 3);
-      expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    // The captured off-page stream is ignored. Re-entry resumes the active
+    // stroke and sends a fresh in-page segment to the engine.
+    expect(engine.pushCount, 3);
+    expect(engine.positions.last, isNot(const Offset(0, 0)));
+    expect(engine.endCount, 0);
+    expect(engine.cancelCount, 0);
+    expect(tester.takeException(), isNull);
+
+    packets.add(packet(InkPointerPhase.up, center + const Offset(24, 16), 104));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(engine.pushCount, 4);
+    expect(engine.endCount, 1);
+
+    final packetsAfterClippedStroke = engine.pushCount;
+    final samplesAfterClippedStroke = engine.positions.length;
+    packets.add(packet(InkPointerPhase.down, center, 105));
+    packets.add(
+      packet(InkPointerPhase.move, center + const Offset(12, 8), 106),
+    );
+    packets.add(packet(InkPointerPhase.up, center + const Offset(16, 12), 107));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(engine.beginCount, 2);
+    expect(engine.pushCount, greaterThan(packetsAfterClippedStroke));
+    expect(engine.positions.length, greaterThan(samplesAfterClippedStroke));
+    expect(engine.endCount, 2);
+
+    // A predicted point outside the page must not stop a confirmed stroke
+    // that continues inside the page.
+    final packetsBeforePredictedStroke = engine.pushCount;
+    packets.add(packet(InkPointerPhase.down, center, 108));
+    packets.add(
+      packet(
+        InkPointerPhase.move,
+        center + const Offset(10000, 0),
+        109,
+        flags: inkPointerPredicted,
+      ),
+    );
+    packets.add(
+      packet(InkPointerPhase.move, center + const Offset(20, 10), 110),
+    );
+    packets.add(packet(InkPointerPhase.up, center + const Offset(30, 20), 111));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(engine.beginCount, 3);
+    expect(engine.pushCount, greaterThan(packetsBeforePredictedStroke));
+    expect(engine.endCount, 3);
+    expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'native stylus preview continues from the gray page margin onto the page',
@@ -1183,81 +1184,76 @@ void main() {
     },
   );
 
-  testWidgets(
-    'native coalesced batch stops at its first confirmed page-edge crossing',
-    (tester) async {
-      final engine = _RecordingPointerEngine();
-      final packets = StreamController<Uint8List>.broadcast();
-      addTearDown(packets.close);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: CanvasScreen(
-            engine: engine,
-            targetPlatform: TargetPlatform.macOS,
-            nativePointerPacketsOverride: packets.stream,
+  testWidgets('native coalesced batch resumes after a page-edge crossing', (
+    tester,
+  ) async {
+    final engine = _RecordingPointerEngine();
+    final packets = StreamController<Uint8List>.broadcast();
+    addTearDown(packets.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.macOS,
+          nativePointerPacketsOverride: packets.stream,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final center = tester.getCenter(find.byType(CanvasScreen));
+    Uint8List packet(InkPointerPhase phase, Offset point, int sequence) =>
+        encodePointerPacket(
+          pointerId: 10,
+          device: InkPointerDevice.stylus,
+          phase: phase,
+          x: point.dx,
+          y: point.dy,
+          pressure: 1,
+          timestampNs: sequence * 1_000_000,
+          sequence: sequence,
+        );
+
+    Uint8List batch(List<Uint8List> samples) {
+      final bytes = Uint8List(4 + samples.length * 48);
+      final data = ByteData.sublistView(bytes);
+      data.setUint16(0, 1, Endian.little);
+      data.setUint16(2, samples.length, Endian.little);
+      for (var index = 0; index < samples.length; index++) {
+        bytes.setRange(4 + index * 48, 4 + (index + 1) * 48, samples[index], 4);
+      }
+      return bytes;
+    }
+
+    packets.add(packet(InkPointerPhase.down, center, 1));
+    await tester.pump(const Duration(milliseconds: 20));
+    packets.add(
+      batch([
+        packet(InkPointerPhase.move, center + const Offset(12, 8), 2),
+        packet(InkPointerPhase.move, center + const Offset(10000, 0), 3),
+        ...List<Uint8List>.generate(
+          80,
+          (index) => packet(
+            InkPointerPhase.move,
+            center + Offset(10001 + index.toDouble(), 0),
+            4 + index,
           ),
         ),
-      );
-      await tester.pump();
+        packet(InkPointerPhase.move, center + const Offset(24, 16), 84),
+      ]),
+    );
+    await tester.pump(const Duration(milliseconds: 30));
+    packets.add(
+      packet(InkPointerPhase.up, center + const Offset(10100, 0), 85),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
 
-      final center = tester.getCenter(find.byType(CanvasScreen));
-      Uint8List packet(InkPointerPhase phase, Offset point, int sequence) =>
-          encodePointerPacket(
-            pointerId: 10,
-            device: InkPointerDevice.stylus,
-            phase: phase,
-            x: point.dx,
-            y: point.dy,
-            pressure: 1,
-            timestampNs: sequence * 1_000_000,
-            sequence: sequence,
-          );
-
-      Uint8List batch(List<Uint8List> samples) {
-        final bytes = Uint8List(4 + samples.length * 48);
-        final data = ByteData.sublistView(bytes);
-        data.setUint16(0, 1, Endian.little);
-        data.setUint16(2, samples.length, Endian.little);
-        for (var index = 0; index < samples.length; index++) {
-          bytes.setRange(
-            4 + index * 48,
-            4 + (index + 1) * 48,
-            samples[index],
-            4,
-          );
-        }
-        return bytes;
-      }
-
-      packets.add(packet(InkPointerPhase.down, center, 1));
-      await tester.pump(const Duration(milliseconds: 20));
-      packets.add(
-        batch([
-          packet(InkPointerPhase.move, center + const Offset(12, 8), 2),
-          packet(InkPointerPhase.move, center + const Offset(10000, 0), 3),
-          ...List<Uint8List>.generate(
-            80,
-            (index) => packet(
-              InkPointerPhase.move,
-              center + Offset(10001 + index.toDouble(), 0),
-              4 + index,
-            ),
-          ),
-        ]),
-      );
-      await tester.pump(const Duration(milliseconds: 30));
-      packets.add(
-        packet(InkPointerPhase.up, center + const Offset(10100, 0), 84),
-      );
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(engine.sampleCounts, <int>[1, 2]);
-      expect(engine.endCount, 1);
-      expect(engine.cancelCount, 0);
-      expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(engine.sampleCounts, <int>[1, 2, 1, 1]);
+    expect(engine.endCount, 1);
+    expect(engine.cancelCount, 0);
+    expect(find.bySemanticsLabel('Drawing canvas'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('a new press recovers if an off-window stroke missed release', (
     tester,

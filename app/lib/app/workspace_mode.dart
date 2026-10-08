@@ -1,14 +1,15 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-/// Layout density selected by the editor shell.  It is deliberately separate
-/// from document state so a project can move between an iPad, desktop, and
-/// split-screen window without changing its data.
-enum WorkspaceMode { compactTouch, expandedTouch, desktop }
+/// Responsive canvas shell selected from the host and viewport.
+///
+/// This is separate from the Simple/Studio editor mode and the chosen
+/// workspace layout preset. It never changes document state.
+enum CanvasLayoutMode { compactTouch, expandedTouch, desktop }
 
-WorkspaceMode resolveWorkspaceMode(
+CanvasLayoutMode resolveCanvasLayoutMode(
   BuildContext context, {
-  WorkspaceMode? override,
+  CanvasLayoutMode? override,
   bool desktopDockEnabled = false,
   TargetPlatform? targetPlatform,
 }) {
@@ -23,7 +24,9 @@ WorkspaceMode resolveWorkspaceMode(
   // must never force a tablet or phone into desktop density. This matters for
   // iPad/Android hosts that share the same Flutter shell with macOS/Windows.
   if (desktopPlatform && (desktopDockEnabled || desktopPlatform)) {
-    return WorkspaceMode.desktop;
+    return CanvasLayoutMode.desktop;
   }
-  return width < 600 ? WorkspaceMode.compactTouch : WorkspaceMode.expandedTouch;
+  return width < 600
+      ? CanvasLayoutMode.compactTouch
+      : CanvasLayoutMode.expandedTouch;
 }

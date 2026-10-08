@@ -10,17 +10,19 @@ class NativePencilPacketObservation {
   const NativePencilPacketObservation({
     this.crossingSampleCount,
     this.crossingPosition,
+    this.reentrySampleIndex,
   });
 
   final int? crossingSampleCount;
   final Offset? crossingPosition;
+  final int? reentrySampleIndex;
 }
 
 /// Per-stroke diagnostics and page-edge detection for confirmed Pencil input.
 ///
-/// Rust still clips the committed raster. This tracker stops queuing samples
-/// after the first confirmed exit while retaining the crossing sample so Rust
-/// can finish the visible segment.
+/// Rust still clips the committed raster. This tracker stops queuing off-page
+/// samples after a confirmed exit while retaining the crossing sample, and
+/// identifies the first confirmed sample after the pointer re-enters.
 class NativePencilPacketMetrics {
   int packetCount = 0;
   int sampleCount = 0;
@@ -39,8 +41,8 @@ class NativePencilPacketMetrics {
   void clearPageContact() => lastConfirmedSampleInside = false;
 
   /// Records packet accounting and returns the first crossing sample index.
-  /// [captureAlreadyEnded] keeps later captured packets from moving the
-  /// boundary tracker back into the document.
+  /// [captureAlreadyEnded] suppresses another exit notification while still
+  /// tracking confirmed re-entry.
   NativePencilPacketObservation observePacket(
     Uint8List packet, {
     required bool captureAlreadyEnded,
@@ -51,10 +53,10 @@ class NativePencilPacketMetrics {
     final count = data.getUint16(2, Endian.little);
     packetCount++;
     sampleCount += count;
-    if (captureAlreadyEnded) return const NativePencilPacketObservation();
-
     int? crossingSampleCount;
     Offset? crossingPosition;
+    int? reentrySampleIndex;
+    var outsideGap = captureAlreadyEnded;
     for (var index = 0; index < count; index++) {
       final offset = 4 + index * 48;
       final flags = data.getUint16(offset + 4, Endian.little);
@@ -73,14 +75,20 @@ class NativePencilPacketMetrics {
                       inkPointerPalmRejected) ==
               0;
       if (confirmed &&
+          !captureAlreadyEnded &&
           phase != InkPointerPhase.down.index &&
           lastConfirmedSampleInside &&
           !inside &&
           crossingSampleCount == null) {
         crossingSampleCount = index + 1;
         crossingPosition = position;
+        outsideGap = true;
       }
       if (confirmed) {
+        if (outsideGap && inside && reentrySampleIndex == null) {
+          reentrySampleIndex = index;
+          outsideGap = false;
+        }
         lastConfirmedSampleInside = inside;
         if (pressure.isFinite) {
           minPressure = math.min(minPressure, pressure);
@@ -91,6 +99,7 @@ class NativePencilPacketMetrics {
     return NativePencilPacketObservation(
       crossingSampleCount: crossingSampleCount,
       crossingPosition: crossingPosition,
+      reentrySampleIndex: reentrySampleIndex,
     );
   }
 }

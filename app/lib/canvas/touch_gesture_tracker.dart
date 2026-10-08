@@ -7,13 +7,16 @@ import 'touch_gesture_classifier.dart';
 /// Tracks a touch sequence and emits classified gestures without owning the
 /// actions those gestures invoke.
 class TouchGestureTracker {
+  static const double _tapMovementTolerance = 24;
+  static const double _threeFingerTapMovementTolerance = 32;
+
   final Map<int, Offset> _starts = <int, Offset>{};
   final Map<int, Offset> _current = <int, Offset>{};
   final Set<int> _activePointers = <int>{};
   Timer? _longPressTimer;
-  DateTime? _startedAt;
+  Stopwatch? _sequenceClock;
   int _maximumTouchCount = 0;
-  bool _moved = false;
+  double _maximumPointerMovement = 0;
   bool _gestureTriggered = false;
   Offset? _gesturePosition;
 
@@ -21,7 +24,11 @@ class TouchGestureTracker {
   int get trackedPointerCount => _starts.length;
   int get maximumTouchCount => _maximumTouchCount;
   bool get hasMultipleTouches => _starts.length > 1;
-  bool get moved => _moved;
+  bool get moved =>
+      _maximumPointerMovement >
+      (_maximumTouchCount >= 3
+          ? _threeFingerTapMovementTolerance
+          : _tapMovementTolerance);
   bool get gestureTriggered => _gestureTriggered;
   Offset? get gesturePosition => _gesturePosition;
   Iterable<int> get activePointerIds => List<int>.unmodifiable(_activePointers);
@@ -33,11 +40,18 @@ class TouchGestureTracker {
     required VoidCallback onSecondFingerWhileDrawing,
     required ValueChanged<Offset?> onLongPress,
     required ValueChanged<TouchGestureKind> onGesture,
+    void Function(
+      TouchGestureKind? gesture,
+      Duration duration,
+      bool moved,
+      int pointerCount,
+    )?
+    onSequenceCompleted,
   }) {
     if (event is PointerDownEvent) {
       if (_starts.isEmpty) {
-        _startedAt = DateTime.now();
-        _moved = false;
+        _sequenceClock = Stopwatch()..start();
+        _maximumPointerMovement = 0;
         _maximumTouchCount = 0;
         _gestureTriggered = false;
         _gesturePosition = event.localPosition;
@@ -55,7 +69,7 @@ class TouchGestureTracker {
       if (_starts.length == 1) {
         _longPressTimer = Timer(const Duration(milliseconds: 550), () {
           if (_activePointers.length == 1 &&
-              !_moved &&
+              !moved &&
               !touchDrawingStrokeActive() &&
               !_gestureTriggered) {
             _gestureTriggered = true;
@@ -70,9 +84,12 @@ class TouchGestureTracker {
     if (event is PointerMoveEvent) {
       _current[event.pointer] = event.localPosition;
       final start = _starts[event.pointer];
-      if (start != null && (event.localPosition - start).distance > 12) {
-        _moved = true;
-        _longPressTimer?.cancel();
+      if (start != null) {
+        final movement = (event.localPosition - start).distance;
+        if (movement > _maximumPointerMovement) {
+          _maximumPointerMovement = movement;
+        }
+        if (moved) _longPressTimer?.cancel();
       }
       return;
     }
@@ -80,17 +97,18 @@ class TouchGestureTracker {
     if (event is PointerUpEvent || event is PointerCancelEvent) {
       _current[event.pointer] = event.localPosition;
       _activePointers.remove(event.pointer);
-      if (_activePointers.isNotEmpty || _startedAt == null) return;
+      if (_activePointers.isNotEmpty || _sequenceClock == null) return;
 
       _longPressTimer?.cancel();
-      final startedAt = _startedAt!;
+      final duration = _sequenceClock!.elapsed;
       if (!_gestureTriggered) {
         final gesture = classifyTouchGesture(
           starts: _starts,
           ends: _current,
-          duration: DateTime.now().difference(startedAt),
-          moved: _moved,
+          duration: duration,
+          moved: moved,
         );
+        onSequenceCompleted?.call(gesture, duration, moved, _maximumTouchCount);
         if (gesture != null) onGesture(gesture);
       }
       _resetSequence();
@@ -109,9 +127,10 @@ class TouchGestureTracker {
     _starts.clear();
     _current.clear();
     _maximumTouchCount = 0;
-    _startedAt = null;
+    _sequenceClock?.stop();
+    _sequenceClock = null;
     _gestureTriggered = false;
-    _moved = false;
+    _maximumPointerMovement = 0;
     _gesturePosition = null;
   }
 

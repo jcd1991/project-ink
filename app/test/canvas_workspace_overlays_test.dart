@@ -4,6 +4,66 @@ import 'package:project_ink/canvas/canvas_floating_panel_visibility.dart';
 import 'package:project_ink/canvas/canvas_workspace_overlays.dart';
 
 void main() {
+  testWidgets('phone Studio palettes use a wide dismissible bottom sheet', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var closed = false;
+    var canvasPointerDowns = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: [
+              Positioned.fill(
+                child: Listener(
+                  onPointerDown: (_) => canvasPointerDowns++,
+                  child: const ColoredBox(color: Colors.white),
+                ),
+              ),
+              CanvasWorkspaceOverlays(
+                overlays: [
+                  CanvasWorkspaceOverlay(
+                    title: 'Layers',
+                    visible: true,
+                    width: 280,
+                    studioWidth: 360,
+                    rightAligned: true,
+                    onClose: () => closed = true,
+                    child: const SizedBox(key: Key('layers-content')),
+                  ),
+                ],
+                interfaceHidden: false,
+                desktopDock: false,
+                studioTouchLayout: false,
+                phoneLayout: true,
+                safeAreaTop: 0,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    final panelRect = tester.getRect(
+      find.byKey(const Key('canvas-workspace-overlay-Layers')),
+    );
+    expect(panelRect.left, 12);
+    expect(panelRect.right, 378);
+    expect(panelRect.top, greaterThan(300));
+    expect(panelRect.height, greaterThan(500));
+    expect(find.byKey(const Key('canvas-phone-panel-barrier')), findsOneWidget);
+
+    await tester.tapAt(const Offset(30, 100));
+    await tester.pumpAndSettle();
+    expect(closed, isTrue);
+    expect(canvasPointerDowns, 0);
+  });
+
   testWidgets('floating panel close publishes an updated visibility value', (
     tester,
   ) async {
@@ -17,7 +77,7 @@ void main() {
             onVisibilityChanged: (next) => published = next,
             interfaceHidden: false,
             desktopDock: false,
-            tabletStudioMode: false,
+            studioTouchLayout: false,
             safeAreaTop: 0,
             tools: const SizedBox(key: Key('tools-content')),
             brushes: const SizedBox(key: Key('brushes-content')),
@@ -81,7 +141,7 @@ void main() {
                   ],
                   interfaceHidden: false,
                   desktopDock: false,
-                  tabletStudioMode: false,
+                  studioTouchLayout: false,
                   safeAreaTop: 10,
                 ),
               ],
@@ -148,7 +208,7 @@ void main() {
                   ],
                   interfaceHidden: false,
                   desktopDock: false,
-                  tabletStudioMode: false,
+                  studioTouchLayout: false,
                   leftHanded: true,
                   safeAreaTop: 0,
                 ),
@@ -197,7 +257,7 @@ void main() {
               ],
               interfaceHidden: configuration.interfaceHidden,
               desktopDock: configuration.desktopDock,
-              tabletStudioMode: false,
+              studioTouchLayout: false,
               safeAreaTop: 0,
             ),
           ),

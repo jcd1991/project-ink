@@ -2,6 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+/// Resolves automatic workspace selection from the owning document type.
+/// Illustration panel metadata is still an illustration document and should
+/// not move the user into the multi-page Comic workspace.
+String canvasWorkspaceForDocument({
+  required bool hasProject,
+  required bool isIllustrationPanelProject,
+}) => !hasProject || isIllustrationPanelProject ? 'illustration' : 'comic';
+
 /// Owns listener registration and frame-coalesced workspace-change handling.
 ///
 /// The route supplies the comic-page and document-type projections because it

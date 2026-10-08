@@ -38,7 +38,8 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
     required this.overlays,
     required this.interfaceHidden,
     required this.desktopDock,
-    required this.tabletStudioMode,
+    required this.studioTouchLayout,
+    this.phoneLayout = false,
     this.leftHanded = false,
     required this.safeAreaTop,
     super.key,
@@ -47,48 +48,79 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
   final List<CanvasWorkspaceOverlay> overlays;
   final bool interfaceHidden;
   final bool desktopDock;
-  final bool tabletStudioMode;
+  final bool studioTouchLayout;
+  final bool phoneLayout;
   final bool leftHanded;
   final double safeAreaTop;
 
   @override
   Widget build(BuildContext context) {
     final canShowPanels = !interfaceHidden && !desktopDock;
-    final studioOffset = tabletStudioMode ? 60.0 : 72.0;
+    final studioOffset = studioTouchLayout ? 60.0 : 72.0;
     final top = safeAreaTop + studioOffset;
-    final availableWidth = MediaQuery.sizeOf(context).width;
+    final size = MediaQuery.sizeOf(context);
+    final availableWidth = size.width;
+    final availableHeight = size.height;
     final leftInset =
-        tabletStudioMode
+        studioTouchLayout
             ? (leftHanded ? 92.0 : 60.0)
             : (leftHanded ? 12.0 : 84.0);
     final rightInset =
-        tabletStudioMode
+        studioTouchLayout
             ? (leftHanded ? 60.0 : 92.0)
             : (leftHanded ? 84.0 : 12.0);
+    final visibleOverlays = overlays.where((overlay) => overlay.visible);
     return Stack(
       fit: StackFit.expand,
       children: [
+        if (canShowPanels && phoneLayout && visibleOverlays.isNotEmpty)
+          Positioned.fill(
+            child: GestureDetector(
+              key: const Key('canvas-phone-panel-barrier'),
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                for (final overlay in visibleOverlays) {
+                  overlay.onClose();
+                }
+              },
+              child: ColoredBox(color: Colors.black.withValues(alpha: 0.28)),
+            ),
+          ),
         if (canShowPanels)
           for (final overlay in overlays)
             if (overlay.visible)
               Positioned(
-                left: overlay.rightAligned ? null : leftInset,
-                right: overlay.rightAligned ? rightInset : null,
-                top: top,
+                left:
+                    phoneLayout
+                        ? 12
+                        : (overlay.rightAligned ? null : leftInset),
+                right:
+                    phoneLayout
+                        ? 12
+                        : (overlay.rightAligned ? rightInset : null),
+                top:
+                    phoneLayout
+                        ? math.max(safeAreaTop + 12, availableHeight * 0.38)
+                        : top,
                 bottom: MediaQuery.paddingOf(context).bottom + 12,
-                width: math.min(
-                  tabletStudioMode && availableWidth < 1000
-                      ? math.min(overlay.studioWidth, 300)
-                      : tabletStudioMode
-                      ? overlay.studioWidth
-                      : overlay.width,
-                  math.max(
-                    0.0,
-                    availableWidth -
-                        (overlay.rightAligned ? rightInset : leftInset) -
-                        12.0,
-                  ),
-                ),
+                width:
+                    phoneLayout
+                        ? null
+                        : math.min(
+                          studioTouchLayout && availableWidth < 1000
+                              ? math.min(overlay.studioWidth, 300)
+                              : studioTouchLayout
+                              ? overlay.studioWidth
+                              : overlay.width,
+                          math.max(
+                            0.0,
+                            availableWidth -
+                                (overlay.rightAligned
+                                    ? rightInset
+                                    : leftInset) -
+                                12.0,
+                          ),
+                        ),
                 child: _buildPanel(overlay),
               ),
       ],
@@ -99,7 +131,7 @@ class CanvasWorkspaceOverlays extends StatelessWidget {
     final panel = CanvasToolPanel(
       key: ValueKey('canvas-workspace-overlay-${overlay.title}'),
       title: overlay.title,
-      docked: tabletStudioMode,
+      docked: studioTouchLayout,
       onClose: overlay.onClose,
       child: overlay.child,
     );
@@ -124,7 +156,8 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
     required this.onVisibilityChanged,
     required this.interfaceHidden,
     required this.desktopDock,
-    required this.tabletStudioMode,
+    required this.studioTouchLayout,
+    this.phoneLayout = false,
     this.leftHanded = false,
     required this.safeAreaTop,
     required this.tools,
@@ -139,7 +172,8 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
   final ValueChanged<CanvasFloatingPanelVisibility> onVisibilityChanged;
   final bool interfaceHidden;
   final bool desktopDock;
-  final bool tabletStudioMode;
+  final bool studioTouchLayout;
+  final bool phoneLayout;
   final bool leftHanded;
   final double safeAreaTop;
   final Widget tools;
@@ -157,7 +191,8 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
   Widget build(BuildContext context) => CanvasWorkspaceOverlays(
     interfaceHidden: interfaceHidden,
     desktopDock: desktopDock,
-    tabletStudioMode: tabletStudioMode,
+    studioTouchLayout: studioTouchLayout,
+    phoneLayout: phoneLayout,
     leftHanded: leftHanded,
     safeAreaTop: safeAreaTop,
     overlays: [
@@ -200,7 +235,7 @@ class CanvasFloatingWorkspacePanels extends StatelessWidget {
         width: 280,
         studioWidth: 360,
         rightAligned: true,
-        semanticsLabel: tabletStudioMode ? 'Studio palette dock' : 'Layers',
+        semanticsLabel: studioTouchLayout ? 'Studio palette dock' : 'Layers',
         onClose: () => _close(CanvasFloatingPanel.layers),
         child: layers,
       ),

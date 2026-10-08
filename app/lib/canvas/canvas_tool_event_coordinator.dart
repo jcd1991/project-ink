@@ -35,6 +35,7 @@ class CanvasToolEventHost {
     required this.toolActions,
     required this.markDirty,
     required this.onSelectionCleared,
+    this.panelToolEvent,
   });
 
   final EngineApi Function() engine;
@@ -49,6 +50,8 @@ class CanvasToolEventHost {
   final CanvasToolActions toolActions;
   final void Function({bool restartTimer}) markDirty;
   final VoidCallback onSelectionCleared;
+  final Future<void> Function(PointerEvent event, Offset documentPosition)?
+  panelToolEvent;
 }
 
 /// Owns pointer sampling and command dispatch for non-brush canvas tools.
@@ -119,6 +122,7 @@ class CanvasToolEventCoordinator {
 
   Future<void> handleEvent(PointerEvent event) async {
     if (event is PointerCancelEvent) {
+      await host.panelToolEvent?.call(event, Offset.zero);
       resetTransientState();
       if (host.mounted()) {
         host.updateState(() {
@@ -132,6 +136,10 @@ class CanvasToolEventCoordinator {
     final isUp = event is PointerUpEvent;
     final position = host.canvasPosition(event.localPosition);
     final activeTool = host.activeTool();
+    if (activeTool == IllustrationTool.panel) {
+      await host.panelToolEvent?.call(event, position);
+      return;
+    }
     final isRuler = activeTool.name.endsWith('Ruler');
     final isPerspectiveTransform =
         activeTool == IllustrationTool.perspectiveTransform;

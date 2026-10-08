@@ -7,6 +7,7 @@ import 'package:project_ink/canvas/gesture_defaults.dart';
 void main() {
   test('records touch chords and routes their configured command', () {
     final actions = <EditorActionId>[];
+    final diagnostics = <Map<String, Object?>>[];
     final coordinator = CanvasGestureCoordinator(
       CanvasGestureActionHost(
         defaults: () => const GestureDefaults(),
@@ -16,6 +17,10 @@ void main() {
         sampleColor: (_) {},
         enableStraighten: () {},
         enableConstrain: () {},
+        recordDiagnostic: (event, fields) {
+          expect(event, 'input.touch_gesture_classified');
+          diagnostics.add(fields);
+        },
       ),
     );
 
@@ -41,8 +46,52 @@ void main() {
     );
 
     expect(actions, [EditorActionId.undo]);
+    expect(diagnostics, [
+      {'gesture': 'twoFingerTap', 'binding': 'twoFingerTap', 'action': 'undo'},
+    ]);
     expect(coordinator.activePointerCount, 0);
     expect(coordinator.trackedPointerCount, 0);
+    coordinator.dispose();
+  });
+
+  test('routes a completed three-finger tap to Redo', () {
+    final actions = <EditorActionId>[];
+    final coordinator = CanvasGestureCoordinator(
+      CanvasGestureActionHost(
+        defaults: () => const GestureDefaults(),
+        isMounted: () => true,
+        dispatchEditorAction: actions.add,
+        showClipboardPalette: () {},
+        sampleColor: (_) {},
+        enableStraighten: () {},
+        enableConstrain: () {},
+      ),
+    );
+
+    for (var pointer = 1; pointer <= 3; pointer++) {
+      coordinator.record(
+        PointerDownEvent(
+          pointer: pointer,
+          position: Offset(pointer * 12, 20),
+          kind: PointerDeviceKind.touch,
+        ),
+        strokeActive: false,
+        touchDrawingStrokeActive: () => false,
+      );
+    }
+    for (var pointer = 1; pointer <= 3; pointer++) {
+      coordinator.record(
+        PointerUpEvent(
+          pointer: pointer,
+          position: Offset(pointer * 12, 20),
+          kind: PointerDeviceKind.touch,
+        ),
+        strokeActive: false,
+        touchDrawingStrokeActive: () => false,
+      );
+    }
+
+    expect(actions, [EditorActionId.redo]);
     coordinator.dispose();
   });
 

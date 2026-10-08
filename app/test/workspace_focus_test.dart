@@ -16,7 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class _FocusComicController extends ComicWorkspaceController {
   @override
-  Future<void> ensureExampleLoaded() async {}
+  Future<void> ensureProjectLoaded() async {}
 }
 
 class _BrushSettingsCall {
@@ -142,7 +142,7 @@ void main() {
       await _pumpWorkspace(
         tester,
         const WorkspacePreferences(
-          tabletMode: TabletWorkspaceMode.studio,
+          editorMode: EditorMode.studio,
           followDocumentType: false,
         ),
       );
@@ -197,7 +197,7 @@ void main() {
     await _pumpWorkspace(
       tester,
       const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.simple,
+        editorMode: EditorMode.simple,
         followDocumentType: false,
       ),
       engine: engine,
@@ -231,7 +231,7 @@ void main() {
     await _pumpWorkspace(
       tester,
       const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.studio,
+        editorMode: EditorMode.studio,
         followDocumentType: false,
       ),
       engine: engine,
@@ -267,7 +267,7 @@ void main() {
     await _pumpWorkspace(
       tester,
       const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.simple,
+        editorMode: EditorMode.simple,
         followDocumentType: false,
       ),
       engine: engine,
@@ -312,7 +312,7 @@ void main() {
     await _pumpWorkspace(
       tester,
       const WorkspacePreferences(
-        tabletMode: TabletWorkspaceMode.simple,
+        editorMode: EditorMode.simple,
         followDocumentType: false,
       ),
       engine: engine,
@@ -362,7 +362,7 @@ Future<void> _pumpWorkspace(
               comicWorkspaceController: _FocusComicController(),
               targetPlatform: TargetPlatform.iOS,
               desktopDockEnabled: true,
-              workspaceModeOverride: WorkspaceMode.expandedTouch,
+              layoutModeOverride: CanvasLayoutMode.expandedTouch,
               workspacePreferences: activePreferences,
               onWorkspacePreferencesChanged:
                   (next) => setState(() => activePreferences = next),

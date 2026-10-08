@@ -68,7 +68,7 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
   void initState() {
     super.initState();
     widget.controller.addListener(_changed);
-    unawaited(widget.controller.ensureExampleLoaded());
+    unawaited(widget.controller.ensureProjectLoaded());
   }
 
   @override
@@ -77,7 +77,7 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller.removeListener(_changed);
       widget.controller.addListener(_changed);
-      unawaited(widget.controller.ensureExampleLoaded());
+      unawaited(widget.controller.ensureProjectLoaded());
     }
   }
 
@@ -434,6 +434,37 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
     );
   }
 
+  Future<void> _confirmRemovePanel(
+    int pageIndex,
+    rust.ComicPanelPreviewView panel,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (dialogContext) => AlertDialog(
+            title: const Text('Remove panel?'),
+            content: const Text(
+              'This removes the panel guide and its applied frame. Artwork layers stay in the project, and linked dialogue becomes page-level text. You can undo this change.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Remove panel'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
+    await widget.controller.removePanel(
+      pageIndex: pageIndex,
+      panelId: panel.id,
+    );
+  }
+
   Future<void> _editPageLayout(int pageIndex, rust.ComicPageView page) async {
     final draft = await showDialog<_PageLayoutDraft>(
       context: context,
@@ -648,7 +679,9 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
                       title: snapshot?.title ?? 'Comic workspace',
                       subtitle:
                           snapshot == null
-                              ? 'Loading example…'
+                              ? widget.controller.loading
+                                  ? 'Loading comic project…'
+                                  : 'Start with a blank page'
                               : '${snapshot.pageCount} pages',
                       leading: const Icon(Icons.auto_stories),
                       actions: [
@@ -1099,6 +1132,7 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
                         controller: widget.controller,
                         onEditPageLayout: _editPageLayout,
                         onEditPanelBounds: _editPanelBounds,
+                        onRemovePanel: _confirmRemovePanel,
                         onEditDialogue: _editDialogue,
                         onEditPanelPolygon: _editPanelPolygon,
                         onDrawInsidePanel: widget.onDrawInsidePanel,
@@ -1397,6 +1431,7 @@ class _ComicPageInspector extends StatelessWidget {
     required this.controller,
     required this.onEditPageLayout,
     required this.onEditPanelBounds,
+    required this.onRemovePanel,
     this.onDrawInsidePanel,
     required this.onEditDialogue,
     required this.onEditPanelPolygon,
@@ -1418,6 +1453,8 @@ class _ComicPageInspector extends StatelessWidget {
   onEditPageLayout;
   final Future<void> Function(int pageIndex, rust.ComicPanelPreviewView panel)
   onEditPanelBounds;
+  final Future<void> Function(int pageIndex, rust.ComicPanelPreviewView panel)
+  onRemovePanel;
   final Future<void> Function(int pageIndex, rust.ComicPanelPreviewView panel)?
   onDrawInsidePanel;
   final Future<void> Function(
@@ -1551,6 +1588,12 @@ class _ComicPageInspector extends StatelessWidget {
                                         () =>
                                             onEditPanelBounds(pageIndex, panel),
                                   ),
+                                InkCommandButton(
+                                  label: 'Remove panel',
+                                  icon: Icons.delete_outline,
+                                  onPressed:
+                                      () => onRemovePanel(pageIndex, panel),
+                                ),
                                 InkCommandButton(
                                   label: 'Edit panel polygon',
                                   icon: Icons.edit_location_alt_outlined,

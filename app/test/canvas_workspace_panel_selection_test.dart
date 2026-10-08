@@ -41,7 +41,7 @@ void main() {
     final selection = selectCanvasWorkspacePanel(
       panel: 'layers',
       wideDesktop: false,
-      tabletStudio: false,
+      studioTouchLayout: false,
       layout: illustrationWorkspace,
       leftGroups: const [],
       rightGroups: const [],
@@ -53,11 +53,43 @@ void main() {
     expect(selection.sheet, isNull);
   });
 
+  test('phone Layers uses a sheet and clears floating panels', () {
+    final selection = selectCanvasWorkspacePanel(
+      panel: 'layers',
+      wideDesktop: false,
+      studioTouchLayout: false,
+      compactPhone: true,
+      layout: illustrationWorkspace,
+      leftGroups: const [],
+      rightGroups: const [],
+      floatingPanels: const CanvasFloatingPanelVisibility(tools: true),
+    );
+
+    expect(selection.sheet, CanvasPanelSheet.layers);
+    expect(selection.floatingPanels.lastVisiblePanel, isNull);
+  });
+
+  test('phone Color uses its compact picker sheet', () {
+    final selection = selectCanvasWorkspacePanel(
+      panel: 'color',
+      wideDesktop: false,
+      studioTouchLayout: false,
+      compactPhone: true,
+      layout: illustrationWorkspace,
+      leftGroups: const [],
+      rightGroups: const [],
+      floatingPanels: const CanvasFloatingPanelVisibility(layers: true),
+    );
+
+    expect(selection.sheet, CanvasPanelSheet.color);
+    expect(selection.floatingPanels.lastVisiblePanel, isNull);
+  });
+
   test('Studio selection is exclusive and reselecting the panel closes it', () {
     final first = selectCanvasWorkspacePanel(
       panel: 'layers',
       wideDesktop: false,
-      tabletStudio: true,
+      studioTouchLayout: true,
       layout: illustrationWorkspace,
       leftGroups: const [],
       rightGroups: const [],
@@ -66,7 +98,7 @@ void main() {
     final second = selectCanvasWorkspacePanel(
       panel: 'layers',
       wideDesktop: false,
-      tabletStudio: true,
+      studioTouchLayout: true,
       layout: illustrationWorkspace,
       leftGroups: const [],
       rightGroups: const [],
@@ -82,7 +114,7 @@ void main() {
     final selection = selectCanvasWorkspacePanel(
       panel: 'history',
       wideDesktop: false,
-      tabletStudio: true,
+      studioTouchLayout: true,
       layout: illustrationWorkspace,
       leftGroups: const [],
       rightGroups: const [],
@@ -97,7 +129,7 @@ void main() {
     final selection = selectCanvasWorkspacePanel(
       panel: 'color',
       wideDesktop: false,
-      tabletStudio: true,
+      studioTouchLayout: true,
       layout: illustrationWorkspace,
       leftGroups: const [],
       rightGroups: const [],
@@ -124,7 +156,7 @@ void main() {
     final selection = selectCanvasWorkspacePanel(
       panel: 'comics',
       wideDesktop: true,
-      tabletStudio: false,
+      studioTouchLayout: false,
       layout: illustrationWorkspace,
       leftGroups: leftGroups,
       rightGroups: rightGroups,
@@ -145,7 +177,7 @@ void main() {
     final selection = selectCanvasWorkspacePanel(
       panel: 'layers',
       wideDesktop: true,
-      tabletStudio: false,
+      studioTouchLayout: false,
       layout: layout,
       leftGroups: const [],
       rightGroups: const [],

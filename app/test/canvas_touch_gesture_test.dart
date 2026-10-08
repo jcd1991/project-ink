@@ -937,7 +937,7 @@ void main() {
     expect(find.text('Quick Access'), findsOneWidget);
     expect(find.text('History'), findsOneWidget);
     expect(find.text('Tools & Color'), findsOneWidget);
-    expect(find.text('Workspace'), findsOneWidget);
+    expect(find.text('Workspace layout'), findsOneWidget);
     await tester.tap(find.byTooltip('All palettes').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Color').last);
@@ -1022,7 +1022,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Workspace').first);
+    await tester.tap(find.byTooltip('Workspace layout').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Customize command bar…'));
     await tester.pumpAndSettle();
@@ -1320,7 +1320,7 @@ void main() {
       onWorkspacePreferencesChanged: (preferences) => updated = preferences,
     );
 
-    await tester.tap(find.byTooltip('Workspace'));
+    await tester.tap(find.byTooltip('Workspace layout'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Reset current workspace layout…'));
     await tester.pumpAndSettle();

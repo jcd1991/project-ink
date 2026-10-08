@@ -4,6 +4,23 @@ import 'package:project_ink/app/workspace_mode.dart';
 import 'package:project_ink/app/workspace_preferences.dart';
 
 void main() {
+  test('Simple and Studio preference migrates from the tablet-only key', () {
+    final legacy = WorkspacePreferences.fromJson({'tablet_mode': 'studio'});
+    expect(legacy.editorMode, EditorMode.studio);
+
+    final current =
+        const WorkspacePreferences(editorMode: EditorMode.simple).toJson();
+    expect(current['editor_mode'], 'simple');
+    expect(current['tablet_mode'], 'simple');
+    expect(
+      WorkspacePreferences.fromJson({
+        'editor_mode': 'simple',
+        'tablet_mode': 'studio',
+      }).editorMode,
+      EditorMode.simple,
+    );
+  });
+
   test('malformed workspace values fail closed to bounded defaults', () {
     final preferences = WorkspacePreferences.fromJson({
       'version': 1,
@@ -15,7 +32,7 @@ void main() {
       'last_dock': 'unknown',
     });
 
-    expect(preferences.modeOverride, isNull);
+    expect(preferences.layoutModeOverride, isNull);
     expect(preferences.leftHanded, isFalse);
     expect(preferences.theme, 'dark');
     expect(preferences.dockWidth, 480);
@@ -32,7 +49,7 @@ void main() {
 
   test('copyWith preserves unrelated workspace settings', () {
     const original = WorkspacePreferences(
-      modeOverride: WorkspaceMode.expandedTouch,
+      layoutModeOverride: CanvasLayoutMode.expandedTouch,
       leftHanded: true,
       theme: 'dark',
       dockWidth: 420,
@@ -41,7 +58,7 @@ void main() {
     );
     final updated = original.copyWith(dockWidth: 480, leftDockWidth: 312);
 
-    expect(updated.modeOverride, WorkspaceMode.expandedTouch);
+    expect(updated.layoutModeOverride, CanvasLayoutMode.expandedTouch);
     expect(updated.leftHanded, isTrue);
     expect(updated.theme, 'dark');
     expect(updated.dockWidth, 480);

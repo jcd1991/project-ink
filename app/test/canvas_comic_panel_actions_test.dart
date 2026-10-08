@@ -88,6 +88,7 @@ rust.ComicPanelPreviewView _panel() => rust.ComicPanelPreviewView(
   width: 100,
   height: 80,
   gutterPx: 0,
+  borderPx: 1,
   panelGroupId: BigInt.from(101),
   maskLayerId: BigInt.from(102),
   sketchLayerId: BigInt.from(103),

@@ -7,8 +7,7 @@ import 'live_stroke_coordinator.dart';
 /// Screen-owned values needed to construct and retire transient stroke preview.
 class CanvasStrokePreviewHost {
   const CanvasStrokePreviewHost({
-    required this.preview,
-    required this.publishPreview,
+    required this.publishPreviews,
     required this.documentWidth,
     required this.documentHeight,
     required this.isInsideDocument,
@@ -30,8 +29,7 @@ class CanvasStrokePreviewHost {
     required this.diagnostics,
   });
 
-  final LiveStrokePreview? Function() preview;
-  final void Function(LiveStrokePreview? preview) publishPreview;
+  final void Function(List<LiveStrokePreview> previews) publishPreviews;
   final int Function() documentWidth;
   final int Function() documentHeight;
   final bool Function(Offset position) isInsideDocument;
@@ -57,9 +55,28 @@ List<double> _identityPressureCurve() => const <double>[0, 0, 1, 1];
 
 /// The acknowledgement operations needed by CPU tile publication.
 abstract interface class CanvasTilePreviewActions {
-  int previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement);
-  void retireThrough(int previewIndex);
+  CanvasPreviewCoverage? coverageForAcknowledgement(
+    StrokeAcknowledgement acknowledgement,
+  );
+  void advanceCoverage(Map<LiveStrokePreview, int> throughByPreview);
+  List<LiveStrokePreview> retireCpuCoveredPreviews();
   void clear();
+}
+
+@immutable
+class CanvasPreviewCoverage {
+  const CanvasPreviewCoverage({required this.preview, required this.index});
+
+  final LiveStrokePreview preview;
+  final int index;
+}
+
+class _TrackedStrokePreview {
+  _TrackedStrokePreview(this.preview);
+
+  LiveStrokePreview preview;
+  final LiveStrokeCoordinator coordinator = LiveStrokeCoordinator();
+  bool ended = false;
 }
 
 /// Owns ephemeral preview point ordering, chunk compaction, and CPU retirement.
@@ -69,37 +86,112 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
   CanvasStrokePreviewActions(this.host);
 
   final CanvasStrokePreviewHost host;
-  final LiveStrokeCoordinator _coordinator = LiveStrokeCoordinator();
+  final List<_TrackedStrokePreview> _trackedPreviews =
+      <_TrackedStrokePreview>[];
+  _TrackedStrokePreview? _activePreview;
+
+  LiveStrokePreview? get currentPreview => _activePreview?.preview;
 
   @override
-  void clear() => _coordinator.clear();
+  void clear() {
+    _activePreview = null;
+    _trackedPreviews.clear();
+    host.publishPreviews(const <LiveStrokePreview>[]);
+    host.setAwaitingPreviewCommit(false);
+  }
 
   @override
-  void retireThrough(int previewIndex) =>
-      _coordinator.retireThrough(previewIndex);
+  CanvasPreviewCoverage? coverageForAcknowledgement(
+    StrokeAcknowledgement acknowledgement,
+  ) {
+    final sequence = acknowledgement.highestCommittedSequence;
+    for (final tracked in _trackedPreviews.reversed) {
+      final index = tracked.coordinator.previewIndexForSourceSequence(sequence);
+      if (index >= 0) {
+        return CanvasPreviewCoverage(preview: tracked.preview, index: index);
+      }
+    }
+    return null;
+  }
 
   @override
-  int previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement) =>
-      previewIndexForSourceSequence(acknowledgement.highestCommittedSequence);
+  void advanceCoverage(Map<LiveStrokePreview, int> throughByPreview) {
+    if (throughByPreview.isEmpty) return;
+    for (final tracked in _trackedPreviews) {
+      final through = throughByPreview[tracked.preview];
+      if (through == null) continue;
+      final coveredThrough =
+          (through + 1)
+              .clamp(
+                tracked.preview.confirmedThrough,
+                tracked.preview.points.length,
+              )
+              .toInt();
+      tracked.preview = tracked.preview.copyWith(
+        confirmedThrough: coveredThrough,
+        revision: tracked.preview.revision + 1,
+      );
+      tracked.coordinator.retireThrough(through);
+    }
+    _publish();
+  }
+
+  @override
+  List<LiveStrokePreview> retireCpuCoveredPreviews() {
+    final retired = _trackedPreviews
+        .where(
+          (tracked) =>
+              tracked.ended &&
+              tracked.preview.confirmedThrough >= tracked.preview.points.length,
+        )
+        .map((tracked) => tracked.preview)
+        .toList(growable: false);
+    if (retired.isEmpty) return retired;
+    _trackedPreviews.removeWhere(
+      (tracked) => retired.contains(tracked.preview),
+    );
+    _publish();
+    _updateAwaitingState();
+    return retired;
+  }
 
   int previewIndexForSourceSequence(int sequence) =>
-      _coordinator.previewIndexForSourceSequence(sequence);
+      _coverageForSequence(sequence)?.index ?? -1;
+
+  CanvasPreviewCoverage? _coverageForSequence(int sequence) {
+    for (final tracked in _trackedPreviews.reversed) {
+      final index = tracked.coordinator.previewIndexForSourceSequence(sequence);
+      if (index >= 0) {
+        return CanvasPreviewCoverage(preview: tracked.preview, index: index);
+      }
+    }
+    return null;
+  }
 
   int pendingChunkCount(LiveStrokePreview preview) =>
-      _coordinator.pendingChunkCount(preview);
+      _trackedFor(preview)?.coordinator.pendingChunkCount(preview) ?? 0;
 
   int oldestChunkAgeMicros(LiveStrokePreview preview) =>
-      _coordinator.oldestChunkAgeMicros(preview);
+      _trackedFor(preview)?.coordinator.oldestChunkAgeMicros(preview) ?? 0;
+
+  _TrackedStrokePreview? _trackedFor(LiveStrokePreview preview) =>
+      _trackedPreviews
+          .where((tracked) => identical(tracked.preview, preview))
+          .firstOrNull;
+
+  void _publish() => host.publishPreviews(
+    _trackedPreviews.map((tracked) => tracked.preview).toList(growable: false),
+  );
+
+  void _updateAwaitingState() => host.setAwaitingPreviewCommit(
+    _trackedPreviews.any((tracked) => tracked.ended),
+  );
 
   int beginStroke({
     required Offset position,
     required double pressure,
     required int sourceSequence,
   }) {
-    _coordinator.clear();
-    host.clearLastAcknowledgement();
-    host.setPreviewStoppedAtPageEdge(false);
-    host.setAwaitingPreviewCommit(false);
     final preview = LiveStrokePreview(
       color: host.color(),
       width: host.width(),
@@ -120,9 +212,14 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       ],
       chunks: <LiveStrokePreviewChunk>[],
     );
-    host.publishPreview(preview);
+    final tracked = _TrackedStrokePreview(preview);
+    _trackedPreviews.add(tracked);
+    _activePreview = tracked;
+    host.clearLastAcknowledgement();
+    host.setPreviewStoppedAtPageEdge(false);
+    _publish();
     if (sourceSequence >= 0 && preview.points.isNotEmpty) {
-      _coordinator.recordConfirmedSample(sourceSequence, 0);
+      tracked.coordinator.recordConfirmedSample(sourceSequence, 0);
     }
     host.setPreviewStoppedAtPageEdge(false);
     return 0;
@@ -134,13 +231,19 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
     required int sourceSequence,
     required bool isUp,
   }) {
-    final preview = host.preview();
-    if (preview == null || host.previewStoppedAtPageEdge()) return -1;
+    final tracked = _activePreview;
+    if (tracked == null) return -1;
+    final preview = tracked.preview;
     final outsideDocument = !host.isInsideDocument(position);
+    final startsPath = host.previewStoppedAtPageEdge() && !outsideDocument;
+    if (host.previewStoppedAtPageEdge() && !startsPath) return -1;
+    if (startsPath) host.setPreviewStoppedAtPageEdge(false);
     final last = preview.points.lastOrNull?.position;
     if (outsideDocument && last == null) return -1;
     final visiblePosition =
-        outsideDocument && last != null
+        startsPath
+            ? host.boundPosition(position)
+            : outsideDocument && last != null
             ? _clipEndpoint(last, position)
             : host.boundPosition(position);
     // Include a terminal confirmed position before the bridge commit so CPU
@@ -150,35 +253,35 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       if (previous == null ||
           visiblePosition != last ||
           pressure != previous.pressure) {
-        final pointIndex = _coordinator.appendPoint(
+        final pointIndex = tracked.coordinator.appendPoint(
           preview,
           LiveStrokePreviewPoint(
             visiblePosition,
             pressure,
             sourceSequence: sourceSequence,
           ),
+          startsPath: startsPath,
         );
-        _coordinator.recordConfirmedSample(sourceSequence, pointIndex);
-        host.publishPreview(
-          preview.copyWith(
-            confirmedThrough: preview.confirmedThrough,
-            revision: preview.revision + 1,
-          ),
+        tracked.coordinator.recordConfirmedSample(sourceSequence, pointIndex);
+        tracked.preview = preview.copyWith(
+          confirmedThrough: preview.confirmedThrough,
+          revision: preview.revision + 1,
         );
+        _publish();
       }
       if (last != null &&
           visiblePosition == last &&
           pressure == previous?.pressure &&
           sourceSequence >= 0 &&
           preview.points.isNotEmpty) {
-        _coordinator.recordConfirmedSample(
+        tracked.coordinator.recordConfirmedSample(
           sourceSequence,
           preview.points.length - 1,
         );
       }
     }
     if (outsideDocument) host.setPreviewStoppedAtPageEdge(true);
-    return (host.preview()?.points.length ?? preview.points.length) - 1;
+    return preview.points.length - 1;
   }
 
   void appendNativeBatch(
@@ -195,59 +298,85 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       );
       start = 1;
     }
-    var preview = host.preview();
-    if (preview == null) return;
+    final tracked = _activePreview;
+    if (tracked == null) return;
+    var preview = tracked.preview;
     final points = preview.points;
     var changed = false;
     for (var index = start; index < samples.length; index++) {
       final sample = samples[index];
-      if (host.previewStoppedAtPageEdge()) break;
       final outside = !host.isInsideDocument(sample.position);
+      final startsPath = host.previewStoppedAtPageEdge() && !outside;
+      if (host.previewStoppedAtPageEdge() && !startsPath) continue;
+      if (startsPath) host.setPreviewStoppedAtPageEdge(false);
       final last = points.lastOrNull?.position;
       if (outside && last == null) continue;
       final point =
-          outside && last != null
+          startsPath
+              ? host.boundPosition(sample.position)
+              : outside && last != null
               ? _clipEndpoint(last, sample.position)
               : host.boundPosition(sample.position);
       final previous = points.lastOrNull;
       if (previous == null ||
           point != last ||
           sample.pressure != previous.pressure) {
-        final pointIndex = _coordinator.appendPoint(
+        final pointIndex = tracked.coordinator.appendPoint(
           preview,
           LiveStrokePreviewPoint(
             point,
             sample.pressure,
             sourceSequence: sample.sourceSequence,
           ),
+          startsPath: startsPath,
         );
-        _coordinator.recordConfirmedSample(sample.sourceSequence, pointIndex);
+        tracked.coordinator.recordConfirmedSample(
+          sample.sourceSequence,
+          pointIndex,
+        );
         changed = true;
       } else if (sample.sourceSequence >= 0 && points.isNotEmpty) {
-        _coordinator.recordConfirmedSample(
+        tracked.coordinator.recordConfirmedSample(
           sample.sourceSequence,
           points.length - 1,
         );
       }
-      // Off-page initial samples do not suppress a path that later enters the
-      // document. An exit after a visible point stops the ephemeral tail.
+      // Keep off-page gaps out of the preview path. A later in-page sample
+      // starts a new visible segment without connecting across the gap.
       if (outside && last != null) host.setPreviewStoppedAtPageEdge(true);
     }
-    final compacted = _coordinator.compactCommittedPrefix(preview);
+    final compacted = tracked.coordinator.compactCommittedPrefix(preview);
     changed |= !identical(compacted, preview);
     preview = compacted;
     if (changed) {
-      host.publishPreview(preview.copyWith(revision: preview.revision + 1));
+      tracked.preview = preview.copyWith(revision: preview.revision + 1);
+      _publish();
     }
   }
 
+  void cancelActivePreview() {
+    final active = _activePreview;
+    _activePreview = null;
+    if (active == null) return;
+    _trackedPreviews.remove(active);
+    _publish();
+    _updateAwaitingState();
+  }
+
   void retireIfAlreadyCpuCovered({required String source}) {
-    final preview = host.preview();
-    if (host.strokeActive() ||
-        !host.awaitingPreviewCommit() ||
-        preview == null ||
-        preview.points.isEmpty ||
-        preview.confirmedThrough < preview.points.length) {
+    final tracked = _activePreview;
+    if (host.strokeActive() || tracked == null) return;
+    _activePreview = null;
+    tracked.ended = true;
+    _updateAwaitingState();
+    final preview = tracked.preview;
+    if (preview.points.isEmpty) {
+      _trackedPreviews.remove(tracked);
+      _publish();
+      _updateAwaitingState();
+      return;
+    }
+    if (preview.confirmedThrough < preview.points.length) {
       return;
     }
     final acknowledgement = host.lastAcknowledgement();
@@ -264,10 +393,10 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       'retirementAfterTerminalWithoutDirtyTiles': true,
       'source': source,
     });
-    host.publishPreview(null);
-    _coordinator.clear();
+    _trackedPreviews.remove(tracked);
+    _publish();
     host.clearLastAcknowledgement();
-    host.setAwaitingPreviewCommit(false);
+    _updateAwaitingState();
   }
 
   Offset _clipEndpoint(Offset start, Offset end) {

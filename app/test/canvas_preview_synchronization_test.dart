@@ -46,17 +46,24 @@ void main() {
         hasPerformanceSnapshot: false,
         disableIpadDabRenderer: false,
       );
-      synchronization.setStrokePreview(_preview());
+      final preview = _preview();
+      synchronization.setStrokePreviews([preview]);
+      final previewsBeforeSignal = synchronization.strokePreviews.value;
 
       surface.gpuFrameReady.value = true;
 
-      expect(synchronization.strokePreview.value?.revision, 1);
+      expect(
+        synchronization.strokePreviews.value,
+        isNot(same(previewsBeforeSignal)),
+      );
+      expect(synchronization.strokePreviews.value.single, same(preview));
+      expect(synchronization.strokePreviews.value.single.revision, 0);
       expect(synchronization.surface, same(surface));
 
       final disposal = synchronization.detachSurface();
       expect(synchronization.surface, isNull);
       await disposal;
-      expect(synchronization.strokePreview.value?.revision, 1);
+      expect(synchronization.strokePreviews.value.single, same(preview));
       expect(surface.disposeCount, 1);
 
       synchronization.dispose();
@@ -77,14 +84,14 @@ void main() {
         hasPerformanceSnapshot: false,
         disableIpadDabRenderer: false,
       );
-      synchronization.setStrokePreview(_preview());
+      synchronization.setStrokePreviews([_preview()]);
 
       synchronization.dispose();
       await synchronization.pendingSurfaceDisposal;
 
       expect(surface.disposeCount, 1);
       expect(synchronization.surface, isNull);
-      expect(synchronization.strokePreview.value, isNull);
+      expect(synchronization.strokePreviews.value, isEmpty);
     },
   );
 }

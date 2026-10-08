@@ -79,14 +79,14 @@ class _TestComicWorkspaceController extends ComicWorkspaceController {
   _TestComicWorkspaceController() : super();
 
   @override
-  Future<void> ensureExampleLoaded() async {}
+  Future<void> ensureProjectLoaded() async {}
 }
 
 class _EagerComicWorkspaceController extends ComicWorkspaceController {
   _EagerComicWorkspaceController() : super();
 
   @override
-  Future<void> ensureExampleLoaded() async => notifyListeners();
+  Future<void> ensureProjectLoaded() async => notifyListeners();
 }
 
 void main() {
@@ -97,6 +97,80 @@ void main() {
     await tester.pump();
 
     expect(find.byType(CanvasScreen), findsOneWidget);
+  });
+
+  testWidgets('failed startup recovery preserves the checkpoint and stops', (
+    tester,
+  ) async {
+    final temporary =
+        (await tester.runAsync(
+          () => Directory.systemTemp.createTemp('project-ink-startup-'),
+        ))!;
+    addTearDown(() async {
+      await tester.runAsync(() => temporary.delete(recursive: true));
+    });
+    final recovery = Directory('${temporary.path}/last-session.inkproj');
+    await tester.runAsync(recovery.create);
+    final sentinel = File('${recovery.path}/sentinel.checkpoint');
+    const originalBytes = <int>[3, 17, 29, 41];
+    await tester.runAsync(() => sentinel.writeAsBytes(originalBytes));
+    var attemptedPath = '';
+
+    await tester.pumpWidget(
+      ProjectInkApp(
+        autosavePath: recovery.path,
+        recoveryProjectExists: (_) async => true,
+        openRecoveryEngine: (path) async {
+          attemptedPath = path;
+          throw const DocumentOpenException('recovery could not be opened');
+        },
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(attemptedPath, recovery.path);
+    expect(find.byType(CanvasScreen), findsNothing);
+    expect(
+      find.textContaining('Any existing recovery project was left untouched.'),
+      findsOneWidget,
+    );
+    expect(await tester.runAsync(sentinel.readAsBytes), originalBytes);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('successful startup recovery opens the recovered session', (
+    tester,
+  ) async {
+    final temporary =
+        (await tester.runAsync(
+          () => Directory.systemTemp.createTemp('project-ink-startup-ok-'),
+        ))!;
+    addTearDown(() async {
+      await tester.runAsync(() => temporary.delete(recursive: true));
+    });
+    final recovery = Directory('${temporary.path}/last-session.inkproj');
+    await tester.runAsync(recovery.create);
+    final engine = InMemoryEngineApi();
+    var attemptedPath = '';
+
+    await tester.pumpWidget(
+      ProjectInkApp(
+        autosavePath: recovery.path,
+        recoveryProjectExists: (_) async => true,
+        openRecoveryEngine: (path) async {
+          attemptedPath = path;
+          return engine;
+        },
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final canvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
+    expect(attemptedPath, recovery.path);
+    expect(canvas.engine, same(engine));
+    expect(canvas.autosaveState?.hasUnsavedChanges, isTrue);
   });
 
   testWidgets('falls back to English for an unsupported system locale', (

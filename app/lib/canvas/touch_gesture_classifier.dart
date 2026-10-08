@@ -34,7 +34,14 @@ TouchGestureKind? classifyTouchGesture({
     }
     return TouchGestureKind.threeFingerSwipeDown;
   }
-  if (duration > const Duration(milliseconds: 350)) return null;
+  // Three contacts take longer to place and release together on a phone.
+  // Keep the tighter window for two- and four-finger taps while allowing a
+  // deliberate three-finger Redo chord to complete within 600 ms.
+  final tapDurationLimit =
+      starts.length == 3
+          ? const Duration(milliseconds: 600)
+          : const Duration(milliseconds: 350);
+  if (duration > tapDurationLimit) return null;
   return switch (starts.length) {
     2 => TouchGestureKind.twoFingerTap,
     3 => TouchGestureKind.threeFingerTap,

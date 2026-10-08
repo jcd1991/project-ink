@@ -6,6 +6,7 @@ import 'package:project_ink/canvas/canvas_diagnostic_recorder.dart';
 import 'package:project_ink/canvas/canvas_preview_synchronization.dart';
 import 'package:project_ink/canvas/canvas_stroke_preview_actions.dart';
 import 'package:project_ink/canvas/canvas_tile_synchronization.dart';
+import 'package:project_ink/canvas/live_stroke_coordinator.dart';
 
 void main() {
   test('tile synchronization snapshots copy visible layer state', () {
@@ -86,11 +87,16 @@ CanvasTileSynchronization _createSynchronization(
 
 class _TilePreviewActions implements CanvasTilePreviewActions {
   @override
-  int previewIndexForAcknowledgement(StrokeAcknowledgement acknowledgement) =>
-      -1;
+  CanvasPreviewCoverage? coverageForAcknowledgement(
+    StrokeAcknowledgement acknowledgement,
+  ) => null;
 
   @override
-  void retireThrough(int previewIndex) {}
+  void advanceCoverage(Map<LiveStrokePreview, int> throughByPreview) {}
+
+  @override
+  List<LiveStrokePreview> retireCpuCoveredPreviews() =>
+      const <LiveStrokePreview>[];
 
   @override
   void clear() {}

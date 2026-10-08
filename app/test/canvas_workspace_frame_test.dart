@@ -10,7 +10,7 @@ void main() {
       bool resolve({required double logical, required double physical}) =>
           shouldUseWideDesktopLayout(
             desktopDockEnabled: true,
-            workspaceMode: WorkspaceMode.desktop,
+            layoutMode: CanvasLayoutMode.desktop,
             platform: TargetPlatform.macOS,
             logicalWidth: logical,
             physicalWidth: physical,
@@ -26,7 +26,7 @@ void main() {
         expect(
           shouldUseWideDesktopLayout(
             desktopDockEnabled: true,
-            workspaceMode: WorkspaceMode.desktop,
+            layoutMode: CanvasLayoutMode.desktop,
             platform: platform,
             logicalWidth: 1100,
             physicalWidth: 1,
@@ -36,7 +36,7 @@ void main() {
         expect(
           shouldUseWideDesktopLayout(
             desktopDockEnabled: true,
-            workspaceMode: WorkspaceMode.desktop,
+            layoutMode: CanvasLayoutMode.desktop,
             platform: platform,
             logicalWidth: 1099,
             physicalWidth: 4096,
@@ -48,13 +48,13 @@ void main() {
 
     test('disabled docks and non-desktop modes never select wide layout', () {
       for (final mode in [
-        WorkspaceMode.compactTouch,
-        WorkspaceMode.expandedTouch,
+        CanvasLayoutMode.compactTouch,
+        CanvasLayoutMode.expandedTouch,
       ]) {
         expect(
           shouldUseWideDesktopLayout(
             desktopDockEnabled: true,
-            workspaceMode: mode,
+            layoutMode: mode,
             platform: TargetPlatform.macOS,
             logicalWidth: 2048,
             physicalWidth: 4096,
@@ -65,7 +65,7 @@ void main() {
       expect(
         shouldUseWideDesktopLayout(
           desktopDockEnabled: false,
-          workspaceMode: WorkspaceMode.desktop,
+          layoutMode: CanvasLayoutMode.desktop,
           platform: TargetPlatform.macOS,
           logicalWidth: 2048,
           physicalWidth: 4096,
@@ -76,7 +76,7 @@ void main() {
   });
 
   group('resolveCanvasWorkspaceFrame', () {
-    test('hides collapsed and unavailable desktop docks', () {
+    test('desktop dock visibility is independent of touch editor mode', () {
       final frame = resolveCanvasWorkspaceFrame(
         platform: TargetPlatform.macOS,
         viewportWidth: 1440,
@@ -88,11 +88,12 @@ void main() {
         hasRightDock: false,
         preferredLeftDockWidth: 280,
         preferredRightDockWidth: 320,
-        tabletMode: TabletWorkspaceMode.simple,
+        editorMode: EditorMode.simple,
         desktopDockEnabled: true,
       );
 
       expect(frame.desktopDock, isTrue);
+      expect(frame.simpleMode, isTrue);
       expect(frame.showLeftDock, isFalse);
       expect(frame.showRightDock, isFalse);
       expect(frame.dockWidths.left, 0);
@@ -101,7 +102,7 @@ void main() {
     });
 
     test(
-      'interface hiding closes desktop docks without changing tablet mode',
+      'interface hiding closes desktop docks without changing editor mode',
       () {
         final frame = resolveCanvasWorkspaceFrame(
           platform: TargetPlatform.iOS,
@@ -114,20 +115,20 @@ void main() {
           hasRightDock: true,
           preferredLeftDockWidth: 280,
           preferredRightDockWidth: 320,
-          tabletMode: TabletWorkspaceMode.studio,
+          editorMode: EditorMode.studio,
           desktopDockEnabled: true,
         );
 
         expect(frame.desktopDock, isFalse);
         expect(frame.showLeftDock, isFalse);
         expect(frame.showRightDock, isFalse);
-        expect(frame.tabletStudioMode, isTrue);
-        expect(frame.tabletSimpleMode, isFalse);
+        expect(frame.studioTouchLayout, isTrue);
+        expect(frame.simpleMode, isFalse);
         expect(frame.useNativeMacMenus, isFalse);
       },
     );
 
-    test('uses compact tablet mode below the tablet width threshold', () {
+    test('phone layout stays compact while preserving the selected mode', () {
       final frame = resolveCanvasWorkspaceFrame(
         platform: TargetPlatform.android,
         viewportWidth: 599,
@@ -139,12 +140,13 @@ void main() {
         hasRightDock: false,
         preferredLeftDockWidth: 280,
         preferredRightDockWidth: 320,
-        tabletMode: TabletWorkspaceMode.studio,
+        editorMode: EditorMode.studio,
         desktopDockEnabled: false,
       );
 
-      expect(frame.tabletStudioMode, isFalse);
-      expect(frame.tabletSimpleMode, isTrue);
+      expect(frame.studioTouchLayout, isFalse);
+      expect(frame.simpleMode, isFalse);
+      expect(frame.phoneLayout, isTrue);
     });
 
     test('bounds visible dock widths to preserve the canvas budget', () {
@@ -159,13 +161,88 @@ void main() {
         hasRightDock: true,
         preferredLeftDockWidth: 400,
         preferredRightDockWidth: 400,
-        tabletMode: TabletWorkspaceMode.simple,
+        editorMode: EditorMode.studio,
         desktopDockEnabled: true,
       );
 
       expect(frame.showLeftDock, isTrue);
       expect(frame.showRightDock, isTrue);
       expect(frame.dockWidths.left + frame.dockWidths.right, 656);
+    });
+
+    test('editor mode is shared across desktop, web, and touch layouts', () {
+      final macStudio = resolveCanvasWorkspaceFrame(
+        platform: TargetPlatform.macOS,
+        viewportWidth: 1440,
+        wideDesktop: true,
+        interfaceHidden: false,
+        leftDockCollapsed: false,
+        rightDockCollapsed: false,
+        hasLeftDock: true,
+        hasRightDock: true,
+        preferredLeftDockWidth: 280,
+        preferredRightDockWidth: 320,
+        editorMode: EditorMode.studio,
+        desktopDockEnabled: true,
+      );
+      expect(macStudio.desktopDock, isTrue);
+      expect(macStudio.studioTouchLayout, isFalse);
+
+      final narrowWebStudio = resolveCanvasWorkspaceFrame(
+        platform: TargetPlatform.linux,
+        viewportWidth: 820,
+        wideDesktop: false,
+        interfaceHidden: false,
+        leftDockCollapsed: false,
+        rightDockCollapsed: false,
+        hasLeftDock: true,
+        hasRightDock: true,
+        preferredLeftDockWidth: 280,
+        preferredRightDockWidth: 320,
+        editorMode: EditorMode.studio,
+        desktopDockEnabled: true,
+        isWeb: true,
+      );
+      expect(narrowWebStudio.studioTouchLayout, isTrue);
+      expect(narrowWebStudio.phoneLayout, isFalse);
+
+      final phoneStudio = resolveCanvasWorkspaceFrame(
+        platform: TargetPlatform.android,
+        viewportWidth: 412,
+        wideDesktop: false,
+        interfaceHidden: false,
+        leftDockCollapsed: false,
+        rightDockCollapsed: false,
+        hasLeftDock: true,
+        hasRightDock: true,
+        preferredLeftDockWidth: 280,
+        preferredRightDockWidth: 320,
+        editorMode: EditorMode.studio,
+        desktopDockEnabled: false,
+      );
+      expect(phoneStudio.phoneLayout, isTrue);
+      expect(phoneStudio.studioTouchLayout, isFalse);
+      expect(phoneStudio.simpleMode, isFalse);
+    });
+
+    test('narrow macOS windows retain the desktop header shell', () {
+      final frame = resolveCanvasWorkspaceFrame(
+        platform: TargetPlatform.macOS,
+        viewportWidth: 820,
+        wideDesktop: false,
+        interfaceHidden: false,
+        leftDockCollapsed: false,
+        rightDockCollapsed: false,
+        hasLeftDock: true,
+        hasRightDock: true,
+        preferredLeftDockWidth: 280,
+        preferredRightDockWidth: 320,
+        editorMode: EditorMode.simple,
+        desktopDockEnabled: true,
+      );
+
+      expect(frame.phoneLayout, isFalse);
+      expect(frame.simpleTouchLayout, isFalse);
     });
   });
 }

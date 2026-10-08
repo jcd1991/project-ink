@@ -27,6 +27,7 @@ enum IllustrationTool {
   symmetryRuler,
   radialRuler,
   perspectiveRuler,
+  panel,
 }
 
 enum TransformPreset { rotateLeft, rotateRight, scaleUp, scaleDown }
@@ -53,6 +54,7 @@ extension IllustrationToolLabels on IllustrationTool {
     IllustrationTool.symmetryRuler => 'Symmetry ruler',
     IllustrationTool.radialRuler => 'Radial ruler',
     IllustrationTool.perspectiveRuler => 'Perspective ruler',
+    IllustrationTool.panel => 'Panel divider',
   };
 
   IconData get icon => switch (this) {
@@ -76,6 +78,7 @@ extension IllustrationToolLabels on IllustrationTool {
     IllustrationTool.symmetryRuler => Icons.flip,
     IllustrationTool.radialRuler => Icons.radar,
     IllustrationTool.perspectiveRuler => Icons.grid_on,
+    IllustrationTool.panel => Icons.view_quilt_outlined,
   };
 }
 
@@ -86,33 +89,63 @@ class IllustrationToolPalette extends StatelessWidget {
     required this.onSelected,
     required this.onClearSelection,
     required this.onTransformPreset,
+    this.onApplyPanelLayout,
+    this.onPanelStyleChanged,
+    this.panelCount = 0,
+    this.gutterPx = 24,
+    this.borderPx = 2,
+    this.panelLoading = false,
   });
 
   final IllustrationTool selected;
   final ValueChanged<IllustrationTool> onSelected;
   final VoidCallback onClearSelection;
   final ValueChanged<TransformPreset> onTransformPreset;
+  final ValueChanged<int>? onApplyPanelLayout;
+  final void Function(double gutterPx, double borderPx)? onPanelStyleChanged;
+  final int panelCount;
+  final double gutterPx;
+  final double borderPx;
+  final bool panelLoading;
 
   @override
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.all(12),
     children: [
-      _ToolGroup(
-        title: 'Draw',
-        icon: Icons.brush_outlined,
-        initiallyExpanded: selected == IllustrationTool.brush,
-        tools: const [IllustrationTool.brush],
-        selected: selected,
-        onSelected: onSelected,
+      InkInspectorRow(
+        title: IllustrationTool.brush.label,
+        icon: Icon(IllustrationTool.brush.icon, size: 18),
+        selected: selected == IllustrationTool.brush,
+        onTap: () => onSelected(IllustrationTool.brush),
       ),
-      _ToolGroup(
-        title: 'Erase and blend',
-        icon: Icons.water_drop_outlined,
-        initiallyExpanded: selected == IllustrationTool.eraser,
-        tools: const [IllustrationTool.eraser],
-        selected: selected,
-        onSelected: onSelected,
+      InkInspectorRow(
+        title: IllustrationTool.eraser.label,
+        icon: Icon(IllustrationTool.eraser.icon, size: 18),
+        selected: selected == IllustrationTool.eraser,
+        onTap: () => onSelected(IllustrationTool.eraser),
       ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: InkInspectorRow(
+          title: IllustrationTool.panel.label,
+          subtitle: 'Choose a layout or drag across a frame to split it',
+          icon: Icon(IllustrationTool.panel.icon, size: 18),
+          selected: selected == IllustrationTool.panel,
+          onTap: () => onSelected(IllustrationTool.panel),
+        ),
+      ),
+      if (selected == IllustrationTool.panel) ...[
+        const SizedBox(height: 8),
+        _PanelToolControls(
+          panelCount: panelCount,
+          gutterPx: gutterPx,
+          borderPx: borderPx,
+          onApplyLayout: onApplyPanelLayout,
+          onStyleChanged: onPanelStyleChanged,
+          loading: panelLoading,
+        ),
+        const Divider(height: 20),
+      ],
       _ToolGroup(
         title: 'Select and fill',
         icon: Icons.select_all,
@@ -184,6 +217,122 @@ class IllustrationToolPalette extends StatelessWidget {
       ],
     ],
   );
+}
+
+class _PanelToolControls extends StatefulWidget {
+  const _PanelToolControls({
+    required this.panelCount,
+    required this.gutterPx,
+    required this.borderPx,
+    required this.onApplyLayout,
+    required this.onStyleChanged,
+    required this.loading,
+  });
+
+  final int panelCount;
+  final double gutterPx;
+  final double borderPx;
+  final ValueChanged<int>? onApplyLayout;
+  final void Function(double gutterPx, double borderPx)? onStyleChanged;
+  final bool loading;
+
+  @override
+  State<_PanelToolControls> createState() => _PanelToolControlsState();
+}
+
+class _PanelToolControlsState extends State<_PanelToolControls> {
+  late double _gutter = widget.gutterPx;
+  late double _border = widget.borderPx;
+
+  @override
+  void didUpdateWidget(covariant _PanelToolControls oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.gutterPx != widget.gutterPx) _gutter = widget.gutterPx;
+    if (oldWidget.borderPx != widget.borderPx) _border = widget.borderPx;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPanels = widget.panelCount > 0;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            hasPanels ? 'Split or adjust a frame' : 'Create your first split',
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            hasPanels
+                ? 'Drag through a frame to split it. Start inside the frame you want to divide; the preview shows the cut. Drag a gutter to move its divider.'
+                : 'On the canvas, drag left to right for a horizontal divider or top to bottom for a vertical one. The preview shows where it will go; release to add it.',
+          ),
+          if (!hasPanels) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Or start with a ready-made layout',
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ],
+          if (widget.loading) ...[
+            const SizedBox(height: 8),
+            const LinearProgressIndicator(minHeight: 2),
+            const SizedBox(height: 4),
+            const Text('Preparing panel editing…'),
+          ],
+          if (!hasPanels) ...[
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              children: [
+                for (final count in const [2, 3, 4])
+                  OutlinedButton(
+                    onPressed:
+                        !widget.loading
+                            ? () => widget.onApplyLayout?.call(count)
+                            : null,
+                    child: Text('$count panels'),
+                  ),
+              ],
+            ),
+          ],
+          if (hasPanels) ...[
+            const SizedBox(height: 8),
+            Text('Gutter  ${_gutter.round()} px'),
+            Slider(
+              min: 0,
+              max: 96,
+              divisions: 48,
+              value: _gutter.clamp(0, 96),
+              onChanged:
+                  widget.loading
+                      ? null
+                      : (value) => setState(() => _gutter = value),
+              onChangeEnd: (_) => widget.onStyleChanged?.call(_gutter, _border),
+            ),
+            Text('Border  ${_border.toStringAsFixed(1)} px'),
+            Slider(
+              min: 0,
+              max: 16,
+              divisions: 32,
+              value: _border.clamp(0, 16),
+              onChanged:
+                  widget.loading
+                      ? null
+                      : (value) => setState(() => _border = value),
+              onChangeEnd: (_) => widget.onStyleChanged?.call(_gutter, _border),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 const _selectionTools = <IllustrationTool>[

@@ -15,12 +15,24 @@ class CanvasToolPaletteContent extends StatelessWidget {
     required this.onSelected,
     required this.onClearSelection,
     required this.onTransformPreset,
+    this.onApplyPanelLayout,
+    this.onPanelStyleChanged,
+    this.panelCount = 0,
+    this.gutterPx = 24,
+    this.borderPx = 2,
+    this.panelLoading = false,
   });
 
   final IllustrationTool selected;
   final ValueChanged<IllustrationTool> onSelected;
   final VoidCallback onClearSelection;
   final ValueChanged<TransformPreset> onTransformPreset;
+  final ValueChanged<int>? onApplyPanelLayout;
+  final void Function(double gutterPx, double borderPx)? onPanelStyleChanged;
+  final int panelCount;
+  final double gutterPx;
+  final double borderPx;
+  final bool panelLoading;
 
   @override
   Widget build(BuildContext context) => IllustrationToolPalette(
@@ -28,6 +40,12 @@ class CanvasToolPaletteContent extends StatelessWidget {
     onSelected: onSelected,
     onClearSelection: onClearSelection,
     onTransformPreset: onTransformPreset,
+    onApplyPanelLayout: onApplyPanelLayout,
+    onPanelStyleChanged: onPanelStyleChanged,
+    panelCount: panelCount,
+    gutterPx: gutterPx,
+    borderPx: borderPx,
+    panelLoading: panelLoading,
   );
 }
 

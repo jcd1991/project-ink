@@ -23,6 +23,8 @@ class ProjectInkApp extends StatefulWidget {
     this.documentPicker,
     @visibleForTesting this.targetPlatformOverride,
     this.openDocumentEngine,
+    @visibleForTesting this.openRecoveryEngine,
+    @visibleForTesting this.recoveryProjectExists,
     this.onOpenDocument,
     @visibleForTesting this.deleteRecoveryCheckpoint,
     this.onAutosaveStateChanged,
@@ -54,6 +56,14 @@ class ProjectInkApp extends StatefulWidget {
   /// Optional engine factory for document-open lifecycle tests. Production
   /// keeps the Rust project loader as the sole default implementation.
   final Future<EngineApi> Function(String path)? openDocumentEngine;
+
+  /// Optional recovery opener seam for startup lifecycle tests. Production
+  /// routes standalone and Studio checkpoints through the Rust-backed loader.
+  @visibleForTesting
+  final Future<EngineApi> Function(String path)? openRecoveryEngine;
+
+  @visibleForTesting
+  final Future<bool> Function(String path)? recoveryProjectExists;
 
   /// Parent-owned document replacement callback for an approved open path.
   final Future<void> Function(String path)? onOpenDocument;
@@ -158,16 +168,24 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
         // attempt to open an existing directory; a missing path is the normal
         // first-run case and must not delay engine startup with an error.
         debugPrint('Project Ink startup: checking recovery project');
-        if (await Directory(recoveryPath).exists()) {
+        final exists =
+            await (widget.recoveryProjectExists?.call(recoveryPath) ??
+                Directory(recoveryPath).exists());
+        if (exists) {
           debugPrint('Project Ink startup: opening recovery project');
+          final openRecovery =
+              widget.openRecoveryEngine ?? FrbEngineApi.openRecovery;
+          final recovered = await openRecovery(recoveryPath);
           _autosaveInitiallyUnsavedChanges = true;
-          return await FrbEngineApi.open(recoveryPath);
+          return recovered;
         }
         debugPrint('Project Ink startup: recovery project does not exist');
       } catch (error, stack) {
-        // Preserve the source for the Rust repair/recovery path and start a
-        // clean document if a stale or interrupted recovery cannot be read.
-        debugPrint('Project Ink recovery open skipped: $error\n$stack');
+        // Do not replace an unreadable or unsupported recovery with a blank
+        // document: subsequent edits could otherwise autosave over the only
+        // remaining copy of the user's work.
+        debugPrint('Project Ink recovery open failed: $error\n$stack');
+        Error.throwWithStackTrace(error, stack);
       }
     }
     debugPrint('Project Ink startup: creating default document');
@@ -524,7 +542,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
           onDiscardRecovery: _discardRecoveryForClose,
           onEngineReplaced: _retireEngineAfterCanvasCleanup,
           desktopDockEnabled: true,
-          workspaceModeOverride: _workspacePreferences.modeOverride,
+          layoutModeOverride: _workspacePreferences.layoutModeOverride,
           workspaceDockWidth: _workspacePreferences.dockWidth,
           workspacePreferences: _workspacePreferences,
           onWorkspacePreferencesChanged: _onWorkspacePreferencesChanged,
@@ -556,7 +574,8 @@ class _EngineUnavailable extends StatelessWidget {
             const Icon(Icons.error_outline, size: 48),
             const SizedBox(height: 16),
             const Text(
-              'Project Ink could not start its Rust drawing engine.',
+              'Project Ink could not open the drawing engine or recovery project. '
+              'Any existing recovery project was left untouched.',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),

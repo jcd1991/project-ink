@@ -65,7 +65,7 @@ class CanvasViewportSurface extends StatelessWidget {
 
   final GlobalKey canvasKey;
   final CanvasViewportPaintState paintState;
-  final ValueListenable<LiveStrokePreview?> strokePreview;
+  final ValueListenable<List<LiveStrokePreview>> strokePreview;
   final ValueListenable<Offset?> hoverPosition;
   final LivePreviewController? livePreviewSurface;
   final bool isIpad;
@@ -154,7 +154,7 @@ class CanvasViewportSurface extends StatelessWidget {
                     );
                   },
                 ),
-                ValueListenableBuilder<LiveStrokePreview?>(
+                ValueListenableBuilder<List<LiveStrokePreview>>(
                   valueListenable: strokePreview,
                   builder: (context, preview, child) {
                     // On iPad the compiled brush output is authoritative for
@@ -165,30 +165,36 @@ class CanvasViewportSurface extends StatelessWidget {
                     final showCpuPreview =
                         !nativeDabRendererExpected &&
                         livePreviewSurface?.gpuFrameReady.value != true;
-                    if (!showCpuPreview || preview == null) {
+                    if (!showCpuPreview || preview.isEmpty) {
                       return const SizedBox.shrink();
                     }
                     return RepaintBoundary(
                       key: const ValueKey('live-stroke-preview-boundary'),
                       child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: LiveStrokePreviewPainter(
-                            pan: transform.pan,
-                            scale: transform.scale,
-                            rotation: transform.rotation,
-                            mirrored: paintState.mirrored,
-                            documentWidth: paintState.documentWidth,
-                            documentHeight: paintState.documentHeight,
-                            preview: preview,
-                            onSlowPaint:
-                                (elapsedMicros, direct, pictures) =>
-                                    onSlowPreviewPaint(
-                                      preview,
-                                      elapsedMicros,
-                                      direct,
-                                      pictures,
-                                    ),
-                          ),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            for (final strokePreview in preview)
+                              CustomPaint(
+                                painter: LiveStrokePreviewPainter(
+                                  pan: transform.pan,
+                                  scale: transform.scale,
+                                  rotation: transform.rotation,
+                                  mirrored: paintState.mirrored,
+                                  documentWidth: paintState.documentWidth,
+                                  documentHeight: paintState.documentHeight,
+                                  preview: strokePreview,
+                                  onSlowPaint:
+                                      (elapsedMicros, direct, pictures) =>
+                                          onSlowPreviewPaint(
+                                            strokePreview,
+                                            elapsedMicros,
+                                            direct,
+                                            pictures,
+                                          ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                     );

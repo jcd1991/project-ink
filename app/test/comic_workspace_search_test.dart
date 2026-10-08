@@ -18,7 +18,7 @@ class _SearchController extends ComicWorkspaceController {
   String? get userFacingError => comicWorkspaceErrorMessage(errorMessage);
 
   @override
-  Future<void> ensureExampleLoaded() async => notifyListeners();
+  Future<void> ensureProjectLoaded() async => notifyListeners();
 
   @override
   Future<List<rust.ComicDialogueHitView>> searchDialogue(String query) async =>
@@ -355,6 +355,20 @@ class _BoundsController extends _SearchController {
   }
 }
 
+class _RemovePanelController extends _SearchController {
+  _RemovePanelController(super.project);
+
+  BigInt? removedPanel;
+
+  @override
+  Future<void> removePanel({
+    required int pageIndex,
+    required BigInt panelId,
+  }) async {
+    removedPanel = panelId;
+  }
+}
+
 class _EffectController extends _SearchController {
   _EffectController(super.project);
 
@@ -400,6 +414,7 @@ rust.ComicPageView _page(
   int pageNumber,
   String text,
   BigInt balloonId, {
+  List<rust.ComicPanelPreviewView> panels = const [],
   List<rust.ComicTonePreviewView> tones = const [],
   List<rust.ComicEffectLinePreviewView> effectLines = const [],
 }) {
@@ -423,11 +438,11 @@ rust.ComicPageView _page(
     widthPx: 1200,
     heightPx: 1600,
     dpi: 300,
-    panelCount: 0,
+    panelCount: panels.length,
     balloonCount: 1,
     toneCount: tones.length,
     effectLineCount: effectLines.length,
-    panels: const [],
+    panels: panels,
     balloons: <rust.ComicBalloonPreviewView>[balloon],
     tones: tones,
     effectLines: effectLines,
@@ -447,6 +462,35 @@ rust.ComicPageView _page(
 }
 
 void main() {
+  testWidgets(
+    'empty comic workspace stays blank until user creates a project',
+    (tester) async {
+      var persisted = false;
+      var projectBound = false;
+      var pageRebound = false;
+      final controller = ComicWorkspaceController(
+        readExisting: () async => null,
+        onPersist: (_) async => persisted = true,
+        onProjectChanged: (_) async => projectBound = true,
+        onActivePageChanged: (_) async => pageRebound = true,
+      );
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(home: ComicWorkspace(controller: controller)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(controller.snapshot, isNull);
+      expect(find.text('No comic project open'), findsOneWidget);
+      expect(find.text('New print comic'), findsWidgets);
+      expect(persisted, isFalse);
+      expect(projectBound, isFalse);
+      expect(pageRebound, isFalse);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   test('page reorder keeps the active page index attached to its page', () {
     // Moving a page across the active page shifts the active index; moving
     // the active page itself carries selection with it.
@@ -1200,6 +1244,7 @@ void main() {
       width: 480,
       height: 960,
       gutterPx: 24,
+      borderPx: 1,
       maskLayerId: BigInt.from(1203),
       polygon: Float32List.fromList(const <double>[]),
     );
@@ -1256,5 +1301,58 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.boundsX, closeTo(120, 0.001));
     expect(controller.boundsWidth, closeTo(480, 0.001));
+  });
+
+  testWidgets('panel inspector offers a confirmed remove action', (
+    tester,
+  ) async {
+    final panel = rust.ComicPanelPreviewView(
+      id: BigInt.from(1401),
+      shape: 0,
+      x: 120,
+      y: 180,
+      width: 480,
+      height: 960,
+      gutterPx: 24,
+      borderPx: 1,
+      maskLayerId: BigInt.from(1402),
+      polygon: Float32List.fromList(const <double>[]),
+    );
+    final controller = _RemovePanelController(
+      rust.ComicProjectView(
+        id: BigInt.from(14),
+        template: 1,
+        title: 'Panel removal fixture',
+        pageCount: 1,
+        pages: <rust.ComicPageView>[
+          _page(
+            1,
+            'Panel page',
+            BigInt.from(1403),
+            panels: <rust.ComicPanelPreviewView>[panel],
+          ),
+        ],
+        materials: const [],
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ComicWorkspace(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+    await _selectComicSection(tester, 'Panel');
+    await tester.ensureVisible(find.byTooltip('Remove panel'));
+    await tester.tap(find.byTooltip('Remove panel'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Remove panel?'), findsOneWidget);
+    expect(
+      find.textContaining('Artwork layers stay in the project'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Remove panel').last);
+    await tester.pumpAndSettle();
+    expect(controller.removedPanel, panel.id);
   });
 }

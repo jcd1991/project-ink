@@ -52,6 +52,7 @@ void main() {
         'hold_begin',
         'persist_size',
         'hold_finish:invalid_layer_target',
+        'reject:null',
       ]);
     },
   );
@@ -87,6 +88,34 @@ void main() {
       }
     },
   );
+
+  test(
+    'a selected panel group routes drawing to its visible Ink layer',
+    () async {
+      final events = <String>[];
+      final coordinator = _coordinator(
+        events: events,
+        primaryLayerId: 8,
+        layers: const [
+          LayerView(id: 8, name: 'Panel', kind: LayerKind.panelGroup),
+          LayerView(id: 9, name: 'Sketch', kind: LayerKind.raster, parent: 8),
+          LayerView(id: 10, name: 'Ink', kind: LayerKind.raster, parent: 8),
+          LayerView(
+            id: 11,
+            name: 'Panel Mask',
+            kind: LayerKind.mask,
+            parent: 8,
+          ),
+        ],
+        onSelectTarget: (id) => events.add('select:$id'),
+      );
+
+      expect(await coordinator.begin(), isTrue);
+      expect(events, contains('select:10'));
+      expect(events.last, 'begin:12:10');
+      expect(events.where((event) => event.startsWith('reject:')), isEmpty);
+    },
+  );
 }
 
 CanvasStrokeStartCoordinator _coordinator({
@@ -97,6 +126,7 @@ CanvasStrokeStartCoordinator _coordinator({
   Future<void>? pendingEdit,
   void Function(LayerView? layer, {required bool effectivelyVisible})?
   onRejected,
+  void Function(int layerId)? onSelectTarget,
 }) => CanvasStrokeStartCoordinator(
   CanvasStrokeStartHost(
     beginAutosaveHold: () => events.add('hold_begin'),
@@ -111,9 +141,18 @@ CanvasStrokeStartCoordinator _coordinator({
     primaryLayerId: () => primaryLayerId,
     layers: () => layers,
     layerEffectivelyVisible: (_) => visible,
-    showInvalidTarget:
-        (layer, {required effectivelyVisible}) =>
-            onRejected?.call(layer, effectivelyVisible: effectivelyVisible),
+    selectTargetLayer: (id) {
+      final select = onSelectTarget;
+      if (select != null) {
+        select(id);
+      } else {
+        events.add('select:$id');
+      }
+    },
+    showInvalidTarget: (layer, {required effectivelyVisible}) {
+      events.add('reject:${layer?.name}');
+      onRejected?.call(layer, effectivelyVisible: effectivelyVisible);
+    },
     selectedBrush: () => null,
     recordStrokeBegin: (brushId, _) => events.add('record:$brushId'),
     beginBrushStrokeOnLayer:

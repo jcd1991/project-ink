@@ -12,6 +12,7 @@ class CanvasStrokeStartHost {
     required this.primaryLayerId,
     required this.layers,
     required this.layerEffectivelyVisible,
+    required this.selectTargetLayer,
     required this.showInvalidTarget,
     required this.selectedBrush,
     required this.recordStrokeBegin,
@@ -26,6 +27,7 @@ class CanvasStrokeStartHost {
   final int? Function() primaryLayerId;
   final List<LayerView> Function() layers;
   final bool Function(LayerView layer) layerEffectivelyVisible;
+  final void Function(int layerId) selectTargetLayer;
   final void Function(LayerView? target, {required bool effectivelyVisible})
   showInvalidTarget;
   final BrushPresetView? Function() selectedBrush;
@@ -51,13 +53,32 @@ class CanvasStrokeStartCoordinator {
     if (pendingBrushEdit != null) await pendingBrushEdit;
 
     final primaryLayerId = host.primaryLayerId();
-    final target =
+    var target =
         primaryLayerId == null
             ? null
             : host
                 .layers()
                 .where((layer) => layer.id == primaryLayerId)
                 .firstOrNull;
+    if (target?.kind == LayerKind.panelGroup) {
+      final panelGroupId = target!.id;
+      final editableChildren = host
+          .layers()
+          .where(
+            (layer) =>
+                layer.parent == panelGroupId &&
+                layer.kind == LayerKind.raster &&
+                !layer.locked &&
+                host.layerEffectivelyVisible(layer),
+          )
+          .toList(growable: false);
+      target =
+          editableChildren
+              .where((layer) => layer.name.trim().toLowerCase() == 'ink')
+              .firstOrNull;
+      target ??= editableChildren.firstOrNull;
+      if (target != null) host.selectTargetLayer(target.id);
+    }
     final visible = target != null && host.layerEffectivelyVisible(target);
     if (target == null || !visible || target.kind != LayerKind.raster) {
       host.finishAutosaveHold(reason: 'invalid_layer_target');

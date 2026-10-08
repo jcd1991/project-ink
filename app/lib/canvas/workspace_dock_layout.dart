@@ -26,8 +26,10 @@ class CanvasWorkspaceFrame {
     required this.showLeftDock,
     required this.showRightDock,
     required this.dockWidths,
-    required this.tabletStudioMode,
-    required this.tabletSimpleMode,
+    required this.studioTouchLayout,
+    required this.simpleMode,
+    required this.simpleTouchLayout,
+    required this.phoneLayout,
     required this.useNativeMacMenus,
   });
 
@@ -35,8 +37,10 @@ class CanvasWorkspaceFrame {
   final bool showLeftDock;
   final bool showRightDock;
   final EffectiveDockWidths dockWidths;
-  final bool tabletStudioMode;
-  final bool tabletSimpleMode;
+  final bool studioTouchLayout;
+  final bool simpleMode;
+  final bool simpleTouchLayout;
+  final bool phoneLayout;
   final bool useNativeMacMenus;
 }
 
@@ -46,12 +50,12 @@ class CanvasWorkspaceFrame {
 /// pure so platform thresholds can be verified independently of widget media.
 bool shouldUseWideDesktopLayout({
   required bool desktopDockEnabled,
-  required WorkspaceMode workspaceMode,
+  required CanvasLayoutMode layoutMode,
   required TargetPlatform platform,
   required double logicalWidth,
   required double physicalWidth,
 }) {
-  if (!desktopDockEnabled || workspaceMode != WorkspaceMode.desktop) {
+  if (!desktopDockEnabled || layoutMode != CanvasLayoutMode.desktop) {
     return false;
   }
   if (platform == TargetPlatform.macOS) {
@@ -74,14 +78,29 @@ CanvasWorkspaceFrame resolveCanvasWorkspaceFrame({
   required bool hasRightDock,
   required double preferredLeftDockWidth,
   required double preferredRightDockWidth,
-  required TabletWorkspaceMode tabletMode,
+  required EditorMode editorMode,
   required bool desktopDockEnabled,
+  bool isWeb = false,
 }) {
+  final studioMode = editorMode == EditorMode.studio;
+  final simpleMode = editorMode == EditorMode.simple;
+  final touchPlatform =
+      platform == TargetPlatform.iOS || platform == TargetPlatform.android;
+  final touchHost = touchPlatform || isWeb;
+  final phoneLayout = viewportWidth < 600 && touchHost;
   final desktopDock = wideDesktop && !interfaceHidden;
   final showLeftDock = desktopDock && !leftDockCollapsed && hasLeftDock;
   final showRightDock = desktopDock && !rightDockCollapsed && hasRightDock;
-  final isTabletPlatform =
-      platform == TargetPlatform.iOS || platform == TargetPlatform.android;
+  final studioTouchLayout =
+      studioMode &&
+      !phoneLayout &&
+      !desktopDock &&
+      (touchPlatform || (isWeb && viewportWidth < 1100));
+  final simpleTouchLayout =
+      simpleMode &&
+      !phoneLayout &&
+      !desktopDock &&
+      (touchPlatform || (isWeb && viewportWidth < 1100));
   return CanvasWorkspaceFrame(
     desktopDock: desktopDock,
     showLeftDock: showLeftDock,
@@ -93,13 +112,10 @@ CanvasWorkspaceFrame resolveCanvasWorkspaceFrame({
       preferredLeftWidth: preferredLeftDockWidth,
       preferredRightWidth: preferredRightDockWidth,
     ),
-    tabletStudioMode:
-        isTabletPlatform &&
-        viewportWidth >= 600 &&
-        tabletMode == TabletWorkspaceMode.studio,
-    tabletSimpleMode:
-        isTabletPlatform &&
-        (viewportWidth < 600 || tabletMode == TabletWorkspaceMode.simple),
+    studioTouchLayout: studioTouchLayout,
+    simpleMode: simpleMode,
+    simpleTouchLayout: simpleTouchLayout,
+    phoneLayout: phoneLayout,
     useNativeMacMenus: platform == TargetPlatform.macOS && desktopDockEnabled,
   );
 }

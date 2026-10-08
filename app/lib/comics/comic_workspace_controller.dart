@@ -41,13 +41,17 @@ class ComicWorkspaceController extends ChangeNotifier {
   ComicWorkspaceController({
     this.onPersist,
     this.readExisting,
+    this.createIllustrationPanelProject,
     this.onPanelGeometryChanged,
+    this.onPanelRemoved,
     this.onActivePageChanged,
     this.onProjectChanged,
   });
 
   final Future<void> Function(Uint8List bytes)? onPersist;
   final Future<Uint8List?> Function()? readExisting;
+  final Future<rust.StudioProjectHandle> Function()?
+  createIllustrationPanelProject;
 
   /// Compatibility seam for panel geometry. It updates the canvas document's
   /// generated mask when a panel is added, resized, reshaped, or split; page
@@ -56,6 +60,12 @@ class ComicWorkspaceController extends ChangeNotifier {
   /// independent of a canvas.
   final Future<void> Function(rust.ComicProjectView snapshot)?
   onPanelGeometryChanged;
+
+  /// Refreshes the shared canvas projection after a structural panel removal.
+  /// The bridge mutation already updates applied frame pixels atomically with
+  /// project history; this callback only retires transient selection and UI
+  /// projections.
+  final Future<void> Function(BigInt panelId)? onPanelRemoved;
 
   /// Publishes a shared capability view of the active page document. The
   /// canvas host can rebind its existing EngineApi without creating a second
@@ -79,6 +89,7 @@ class ComicWorkspaceController extends ChangeNotifier {
   bool _loading = false;
   bool _canUndo = false;
   bool _canRedo = false;
+  bool _illustrationPanelProject = false;
 
   rust.ComicProjectView? get snapshot => _snapshot;
   rust.ComicPrintPreviewView? get printPreview => _printPreview;
@@ -90,6 +101,7 @@ class ComicWorkspaceController extends ChangeNotifier {
   bool get loading => _loading;
   bool get canUndo => _canUndo;
   bool get canRedo => _canRedo;
+  bool get isIllustrationPanelProject => _illustrationPanelProject;
 
   BigInt _newLocalId() => BigInt.from(_nextLocalId++);
 
@@ -140,6 +152,8 @@ class ComicWorkspaceController extends ChangeNotifier {
     if (handle == null || !_canUndo) return;
     try {
       _snapshot = await rust.undoProject(handle: handle);
+      await _publishProject();
+      await _publishActivePage();
       await _persist();
       _error = null;
     } catch (error) {
@@ -153,6 +167,8 @@ class ComicWorkspaceController extends ChangeNotifier {
     if (handle == null || !_canRedo) return;
     try {
       _snapshot = await rust.redoProject(handle: handle);
+      await _publishProject();
+      await _publishActivePage();
       await _persist();
       _error = null;
     } catch (error) {
@@ -161,27 +177,127 @@ class ComicWorkspaceController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> ensureExampleLoaded() async {
+  Future<bool> undoIfLatestCanvasEdit() async {
+    final handle = _handle;
+    if (handle == null || !await rust.projectCanUndo(handle: handle)) {
+      return false;
+    }
+    if (!await rust.projectUndoIsLatest(handle: handle)) return false;
+    await undo();
+    return true;
+  }
+
+  Future<bool> redoIfLatestCanvasEdit() async {
+    final handle = _handle;
+    if (handle == null || !await rust.projectCanRedo(handle: handle)) {
+      return false;
+    }
+    if (!await rust.projectRedoIsLatest(handle: handle)) return false;
+    await redo();
+    return true;
+  }
+
+  /// Load an existing comic sidecar when one is present. An empty workspace
+  /// remains empty until the user chooses a new comic or webtoon; opening the
+  /// palette must never replace the active illustration with sample content.
+  Future<void> ensureProjectLoaded() async {
     if (_handle != null || _loading) return;
     _loading = true;
     _error = null;
     notifyListeners();
     try {
       final existing = await readExisting?.call();
+      if (existing == null || existing.isEmpty) return;
+      final createPanelProject = createIllustrationPanelProject;
       _handle =
-          existing == null
-              ? await rust.createStudioXkcdStickFigureProject()
-              : await rust.createStudioProjectFromJson(bytes: existing);
+          createPanelProject == null
+              ? await rust.createStudioProjectFromJson(bytes: existing)
+              : await createPanelProject();
       _snapshot = await rust.projectSnapshot(handle: _handle!);
+      _illustrationPanelProject = _snapshot!.template == 0;
       await _publishProject();
       await _publishActivePage();
-      if (existing == null) {
-        await _persist();
-      } else {
-        _lastPersistedJson = Uint8List.fromList(existing);
-        _canUndo = await rust.projectCanUndo(handle: _handle!);
-        _canRedo = await rust.projectCanRedo(handle: _handle!);
+      _lastPersistedJson = Uint8List.fromList(existing);
+      _canUndo = await rust.projectCanUndo(handle: _handle!);
+      _canRedo = await rust.projectCanRedo(handle: _handle!);
+    } catch (error) {
+      _error = error;
+    } finally {
+      _loading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Attach the active one-page illustration document to Rust's panel
+  /// structure without replacing or copying its artwork.
+  Future<void> ensureIllustrationPanelProject() async {
+    if (_loading) return;
+    if (_handle != null) {
+      if (_illustrationPanelProject) return;
+      _error = StateError(
+        'The Panel tool is available on illustration documents.',
+      );
+      notifyListeners();
+      return;
+    }
+    final createProject = createIllustrationPanelProject;
+    if (createProject == null) {
+      _error = StateError('Panel editing is unavailable for this engine.');
+      notifyListeners();
+      return;
+    }
+    _loading = true;
+    _error = null;
+    notifyListeners();
+    try {
+      _handle = await createProject();
+      _snapshot = await rust.projectSnapshot(handle: _handle!);
+      if (_snapshot!.pages.length != 1) {
+        throw StateError('Panel editing requires a single illustration page.');
       }
+      _illustrationPanelProject = true;
+      _lastPersistedJson = Uint8List.fromList(
+        await rust.studioProjectToJson(handle: _handle!),
+      );
+      _canUndo = await rust.projectCanUndo(handle: _handle!);
+      _canRedo = await rust.projectCanRedo(handle: _handle!);
+      await _publishProject();
+      await _publishActivePage();
+    } catch (error) {
+      _error = error;
+    } finally {
+      _loading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Adopt the Studio capability already opened by startup recovery. The
+  /// engine and comic controller then share the same project and page handles.
+  Future<void> adoptRecoveredProject(rust.StudioProjectHandle handle) async {
+    if (_handle != null || _loading) return;
+    _loading = true;
+    _error = null;
+    notifyListeners();
+    try {
+      final snapshot = await rust.projectSnapshot(handle: handle);
+      if (snapshot.pages.isEmpty) {
+        throw StateError('The recovery project does not contain a page.');
+      }
+      _handle = handle;
+      _illustrationPanelProject =
+          snapshot.template == 0 && snapshot.pages.length == 1;
+      _snapshot = snapshot;
+      _lastKnownPageIndex = 0;
+      _printPreview = null;
+      _pagePreviewBytes = null;
+      _pagePreviewIndex = null;
+      _lastPersistedJson = Uint8List.fromList(
+        await rust.studioProjectToJson(handle: handle),
+      );
+      _canUndo = await rust.projectCanUndo(handle: handle);
+      _canRedo = await rust.projectCanRedo(handle: handle);
+      await _publishProject();
+      await _publishActivePage();
     } catch (error) {
       _error = error;
     } finally {
@@ -195,6 +311,7 @@ class ComicWorkspaceController extends ChangeNotifier {
   Future<void> closeProject() async {
     final handle = _handle;
     _handle = null;
+    _illustrationPanelProject = false;
     _snapshot = null;
     _printPreview = null;
     _pagePreviewBytes = null;
@@ -227,10 +344,16 @@ class ComicWorkspaceController extends ChangeNotifier {
     notifyListeners();
     rust.StudioProjectHandle? next;
     try {
-      next = await rust.createStudioProjectFromJson(bytes: persisted);
+      final createPanelProject = createIllustrationPanelProject;
+      next =
+          createPanelProject == null
+              ? await rust.createStudioProjectFromJson(bytes: persisted)
+              : await createPanelProject();
       final nextSnapshot = await rust.projectSnapshot(handle: next);
       final old = _handle;
       _handle = next;
+      _illustrationPanelProject =
+          nextSnapshot.template == 0 && nextSnapshot.pages.length == 1;
       _snapshot = nextSnapshot;
       await _publishProject();
       await _publishActivePage();
@@ -273,6 +396,8 @@ class ComicWorkspaceController extends ChangeNotifier {
         throw StateError('The comic project has no pages.');
       }
       _handle = next;
+      _illustrationPanelProject =
+          snapshot.template == 0 && snapshot.pages.length == 1;
       _snapshot = snapshot;
       await _publishProject();
       await _publishActivePage();
@@ -328,6 +453,7 @@ class ComicWorkspaceController extends ChangeNotifier {
         dpi: webtoon ? 144 : 300,
       );
       _handle = handle;
+      _illustrationPanelProject = false;
       try {
         _snapshot = await rust.projectSnapshot(handle: handle);
         await _publishProject();
@@ -536,6 +662,165 @@ class ComicWorkspaceController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> removePanel({
+    required int pageIndex,
+    required BigInt panelId,
+  }) async {
+    final handle = _handle;
+    final snapshot = _snapshot;
+    if (handle == null ||
+        snapshot == null ||
+        pageIndex < 0 ||
+        pageIndex >= snapshot.pages.length ||
+        !snapshot.pages[pageIndex].panels.any((panel) => panel.id == panelId)) {
+      return;
+    }
+    _error = null;
+    try {
+      _snapshot = await rust.studioRemovePanel(
+        handle: handle,
+        pageIndex: pageIndex,
+        panelId: panelId,
+      );
+      await _persist();
+      await onPanelRemoved?.call(panelId);
+    } catch (error) {
+      _error = error;
+    }
+    notifyListeners();
+  }
+
+  Future<void> applyPanelLayout({
+    required int pageIndex,
+    required int panelCount,
+    required double gutterPx,
+    required double borderPx,
+  }) async {
+    final handle = _handle;
+    final snapshot = _snapshot;
+    if (handle == null ||
+        snapshot == null ||
+        pageIndex < 0 ||
+        pageIndex >= snapshot.pages.length ||
+        !<int>{2, 3, 4}.contains(panelCount) ||
+        snapshot.pages[pageIndex].panels.isNotEmpty) {
+      return;
+    }
+    try {
+      _snapshot = await rust.studioApplyPanelLayout(
+        handle: handle,
+        pageIndex: pageIndex,
+        panelIds: List<BigInt>.generate(panelCount, (_) => _newLocalId()),
+        gutterPx: gutterPx,
+        borderPx: borderPx,
+      );
+      await _persist();
+      _error = null;
+    } catch (error) {
+      _error = error;
+    }
+    notifyListeners();
+  }
+
+  Future<void> splitPanel({
+    required int pageIndex,
+    required BigInt panelId,
+    required int axis,
+    required double ratio,
+    required double gutterPx,
+    required double borderPx,
+  }) async {
+    final handle = _handle;
+    final snapshot = _snapshot;
+    if (handle == null ||
+        snapshot == null ||
+        pageIndex < 0 ||
+        pageIndex >= snapshot.pages.length) {
+      return;
+    }
+    try {
+      final page = snapshot.pages[pageIndex];
+      final panel = page.panels.where((candidate) => candidate.id == panelId);
+      if (panel.isEmpty) {
+        if (page.panels.isNotEmpty) return;
+        _snapshot = await rust.studioCreatePanelSplit(
+          handle: handle,
+          pageIndex: pageIndex,
+          panelId: panelId,
+          firstId: _newLocalId(),
+          secondId: _newLocalId(),
+          axis: axis,
+          ratio: ratio.clamp(0.1, 0.9),
+          gutterPx: gutterPx,
+          borderPx: borderPx,
+        );
+      } else {
+        _snapshot = await rust.splitProjectPanel(
+          handle: handle,
+          pageIndex: pageIndex,
+          panelId: panelId,
+          firstId: _newLocalId(),
+          secondId: _newLocalId(),
+          axis: axis,
+          ratio: ratio.clamp(0.1, 0.9),
+        );
+      }
+      await _persist();
+      _error = null;
+    } catch (error) {
+      _error = error;
+    }
+    notifyListeners();
+  }
+
+  Future<void> resizePanelDivider({
+    required int pageIndex,
+    required BigInt firstPanelId,
+    required BigInt secondPanelId,
+    required int axis,
+    required double position,
+  }) async {
+    final handle = _handle;
+    if (handle == null) return;
+    try {
+      _snapshot = await rust.studioResizePanelDivider(
+        handle: handle,
+        pageIndex: pageIndex,
+        firstId: firstPanelId,
+        secondId: secondPanelId,
+        axis: axis,
+        position: position,
+      );
+      await _persist();
+      _error = null;
+    } catch (error) {
+      _error = error;
+    }
+    notifyListeners();
+  }
+
+  Future<void> setPanelStyle({
+    required int pageIndex,
+    required double gutterPx,
+    required double borderPx,
+  }) async {
+    final handle = _handle;
+    if (handle == null) return;
+    try {
+      _snapshot = await rust.studioSetPanelStyle(
+        handle: handle,
+        pageIndex: pageIndex,
+        gutterPx: gutterPx,
+        borderPx: borderPx,
+      );
+      await _persist();
+      _error = null;
+    } catch (error) {
+      _error = error;
+    }
+    notifyListeners();
+  }
+
   Future<void> setPanelBounds({
     required int pageIndex,
     required BigInt panelId,
@@ -557,7 +842,6 @@ class ComicWorkspaceController extends ChangeNotifier {
         height: height,
       );
       await _persist();
-      await onPanelGeometryChanged?.call(_snapshot!);
       _error = null;
     } catch (error) {
       _error = error;

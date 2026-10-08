@@ -17,6 +17,8 @@ class CanvasHistoryActionHost {
     required this.loadVectorSelection,
     required this.mounted,
     required this.setState,
+    this.undoProjectIfLatest,
+    this.redoProjectIfLatest,
   });
 
   final EngineApi Function() engine;
@@ -28,6 +30,8 @@ class CanvasHistoryActionHost {
   final Future<void> Function() loadVectorSelection;
   final bool Function() mounted;
   final void Function(VoidCallback update) setState;
+  final Future<bool> Function()? undoProjectIfLatest;
+  final Future<bool> Function()? redoProjectIfLatest;
 }
 
 /// Owns undo, redo, and history navigation ordering and projection refreshes.
@@ -55,10 +59,11 @@ class CanvasHistoryActions {
       // Stroke packets and EndStroke share a serial queue. Drain it before
       // advancing history so a fast shortcut cannot undo the previous item.
       await host.waitForStrokeOperations();
-      await host.engine().undo();
+      final projectUndone = await host.undoProjectIfLatest?.call() ?? false;
+      if (!projectUndone) await host.engine().undo();
       host.markDirty();
-      await host.refreshLayerProjection();
       unawaited(host.refreshTiles());
+      unawaited(host.refreshLayerProjection());
     } catch (error, stack) {
       debugPrint('Project Ink undo failed: $error\n$stack');
     }
@@ -67,10 +72,11 @@ class CanvasHistoryActions {
   Future<void> redo() async {
     try {
       await host.waitForStrokeOperations();
-      await host.engine().redo();
+      final projectRedone = await host.redoProjectIfLatest?.call() ?? false;
+      if (!projectRedone) await host.engine().redo();
       host.markDirty();
-      await host.refreshLayerProjection();
       unawaited(host.refreshTiles());
+      unawaited(host.refreshLayerProjection());
     } catch (error, stack) {
       debugPrint('Project Ink redo failed: $error\n$stack');
     }

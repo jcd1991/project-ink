@@ -6,12 +6,12 @@ void main() {
   testWidgets('desktop dock opt-in never forces a mobile workspace', (
     tester,
   ) async {
-    late WorkspaceMode mode;
+    late CanvasLayoutMode mode;
     await tester.pumpWidget(
       MaterialApp(
         home: Builder(
           builder: (context) {
-            mode = resolveWorkspaceMode(
+            mode = resolveCanvasLayoutMode(
               context,
               desktopDockEnabled: true,
               targetPlatform: TargetPlatform.iOS,
@@ -21,20 +21,20 @@ void main() {
         ),
       ),
     );
-    expect(mode, WorkspaceMode.expandedTouch);
+    expect(mode, CanvasLayoutMode.expandedTouch);
   });
 
   testWidgets('narrow Android layouts resolve to compact touch mode', (
     tester,
   ) async {
-    late WorkspaceMode mode;
+    late CanvasLayoutMode mode;
     await tester.pumpWidget(
       MediaQuery(
         data: const MediaQueryData(size: Size(390, 844)),
         child: MaterialApp(
           home: Builder(
             builder: (context) {
-              mode = resolveWorkspaceMode(
+              mode = resolveCanvasLayoutMode(
                 context,
                 desktopDockEnabled: true,
                 targetPlatform: TargetPlatform.android,
@@ -45,18 +45,18 @@ void main() {
         ),
       ),
     );
-    expect(mode, WorkspaceMode.compactTouch);
+    expect(mode, CanvasLayoutMode.compactTouch);
   });
 
   testWidgets('desktop targets retain the professional desktop mode', (
     tester,
   ) async {
-    late WorkspaceMode mode;
+    late CanvasLayoutMode mode;
     await tester.pumpWidget(
       MaterialApp(
         home: Builder(
           builder: (context) {
-            mode = resolveWorkspaceMode(
+            mode = resolveCanvasLayoutMode(
               context,
               desktopDockEnabled: true,
               targetPlatform: TargetPlatform.macOS,
@@ -66,6 +66,6 @@ void main() {
         ),
       ),
     );
-    expect(mode, WorkspaceMode.desktop);
+    expect(mode, CanvasLayoutMode.desktop);
   });
 }

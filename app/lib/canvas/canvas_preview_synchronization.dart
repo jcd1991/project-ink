@@ -50,8 +50,8 @@ class CanvasPreviewSynchronization {
   bool _viewportSyncScheduled = false;
   bool _disposed = false;
 
-  final ValueNotifier<LiveStrokePreview?> strokePreview =
-      ValueNotifier<LiveStrokePreview?>(null);
+  final ValueNotifier<List<LiveStrokePreview>> strokePreviews =
+      ValueNotifier<List<LiveStrokePreview>>(<LiveStrokePreview>[]);
   StrokeAcknowledgement? lastPublishedPreviewAcknowledgement;
   bool awaitingPreviewCommit = false;
 
@@ -128,18 +128,20 @@ class CanvasPreviewSynchronization {
     return disposal;
   }
 
-  void setStrokePreview(LiveStrokePreview? next) {
-    final previous = strokePreview.value;
-    strokePreview.value = next;
-    if (previous == null) return;
+  void setStrokePreviews(Iterable<LiveStrokePreview> next) {
+    final previous = strokePreviews.value;
+    final updated = List<LiveStrokePreview>.unmodifiable(next);
+    strokePreviews.value = updated;
     final retained = <ui.Picture>{
-      for (final chunk in next?.chunks ?? const <LiveStrokePreviewChunk>[])
-        chunk.picture,
+      for (final preview in updated)
+        for (final chunk in preview.chunks) chunk.picture,
     };
     final disposed = <ui.Picture>{};
-    for (final chunk in previous.chunks) {
-      if (!retained.contains(chunk.picture) && disposed.add(chunk.picture)) {
-        chunk.picture.dispose();
+    for (final preview in previous) {
+      for (final chunk in preview.chunks) {
+        if (!retained.contains(chunk.picture) && disposed.add(chunk.picture)) {
+          chunk.picture.dispose();
+        }
       }
     }
   }
@@ -151,9 +153,12 @@ class CanvasPreviewSynchronization {
   }
 
   void _onFrameReadinessChanged() {
-    final preview = strokePreview.value;
-    if (preview != null) {
-      setStrokePreview(preview.copyWith(revision: preview.revision + 1));
+    final previews = strokePreviews.value;
+    if (previews.isNotEmpty) {
+      // Rebuild the overlay stack without replacing preview objects. The
+      // preview owner tracks each stroke by object identity until its CPU
+      // acknowledgement is published.
+      setStrokePreviews(previews);
     }
   }
 
@@ -197,8 +202,8 @@ class CanvasPreviewSynchronization {
     if (_disposed) return;
     _disposed = true;
     unawaited(detachSurface());
-    setStrokePreview(null);
+    setStrokePreviews(const <LiveStrokePreview>[]);
     resetStrokeCommitState();
-    strokePreview.dispose();
+    strokePreviews.dispose();
   }
 }

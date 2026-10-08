@@ -117,6 +117,14 @@ class FlutterPointerStrokeCoordinator {
     if (!host.strokeActive()) return;
 
     final position = preparedPosition;
+    final insideCanvas =
+        host.isInsideDocument(position) &&
+        host.isInsideViewport(event.localPosition);
+    if (host.captureEndedAtBoundary() && !isDown && insideCanvas) {
+      // Pointer capture may continue after leaving the artwork. Resume the
+      // same transaction when it re-enters; Rust starts a separate path there.
+      host.setCaptureEndedAtBoundary(false);
+    }
     if (!isDown &&
         !host.isInsideViewport(event.localPosition) &&
         host.isInsideDocument(position)) {

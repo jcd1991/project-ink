@@ -3,6 +3,30 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/canvas/canvas_comic_workspace_notifications.dart';
 
 void main() {
+  test('automatic workspace follows document template, not panel metadata', () {
+    expect(
+      canvasWorkspaceForDocument(
+        hasProject: false,
+        isIllustrationPanelProject: false,
+      ),
+      'illustration',
+    );
+    expect(
+      canvasWorkspaceForDocument(
+        hasProject: true,
+        isIllustrationPanelProject: true,
+      ),
+      'illustration',
+    );
+    expect(
+      canvasWorkspaceForDocument(
+        hasProject: true,
+        isIllustrationPanelProject: false,
+      ),
+      'comic',
+    );
+  });
+
   testWidgets(
     'coalesces notifications and applies page and workspace effects',
     (tester) async {

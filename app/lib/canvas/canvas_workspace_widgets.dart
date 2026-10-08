@@ -88,12 +88,12 @@ class ComicCanvasGuideOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final snapshot = controller.snapshot;
-    final pageIndex = controller.pagePreviewIndex;
+    // Structural panel edits invalidate the rasterized page preview. The
+    // panel guide still needs the active page projection while that preview
+    // is being regenerated, otherwise committed dividers disappear.
+    final pageIndex = controller.activePageIndex;
     final page =
-        snapshot != null &&
-                pageIndex != null &&
-                pageIndex >= 0 &&
-                pageIndex < snapshot.pages.length
+        snapshot != null && pageIndex >= 0 && pageIndex < snapshot.pages.length
             ? snapshot.pages[pageIndex]
             : null;
     if (page == null) return const SizedBox.shrink();
@@ -155,11 +155,6 @@ class _ComicCanvasGuidePainter extends CustomPainter {
           ..color = const Color(0xff34d399).withValues(alpha: 0.95)
           ..style = PaintingStyle.stroke
           ..strokeWidth = (3 / scale.clamp(0.1, 32)).clamp(1.0, 5);
-    final gutter =
-        Paint()
-          ..color = const Color(0xfffbbf24).withValues(alpha: 0.72)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = (1 / scale.clamp(0.1, 32)).clamp(0.5, 3);
     for (final panel in page.panels) {
       final rect = Rect.fromLTWH(
         panel.x * scaleX - origin.dx,
@@ -168,6 +163,10 @@ class _ComicCanvasGuidePainter extends CustomPainter {
         panel.height * scaleY,
       );
       final points = panel.polygon;
+      border.strokeWidth = (panel.borderPx * math.min(scaleX, scaleY) * scale)
+          .clamp(0.5, 24);
+      activeBorder.strokeWidth = (border.strokeWidth + 2 / scale.clamp(0.1, 32))
+          .clamp(1.0, 28);
       if (points.length >= 6 && points.length.isEven) {
         final path =
             Path()..moveTo(
@@ -187,12 +186,6 @@ class _ComicCanvasGuidePainter extends CustomPainter {
         canvas.drawRect(
           rect,
           panel.id == activePanelId ? activeBorder : border,
-        );
-      }
-      if (panel.gutterPx > 0) {
-        canvas.drawRect(
-          rect.deflate(panel.gutterPx * math.min(scaleX, scaleY) / 2),
-          gutter,
         );
       }
     }

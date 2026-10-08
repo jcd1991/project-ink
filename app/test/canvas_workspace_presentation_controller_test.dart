@@ -47,25 +47,16 @@ void main() {
       const CanvasFloatingPanelVisibility(tools: true),
     );
 
-    expect(
-      controller.toggleTabletMode(TabletWorkspaceMode.simple),
-      TabletWorkspaceMode.studio,
-    );
+    expect(controller.toggleEditorMode(EditorMode.simple), EditorMode.studio);
     expect(controller.floatingPanels.layers, isTrue);
 
     controller.setFloatingPanels(
       const CanvasFloatingPanelVisibility(comics: true),
     );
-    expect(
-      controller.toggleTabletMode(TabletWorkspaceMode.studio),
-      TabletWorkspaceMode.simple,
-    );
+    expect(controller.toggleEditorMode(EditorMode.studio), EditorMode.simple);
     expect(controller.floatingPanels.tools, isTrue);
 
-    expect(
-      controller.toggleTabletMode(TabletWorkspaceMode.simple),
-      TabletWorkspaceMode.studio,
-    );
+    expect(controller.toggleEditorMode(EditorMode.simple), EditorMode.studio);
     expect(controller.floatingPanels.comics, isTrue);
   });
 }

@@ -2,7 +2,7 @@ import '../app/editor_action.dart';
 import '../app/workspace_preferences.dart';
 import 'canvas_floating_panel_visibility.dart';
 
-enum CanvasPanelSheet { color, history, quickAccess }
+enum CanvasPanelSheet { color, history, quickAccess, layers }
 
 /// Resolves panel-oriented editor commands to the workspace panel identifier.
 String? canvasWorkspacePanelForAction(EditorActionId action) =>
@@ -40,21 +40,22 @@ class CanvasWorkspacePanelSelection {
   bool get selectsDesktopDock => dockSide != null;
 }
 
-/// Applies compact/tablet and desktop-dock panel selection rules.
+/// Applies compact-phone, Studio-touch, and desktop-dock selection rules.
 ///
 /// This is a pure policy boundary. The route owns widgets, context, state
 /// publication, and preference persistence.
 CanvasWorkspacePanelSelection selectCanvasWorkspacePanel({
   required String panel,
   required bool wideDesktop,
-  required bool tabletStudio,
+  required bool studioTouchLayout,
+  bool compactPhone = false,
   required WorkspaceLayout layout,
   required List<DockGroupLayout> leftGroups,
   required List<DockGroupLayout> rightGroups,
   required CanvasFloatingPanelVisibility floatingPanels,
 }) {
   var nextPanels = floatingPanels;
-  if (tabletStudio && (panel == 'history' || panel == 'quickAccess')) {
+  if (studioTouchLayout && (panel == 'history' || panel == 'quickAccess')) {
     nextPanels = const CanvasFloatingPanelVisibility();
   }
 
@@ -88,6 +89,14 @@ CanvasWorkspacePanelSelection selectCanvasWorkspacePanel({
     );
   }
 
+  if (compactPhone && (panel == 'color' || panel == 'layers')) {
+    return CanvasWorkspacePanelSelection(
+      floatingPanels: const CanvasFloatingPanelVisibility(),
+      sheet:
+          panel == 'layers' ? CanvasPanelSheet.layers : CanvasPanelSheet.color,
+    );
+  }
+
   final sheet = switch (panel) {
     'color' => CanvasPanelSheet.color,
     'history' => CanvasPanelSheet.history,
@@ -104,10 +113,10 @@ CanvasWorkspacePanelSelection selectCanvasWorkspacePanel({
   final floatingPanel = CanvasFloatingPanelVisibility.fromName(panel);
   if (floatingPanel != null) {
     nextPanels =
-        tabletStudio
+        studioTouchLayout
             ? nextPanels.toggleExclusive(floatingPanel)
             : nextPanels.toggle(floatingPanel);
-  } else if (tabletStudio) {
+  } else if (studioTouchLayout) {
     nextPanels = nextPanels.toggleExclusive(null);
   }
   return CanvasWorkspacePanelSelection(floatingPanels: nextPanels);

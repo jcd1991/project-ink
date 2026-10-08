@@ -57,6 +57,68 @@ void main() {
     );
     expect(confirmed.crossingSampleCount, 1);
   });
+
+  test('identifies confirmed re-entry after boundary capture ended', () {
+    final metrics = NativePencilPacketMetrics()..beginStroke();
+    metrics.observePacket(
+      _packet(InkPointerPhase.down, x: 10),
+      captureAlreadyEnded: false,
+      isInsideDocument: _isInside,
+    );
+    metrics.observePacket(
+      _packet(InkPointerPhase.move, x: 120),
+      captureAlreadyEnded: false,
+      isInsideDocument: _isInside,
+    );
+
+    final outside = metrics.observePacket(
+      _packet(InkPointerPhase.move, x: 140),
+      captureAlreadyEnded: true,
+      isInsideDocument: _isInside,
+    );
+    expect(outside.reentrySampleIndex, isNull);
+
+    final reentry = metrics.observePacket(
+      _packet(InkPointerPhase.move, x: 40),
+      captureAlreadyEnded: true,
+      isInsideDocument: _isInside,
+    );
+    expect(reentry.reentrySampleIndex, 0);
+    expect(reentry.crossingSampleCount, isNull);
+    expect(metrics.lastConfirmedSampleInside, isTrue);
+  });
+
+  test('reports exit and re-entry within one coalesced packet', () {
+    final metrics = NativePencilPacketMetrics()..beginStroke();
+    metrics.observePacket(
+      _packet(InkPointerPhase.down, x: 10),
+      captureAlreadyEnded: false,
+      isInsideDocument: _isInside,
+    );
+    final crossingAndReentry = metrics.observePacket(
+      _batch(<Uint8List>[
+        _packet(InkPointerPhase.move, x: 120),
+        _packet(InkPointerPhase.move, x: 40),
+      ]),
+      captureAlreadyEnded: false,
+      isInsideDocument: _isInside,
+    );
+
+    expect(crossingAndReentry.crossingSampleCount, 1);
+    expect(crossingAndReentry.reentrySampleIndex, 1);
+    expect(metrics.lastConfirmedSampleInside, isTrue);
+  });
+}
+
+Uint8List _batch(List<Uint8List> samples) {
+  final packet = Uint8List(4 + samples.length * 48);
+  final data = ByteData.sublistView(packet);
+  data.setUint16(0, 1, Endian.little);
+  data.setUint16(2, samples.length, Endian.little);
+  for (var index = 0; index < samples.length; index++) {
+    packet.setRange(4 + index * 48, 4 + (index + 1) * 48, samples[index], 4);
+  }
+  return packet;
 }
 
 bool _isInside(Offset position) => position.dx >= 0 && position.dx < 100;

@@ -94,7 +94,7 @@ class NativePencilInputCoordinator {
         diagnostics.isRecording ? diagnostics.elapsedMicroseconds : null;
     diagnostics.recordPacket(
       'input.native_packet',
-      'ios_event_channel',
+      'native_pointer_event_channel',
       packet,
     );
 
@@ -174,7 +174,7 @@ class NativePencilInputCoordinator {
       );
       host.schedulePreviewFrameDiagnostic();
       diagnostics.record('canvas.live_input_accepted', {
-        'device': 'apple_pencil',
+        'device': 'stylus',
         'confirmedSamples': samples.length,
         'confirmedPreviewIndexStart': host.previewIndexForSequence(
           samples.first.sourceSequence,

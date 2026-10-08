@@ -45,9 +45,14 @@ class LiveStrokeCoordinator {
     _previewIndexBySequence.removeWhere((_, index) => index <= previewIndex);
   }
 
-  int appendPoint(LiveStrokePreview preview, LiveStrokePreviewPoint point) {
+  int appendPoint(
+    LiveStrokePreview preview,
+    LiveStrokePreviewPoint point, {
+    bool startsPath = false,
+  }) {
     preview.points.add(point);
     final lastIndex = preview.points.length - 1;
+    if (startsPath) preview.pathStartIndices.add(lastIndex);
     while (lastIndex - preview.chunkedThrough >= liveStrokePreviewChunkSize) {
       final firstIndex = preview.chunkedThrough;
       final finalIndex = firstIndex + liveStrokePreviewChunkSize;
@@ -92,6 +97,11 @@ class LiveStrokeCoordinator {
             .where((entry) => entry.value >= removable)
             .map((entry) => MapEntry(entry.key, entry.value - removable)),
       );
+    final retainedPathStarts =
+        preview.pathStartIndices
+            .where((index) => index > removable)
+            .map((index) => index - removable)
+            .toSet();
     return preview.copyWith(
       confirmedThrough:
           (preview.confirmedThrough - removable)
@@ -100,6 +110,7 @@ class LiveStrokeCoordinator {
       revision: preview.revision + 1,
       chunks: retainedChunks,
       chunkedThrough: math.max(0, preview.chunkedThrough - removable),
+      pathStartIndices: retainedPathStarts,
     );
   }
 
@@ -163,6 +174,7 @@ LiveStrokePreviewChunk buildLiveStrokePreviewChunk(
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round;
   for (var index = firstPointIndex + 1; index <= lastPointIndex; index++) {
+    if (preview.pathStartIndices.contains(index)) continue;
     final previous = preview.points[index - 1];
     final current = preview.points[index];
     paint.color = _liveStrokePreviewColorAt(
@@ -248,10 +260,11 @@ class LiveStrokePreview {
     required this.eraser,
     required this.points,
     required this.chunks,
+    Set<int>? pathStartIndices,
     this.chunkedThrough = 0,
     this.revision = 0,
     this.confirmedThrough = 0,
-  });
+  }) : pathStartIndices = pathStartIndices ?? <int>{};
 
   final Color color;
   final double width;
@@ -264,6 +277,7 @@ class LiveStrokePreview {
   final bool eraser;
   final List<LiveStrokePreviewPoint> points;
   final List<LiveStrokePreviewChunk> chunks;
+  final Set<int> pathStartIndices;
   int chunkedThrough;
   final int revision;
 
@@ -278,6 +292,7 @@ class LiveStrokePreview {
     int? confirmedThrough,
     List<LiveStrokePreviewChunk>? chunks,
     int? chunkedThrough,
+    Set<int>? pathStartIndices,
   }) => LiveStrokePreview(
     color: color,
     width: width,
@@ -290,6 +305,7 @@ class LiveStrokePreview {
     eraser: eraser,
     points: points ?? this.points,
     chunks: chunks ?? this.chunks,
+    pathStartIndices: pathStartIndices ?? this.pathStartIndices,
     chunkedThrough: chunkedThrough ?? this.chunkedThrough,
     revision: revision ?? this.revision,
     confirmedThrough: confirmedThrough ?? this.confirmedThrough,
@@ -358,6 +374,7 @@ class LiveStrokePreviewPainter extends CustomPainter {
       void drawRawThrough(int finalIndex) {
         for (var index = paintedThrough + 1; index <= finalIndex; index++) {
           if (index >= active.points.length) break;
+          if (active.pathStartIndices.contains(index)) continue;
           final previous = active.points[index - 1];
           final current = active.points[index];
           paint.color = _liveStrokePreviewColorAt(

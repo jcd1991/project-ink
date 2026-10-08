@@ -37,7 +37,7 @@ void main() {
     await tester.tap(find.byTooltip('More actions and workspace settings'));
     await tester.pumpAndSettle();
     expect(find.text('Open project…'), findsOneWidget);
-    expect(find.text('Workspace'), findsOneWidget);
+    expect(find.text('Workspace layout'), findsOneWidget);
     expect(find.text('Color'), findsNothing);
     await tester.tapAt(const Offset(12, 550));
     await tester.pumpAndSettle();
@@ -49,9 +49,63 @@ void main() {
     expect(find.text('Studio'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('desktop command bar remains independent of touch editor mode', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: _topBar(
+            simpleTouchLayout: false,
+            editorMode: EditorMode.studio,
+            phoneLayout: false,
+            professionalDesktop: true,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('More commands'), findsOneWidget);
+    expect(
+      find.byTooltip('Studio mode selected. Choose Simple or Studio.'),
+      findsNothing,
+    );
+  });
+
+  testWidgets('phone Studio More menu exposes advanced panels', (tester) async {
+    String? selectedPanel;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: _topBar(
+            editorMode: EditorMode.studio,
+            onSelectPanel: (panel) => selectedPanel = panel,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('More actions and workspace settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('Studio panels'), findsOneWidget);
+    expect(find.text('Tool properties'), findsOneWidget);
+    expect(find.text('Materials'), findsOneWidget);
+    expect(find.text('History'), findsOneWidget);
+    expect(find.text('Quick Access'), findsOneWidget);
+    await tester.tap(find.text('History'));
+    expect(selectedPanel, 'history');
+  });
 }
 
-CanvasTopBar _topBar() => const CanvasTopBar(
+CanvasTopBar _topBar({
+  bool simpleTouchLayout = true,
+  bool studioTouchLayout = false,
+  EditorMode editorMode = EditorMode.simple,
+  bool phoneLayout = true,
+  bool professionalDesktop = false,
+  ValueChanged<String> onSelectPanel = _ignoreString,
+}) => CanvasTopBar(
   documentName: 'Untitled',
   activeToolLabel: 'Brush',
   activeBrushLabel: 'Opaque Round',
@@ -64,18 +118,20 @@ CanvasTopBar _topBar() => const CanvasTopBar(
   onGestureSettings: _noop,
   onAccessibilitySettings: _noop,
   onComics: _noop,
+  onSelectPanel: onSelectPanel,
   onUndo: _noop,
   onRedo: _noop,
   onCommandSearch: _noop,
   mirrored: false,
-  tabletSimpleMode: true,
-  tabletStudioMode: false,
-  tabletModePreference: TabletWorkspaceMode.simple,
-  onTabletModeSelected: _ignoreMode,
+  simpleTouchLayout: simpleTouchLayout,
+  studioTouchLayout: studioTouchLayout,
+  editorMode: editorMode,
+  phoneLayout: phoneLayout,
+  onEditorModeSelected: _ignoreMode,
   onToggleFocus: _noop,
   workspaceId: 'illustration',
   onWorkspaceSelected: _ignoreString,
-  professionalDesktop: false,
+  professionalDesktop: professionalDesktop,
   nativeMenuBar: false,
   customWorkspaces: [],
   onSaveWorkspaceAs: _noop,
@@ -91,7 +147,7 @@ CanvasTopBar _topBar() => const CanvasTopBar(
 
 void _noop() {}
 
-void _ignoreMode(TabletWorkspaceMode _) {}
+void _ignoreMode(EditorMode _) {}
 
 void _ignoreString(String _) {}
 

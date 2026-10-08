@@ -1547,6 +1547,34 @@ void main() {
     expect(selectedContents?.id, 12);
   });
 
+  testWidgets('layer options clear paint without deleting the layer', (
+    tester,
+  ) async {
+    final selection = LayerSelectionModel()..select(12);
+    LayerView? clearedLayer;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: LayerPanel(
+            layers: const [
+              LayerView(id: 12, name: 'Panel Frames', kind: LayerKind.raster),
+            ],
+            selection: selection,
+            onClearLayer: (layer) => clearedLayer = layer,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Layer options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Clear layer'));
+    await tester.pumpAndSettle();
+
+    expect(clearedLayer?.id, 12);
+    expect(clearedLayer?.name, 'Panel Frames');
+  });
+
   testWidgets('Merge down menu previews adjacent sibling IDs', (tester) async {
     final selection = LayerSelectionModel()..select(22);
     int? sourceId;

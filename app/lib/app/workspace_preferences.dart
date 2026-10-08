@@ -5,7 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'editor_action.dart';
 import 'workspace_mode.dart';
 
-enum TabletWorkspaceMode { simple, studio }
+/// The editor's feature mode, independent from device size and workspace layout.
+enum EditorMode { simple, studio }
 
 enum WorkspacePresetKind { illustration, comic, minimal, custom }
 
@@ -354,15 +355,15 @@ WorkspaceLayout get comicWorkspace => const WorkspaceLayout(
 
 const minimalWorkspace = WorkspaceLayout(
   id: 'minimal',
-  name: 'Minimal',
+  name: 'Minimal layout',
   kind: WorkspacePresetKind.minimal,
 );
 
 /// Versioned, device-local settings. None of these values are part of a document.
 class WorkspacePreferences {
   const WorkspacePreferences({
-    this.modeOverride,
-    this.tabletMode = TabletWorkspaceMode.simple,
+    this.layoutModeOverride,
+    this.editorMode = EditorMode.simple,
     this.leftHanded = false,
     this.theme = 'dark',
     this.dockWidth = 360,
@@ -388,8 +389,8 @@ class WorkspacePreferences {
     this.workspaceOverrides = const {},
   });
 
-  final WorkspaceMode? modeOverride;
-  final TabletWorkspaceMode tabletMode;
+  final CanvasLayoutMode? layoutModeOverride;
+  final EditorMode editorMode;
   final bool leftHanded;
   final String theme;
   final double dockWidth;
@@ -408,9 +409,9 @@ class WorkspacePreferences {
   final Map<String, WorkspaceLayout> workspaceOverrides;
 
   WorkspacePreferences copyWith({
-    WorkspaceMode? modeOverride,
-    bool clearModeOverride = false,
-    TabletWorkspaceMode? tabletMode,
+    CanvasLayoutMode? layoutModeOverride,
+    bool clearLayoutModeOverride = false,
+    EditorMode? editorMode,
     bool? leftHanded,
     String? theme,
     double? dockWidth,
@@ -428,9 +429,11 @@ class WorkspacePreferences {
     Map<String, List<String>>? commandBarOverrides,
     Map<String, WorkspaceLayout>? workspaceOverrides,
   }) => WorkspacePreferences(
-    modeOverride:
-        clearModeOverride ? null : (modeOverride ?? this.modeOverride),
-    tabletMode: tabletMode ?? this.tabletMode,
+    layoutModeOverride:
+        clearLayoutModeOverride
+            ? null
+            : (layoutModeOverride ?? this.layoutModeOverride),
+    editorMode: editorMode ?? this.editorMode,
     leftHanded: leftHanded ?? this.leftHanded,
     theme: theme ?? this.theme,
     dockWidth: dockWidth ?? this.dockWidth,
@@ -454,8 +457,12 @@ class WorkspacePreferences {
 
   Map<String, Object?> toJson() => {
     'version': _version,
-    'mode_override': modeOverride?.name,
-    'tablet_mode': tabletMode.name,
+    'layout_mode_override': layoutModeOverride?.name,
+    // Keep the former key in sync so earlier app versions can read it.
+    'mode_override': layoutModeOverride?.name,
+    'editor_mode': editorMode.name,
+    // Keep the legacy key in sync for older app versions and downgrade reads.
+    'tablet_mode': editorMode.name,
     'left_handed': leftHanded,
     'theme': theme,
     'dock_width': dockWidth,
@@ -492,10 +499,13 @@ class WorkspacePreferences {
         name is String
             ? values.where((item) => item.name == name).firstOrNull
             : null;
-    final mode = enumValue(WorkspaceMode.values, value['mode_override']);
-    final tabletMode =
-        enumValue(TabletWorkspaceMode.values, value['tablet_mode']) ??
-        TabletWorkspaceMode.simple;
+    final layoutMode =
+        enumValue(CanvasLayoutMode.values, value['layout_mode_override']) ??
+        enumValue(CanvasLayoutMode.values, value['mode_override']);
+    final editorMode =
+        enumValue(EditorMode.values, value['editor_mode']) ??
+        enumValue(EditorMode.values, value['tablet_mode']) ??
+        EditorMode.simple;
     final theme = value['theme'];
     final width = value['dock_width'];
     final leftWidth = value['left_dock_width'];
@@ -629,8 +639,8 @@ class WorkspacePreferences {
       ...custom.map((layout) => layout.id),
     };
     return WorkspacePreferences(
-      modeOverride: mode,
-      tabletMode: tabletMode,
+      layoutModeOverride: layoutMode,
+      editorMode: editorMode,
       leftHanded: value['left_handed'] == true,
       theme:
           theme is String && {'system', 'light', 'dark'}.contains(theme)

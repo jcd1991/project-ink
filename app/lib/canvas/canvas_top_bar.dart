@@ -134,14 +134,16 @@ class CanvasTopBar extends StatelessWidget {
     required this.onGestureSettings,
     required this.onAccessibilitySettings,
     required this.onComics,
+    required this.onSelectPanel,
     required this.onUndo,
     required this.onRedo,
     required this.onCommandSearch,
     required this.mirrored,
-    required this.tabletSimpleMode,
-    required this.tabletStudioMode,
-    required this.tabletModePreference,
-    required this.onTabletModeSelected,
+    required this.simpleTouchLayout,
+    required this.studioTouchLayout,
+    required this.editorMode,
+    required this.phoneLayout,
+    required this.onEditorModeSelected,
     required this.onToggleFocus,
     required this.workspaceId,
     required this.onWorkspaceSelected,
@@ -172,14 +174,16 @@ class CanvasTopBar extends StatelessWidget {
   final VoidCallback onGestureSettings;
   final VoidCallback onAccessibilitySettings;
   final VoidCallback onComics;
+  final ValueChanged<String> onSelectPanel;
   final VoidCallback onUndo;
   final VoidCallback onRedo;
   final VoidCallback onCommandSearch;
   final bool mirrored;
-  final bool tabletSimpleMode;
-  final bool tabletStudioMode;
-  final TabletWorkspaceMode tabletModePreference;
-  final ValueChanged<TabletWorkspaceMode> onTabletModeSelected;
+  final bool simpleTouchLayout;
+  final bool studioTouchLayout;
+  final EditorMode editorMode;
+  final bool phoneLayout;
+  final ValueChanged<EditorMode> onEditorModeSelected;
   final VoidCallback onToggleFocus;
   final String workspaceId;
   final ValueChanged<String> onWorkspaceSelected;
@@ -206,8 +210,9 @@ class CanvasTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (tabletSimpleMode) return _buildTabletTopBar(context);
-    if (tabletStudioMode) return _buildTabletTopBar(context);
+    if (phoneLayout || simpleTouchLayout || studioTouchLayout) {
+      return _buildCompactTopBar(context);
+    }
     // Keep the desktop command bar discoverable in narrow windows. The full
     // palette of commands moves into a labeled menu instead of becoming
     // reachable only by horizontally scrolling tiny icons.
@@ -217,6 +222,10 @@ class CanvasTopBar extends StatelessWidget {
     // contextual controls get clipped by the edge of the viewport.
     final compactDesktop = availableWidth < 2400;
     const compactVisibleCommands = {'undo', 'redo', 'commandSearch'};
+    final representedByContextControls =
+        contextControls == null
+            ? const <String>{}
+            : const {'showBrushes', 'showLayers', 'showColorPicker'};
     return SafeArea(
       bottom: false,
       child: Container(
@@ -240,7 +249,7 @@ class CanvasTopBar extends StatelessWidget {
                 style: Theme.of(context).textTheme.labelLarge,
               ),
               PopupMenuButton<String>(
-                tooltip: 'Workspace',
+                tooltip: 'Workspace layout',
                 onSelected: (value) {
                   if (value == 'saveAs') {
                     onSaveWorkspaceAs();
@@ -270,7 +279,7 @@ class CanvasTopBar extends StatelessWidget {
                     ),
                     const PopupMenuItem(
                       value: 'minimal',
-                      child: Text('Minimal workspace'),
+                      child: Text('Minimal layout'),
                     ),
                     CheckedPopupMenuItem(
                       value: 'follow',
@@ -392,12 +401,18 @@ class CanvasTopBar extends StatelessWidget {
               ],
               if (compactDesktop) ...[
                 for (final item in commandBarItems)
-                  if (compactVisibleCommands.contains(item))
+                  if (compactVisibleCommands.contains(item) &&
+                      !representedByContextControls.contains(item))
                     _commandBarButton(item),
-                _commandOverflowMenu(context, compactVisibleCommands),
+                _commandOverflowMenu(context, {
+                  ...compactVisibleCommands,
+                  ...representedByContextControls,
+                }),
               ] else
                 for (final item in commandBarItems)
-                  if (item == 'separator')
+                  if (representedByContextControls.contains(item))
+                    const SizedBox.shrink()
+                  else if (item == 'separator')
                     const VerticalDivider(width: 12, indent: 7, endIndent: 7)
                   else
                     _commandBarButton(item),
@@ -405,13 +420,13 @@ class CanvasTopBar extends StatelessWidget {
                 icon: Icons.touch_app,
                 label: 'Gesture settings',
                 onPressed: onGestureSettings,
-                hitSize: tabletStudioMode ? 48 : 32,
+                hitSize: studioTouchLayout ? 48 : 32,
               ),
               InkCommandButton(
                 icon: Icons.accessibility_new,
                 label: 'Accessibility settings',
                 onPressed: onAccessibilitySettings,
-                hitSize: tabletStudioMode ? 48 : 32,
+                hitSize: studioTouchLayout ? 48 : 32,
               ),
               if (contextControls != null && availableWidth >= 1600) ...[
                 const VerticalDivider(width: 12, indent: 7, endIndent: 7),
@@ -475,7 +490,7 @@ class CanvasTopBar extends StatelessWidget {
       label: label,
       selected: action == EditorActionId.mirrorCanvas && mirrored,
       onPressed: disabled ? null : () => onActionDispatch(action),
-      hitSize: tabletStudioMode ? 48 : 32,
+      hitSize: studioTouchLayout ? 48 : 32,
     );
   }
 
@@ -486,7 +501,7 @@ class CanvasTopBar extends StatelessWidget {
     _ => action.label,
   };
 
-  Widget _buildTabletTopBar(BuildContext context) {
+  Widget _buildCompactTopBar(BuildContext context) {
     final status =
         '$documentName  •  $activeToolLabel  •  $activeBrushLabel  •  $saveStatusLabel';
     return SafeArea(
@@ -543,7 +558,7 @@ class CanvasTopBar extends StatelessWidget {
               onPressed: onToggleFocus,
               hitSize: 48,
             ),
-            _tabletModeMenu(context),
+            _editorModeMenu(context, compact: true),
             _tabletMoreMenu(context),
           ],
         ),
@@ -551,36 +566,32 @@ class CanvasTopBar extends StatelessWidget {
     );
   }
 
-  Widget _tabletModeMenu(BuildContext context) {
+  Widget _editorModeMenu(BuildContext context, {required bool compact}) {
     final textScale = MediaQuery.textScalerOf(context).scale(1);
     final availableWidth = MediaQuery.sizeOf(context).width;
     final modeButtonWidth = math.min(
       math.max(80.0, MediaQuery.textScalerOf(context).scale(52)),
       math.max(80.0, availableWidth - (documentActionsEnabled ? 240 : 192)),
     );
-    final compactStudio =
-        tabletModePreference == TabletWorkspaceMode.studio && !tabletStudioMode;
-    final modeName =
-        tabletModePreference == TabletWorkspaceMode.studio
-            ? 'Studio'
-            : 'Simple';
+    final compactStudio = editorMode == EditorMode.studio && phoneLayout;
+    final modeName = editorMode == EditorMode.studio ? 'Studio' : 'Simple';
     final tooltip =
         compactStudio
             ? 'Studio mode selected. Compact controls are shown at this width.'
             : '$modeName mode selected. Choose Simple or Studio.';
-    return PopupMenuButton<TabletWorkspaceMode>(
+    return PopupMenuButton<EditorMode>(
       tooltip: tooltip,
-      onSelected: onTabletModeSelected,
+      onSelected: onEditorModeSelected,
       itemBuilder:
           (_) => [
             CheckedPopupMenuItem(
-              value: TabletWorkspaceMode.simple,
-              checked: tabletModePreference == TabletWorkspaceMode.simple,
+              value: EditorMode.simple,
+              checked: editorMode == EditorMode.simple,
               child: const Text('Simple'),
             ),
             CheckedPopupMenuItem(
-              value: TabletWorkspaceMode.studio,
-              checked: tabletModePreference == TabletWorkspaceMode.studio,
+              value: EditorMode.studio,
+              checked: editorMode == EditorMode.studio,
               child: Text(compactStudio ? 'Studio (compact layout)' : 'Studio'),
             ),
           ],
@@ -588,8 +599,8 @@ class CanvasTopBar extends StatelessWidget {
         label: tooltip,
         child: ExcludeSemantics(
           child: SizedBox(
-            width: modeButtonWidth,
-            height: 48,
+            width: compact ? modeButtonWidth : 96,
+            height: compact ? 48 : 32,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -601,7 +612,7 @@ class CanvasTopBar extends StatelessWidget {
                     style: Theme.of(context).textTheme.labelMedium,
                   ),
                 ),
-                if (availableWidth >= 600 && textScale <= 1.4)
+                if (compact && availableWidth >= 600 && textScale <= 1.4)
                   const Icon(Icons.arrow_drop_down, size: 12),
               ],
             ),
@@ -614,6 +625,10 @@ class CanvasTopBar extends StatelessWidget {
   Widget _tabletMoreMenu(BuildContext context) => PopupMenuButton<String>(
     tooltip: 'More actions and workspace settings',
     onSelected: (value) {
+      if (value.startsWith('panel:')) {
+        onSelectPanel(value.substring('panel:'.length));
+        return;
+      }
       if (value.startsWith('workspace:')) {
         onWorkspaceSelected(value.substring('workspace:'.length));
         return;
@@ -683,24 +698,51 @@ class CanvasTopBar extends StatelessWidget {
           child: const Text('Export…'),
         ),
         const PopupMenuItem(value: 'comics', child: Text('Comics workspace')),
+      ];
+      if (editorMode == EditorMode.studio) {
+        entries.addAll([
+          const PopupMenuDivider(),
+          const PopupMenuItem<String>(
+            enabled: false,
+            child: Text('Studio panels'),
+          ),
+          const PopupMenuItem(
+            value: 'panel:properties',
+            child: Text('Tool properties'),
+          ),
+          const PopupMenuItem(
+            value: 'panel:materials',
+            child: Text('Materials'),
+          ),
+          const PopupMenuItem(value: 'panel:history', child: Text('History')),
+          const PopupMenuItem(
+            value: 'panel:quickAccess',
+            child: Text('Quick Access'),
+          ),
+        ]);
+      }
+      entries.addAll([
         const PopupMenuDivider(),
-        const PopupMenuItem<String>(enabled: false, child: Text('Workspace')),
+        const PopupMenuItem<String>(
+          enabled: false,
+          child: Text('Workspace layout'),
+        ),
         for (final layout in const [
-          ('illustration', 'Illustration'),
-          ('comic', 'Comic'),
-          ('minimal', 'Minimal'),
+          ('illustration', 'Illustration workspace'),
+          ('comic', 'Comic workspace'),
+          ('minimal', 'Minimal layout'),
         ])
           CheckedPopupMenuItem<String>(
             value: 'workspace:${layout.$1}',
             checked: workspaceId == layout.$1,
-            child: Text('${layout.$2} workspace'),
+            child: Text(layout.$2),
           ),
         CheckedPopupMenuItem<String>(
           value: 'follow',
           checked: followDocumentType,
           child: const Text('Follow document type'),
         ),
-      ];
+      ]);
       for (final layout in customWorkspaces) {
         entries.add(
           CheckedPopupMenuItem<String>(

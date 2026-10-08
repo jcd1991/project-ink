@@ -10,7 +10,7 @@ import 'canvas_tool_rails.dart';
 class CanvasEditorAuxiliaryOverlaySnapshot {
   const CanvasEditorAuxiliaryOverlaySnapshot({
     required this.interfaceHidden,
-    required this.tabletStudioMode,
+    required this.studioTouchLayout,
     required this.leftHanded,
     required this.hasSelection,
     required this.desktopDock,
@@ -28,7 +28,7 @@ class CanvasEditorAuxiliaryOverlaySnapshot {
   });
 
   final bool interfaceHidden;
-  final bool tabletStudioMode;
+  final bool studioTouchLayout;
   final bool leftHanded;
   final bool hasSelection;
   final bool desktopDock;
@@ -130,10 +130,13 @@ class CanvasEditorAuxiliaryOverlays extends StatelessWidget {
               ),
             ),
           ),
-        if (!state.interfaceHidden && state.tabletStudioMode)
+        if (!state.interfaceHidden && state.studioTouchLayout)
           Positioned(
-            left: state.leftHanded ? null : 0,
-            right: state.leftHanded ? 0 : null,
+            // Keep the Studio palette rail opposite the primary drawing
+            // controls, which stay on the same handedness-aware edge in both
+            // Simple and Studio.
+            left: state.leftHanded ? 0 : null,
+            right: state.leftHanded ? null : 0,
             top: state.safeAreaTop + 52,
             bottom: MediaQuery.paddingOf(context).bottom + 8,
             width: 48,
@@ -152,10 +155,10 @@ class CanvasEditorAuxiliaryOverlays extends StatelessWidget {
               leftHanded: state.leftHanded,
             ),
           ),
-        if (!state.interfaceHidden && state.tabletStudioMode)
+        if (!state.interfaceHidden && state.studioTouchLayout)
           Positioned(
-            left: state.leftHanded ? 0 : null,
-            right: state.leftHanded ? null : 0,
+            left: state.leftHanded ? null : 0,
+            right: state.leftHanded ? 0 : null,
             top: state.safeAreaTop + 52,
             child: CanvasStudioDrawingControls(
               brush: state.brush,

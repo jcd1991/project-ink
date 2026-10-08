@@ -104,6 +104,7 @@ class LayerPanel extends StatelessWidget {
     this.onSetLayersLocked,
     this.onSetLayersLabel,
     this.onDeleteLayer,
+    this.onClearLayer,
     this.onDuplicateLayer,
     this.onSelectContents,
     this.onMergeLayers,
@@ -143,6 +144,7 @@ class LayerPanel extends StatelessWidget {
   final void Function(List<LayerView> layers, bool locked)? onSetLayersLocked;
   final void Function(List<LayerView> layers, int? labelRgba)? onSetLayersLabel;
   final ValueChanged<LayerView>? onDeleteLayer;
+  final ValueChanged<LayerView>? onClearLayer;
   final ValueChanged<LayerView>? onDuplicateLayer;
   final ValueChanged<LayerView>? onSelectContents;
   final void Function(LayerView source, LayerView target)? onMergeLayers;
@@ -1476,6 +1478,17 @@ class LayerPanel extends StatelessWidget {
                       'Select contents',
                       Icons.select_all,
                     ),
+                  if (onClearLayer != null &&
+                      (layer.kind == LayerKind.raster ||
+                          layer.kind == LayerKind.vectorInk))
+                    _option(
+                      context,
+                      'clear-layer',
+                      'Clear layer',
+                      Icons.layers_clear,
+                      enabled: !isLocked,
+                      reason: isLocked ? editPropertiesReason : null,
+                    ),
                   if (onMergeLayers != null)
                     _option(
                       context,
@@ -1912,7 +1925,9 @@ class LayerPanel extends StatelessWidget {
   }
 
   void _applyMenuAction(BuildContext context, LayerView layer, String value) {
-    if (value == 'mask-enabled') {
+    if (value == 'clear-layer') {
+      onClearLayer?.call(layer);
+    } else if (value == 'mask-enabled') {
       onMaskEnabledChanged?.call(
         layer.copyWith(maskEnabled: !layer.maskEnabled),
       );

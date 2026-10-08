@@ -24,11 +24,12 @@ void main() {
           updatedPanels = floatingPanels;
         },
         selectTemporaryPalette: (_) => fail('unexpected temporary palette'),
-        rememberTabletPalette: (_) => fail('unexpected tablet preference'),
+        rememberStudioPalette: (_) => fail('unexpected tablet preference'),
         persistLastDock: (panel) => persistedPanel = panel,
         showQuickAccessSheet: (_) => fail('unexpected sheet'),
         showHistorySheet: (_) => fail('unexpected sheet'),
         showColorSheet: (_) => fail('unexpected sheet'),
+        showLayersSheet: (_) => fail('unexpected sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -60,18 +61,19 @@ void main() {
     tester,
   ) async {
     CanvasFloatingPanelVisibility? updatedPanels;
-    TabletWorkspaceMode? rememberedMode;
+    EditorMode? rememberedMode;
     String? persistedPanel;
     final actions = CanvasWorkspacePanelActions(
       CanvasWorkspacePanelActionHost(
         setFloatingPanels: (visibility) => updatedPanels = visibility,
         selectDesktopDock: (_, _, _, _) => fail('unexpected desktop dock'),
         selectTemporaryPalette: (_) => fail('unexpected temporary palette'),
-        rememberTabletPalette: (mode) => rememberedMode = mode,
+        rememberStudioPalette: (mode) => rememberedMode = mode,
         persistLastDock: (panel) => persistedPanel = panel,
         showQuickAccessSheet: (_) => fail('unexpected sheet'),
         showHistorySheet: (_) => fail('unexpected sheet'),
         showColorSheet: (_) => fail('unexpected sheet'),
+        showLayersSheet: (_) => fail('unexpected sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -85,16 +87,12 @@ void main() {
         ),
       ),
     );
-    const mode = TabletWorkspaceMode.studio;
+    const mode = EditorMode.studio;
 
     actions.selectPanel(
       panel: 'layers',
       context: actionContext,
-      snapshot: _snapshot(
-        tabletStudio: true,
-        tabletPlatform: true,
-        tabletMode: mode,
-      ),
+      snapshot: _snapshot(studioTouchLayout: true, editorMode: mode),
     );
 
     expect(updatedPanels?.isVisible(CanvasFloatingPanel.layers), isTrue);
@@ -112,11 +110,12 @@ void main() {
         setFloatingPanels: (visibility) => updatedPanels = visibility,
         selectDesktopDock: (_, _, _, _) => fail('unexpected desktop dock'),
         selectTemporaryPalette: (_) => fail('unexpected temporary palette'),
-        rememberTabletPalette: (_) => fail('unexpected tablet preference'),
+        rememberStudioPalette: (_) => fail('unexpected tablet preference'),
         persistLastDock: (_) => fail('unexpected preference write'),
         showQuickAccessSheet: (_) => quickAccessShown = true,
         showHistorySheet: (_) => fail('unexpected history sheet'),
         showColorSheet: (_) => fail('unexpected color sheet'),
+        showLayersSheet: (_) => fail('unexpected layer sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -135,8 +134,8 @@ void main() {
       panel: 'quickAccess',
       context: actionContext,
       snapshot: _snapshot(
-        tabletStudio: true,
-        tabletPlatform: true,
+        studioTouchLayout: true,
+
         floatingPanels: const CanvasFloatingPanelVisibility(
           tools: true,
           brushes: true,
@@ -158,11 +157,12 @@ void main() {
         setFloatingPanels: (visibility) => updatedPanels = visibility,
         selectDesktopDock: (_, _, _, _) => fail('unexpected desktop dock'),
         selectTemporaryPalette: (_) => fail('unexpected temporary palette'),
-        rememberTabletPalette: (_) => fail('unexpected tablet preference'),
+        rememberStudioPalette: (_) => fail('unexpected tablet preference'),
         persistLastDock: (_) => fail('unexpected preference write'),
         showQuickAccessSheet: (_) => fail('unexpected Quick Access sheet'),
         showHistorySheet: (_) => fail('unexpected History sheet'),
         showColorSheet: (_) => colorShown = true,
+        showLayersSheet: (_) => fail('unexpected Layers sheet'),
       ),
     );
     late BuildContext actionContext;
@@ -181,9 +181,9 @@ void main() {
       panel: 'color',
       context: actionContext,
       snapshot: _snapshot(
-        tabletStudio: true,
-        tabletPlatform: true,
-        tabletMode: TabletWorkspaceMode.studio,
+        studioTouchLayout: true,
+
+        editorMode: EditorMode.studio,
         floatingPanels: const CanvasFloatingPanelVisibility(layers: true),
       ),
     );
@@ -191,22 +191,67 @@ void main() {
     expect(colorShown, isTrue);
     expect(updatedPanels, isNull);
   });
+
+  testWidgets('phone Layers opens a sheet and closes floating panels', (
+    tester,
+  ) async {
+    CanvasFloatingPanelVisibility? updatedPanels;
+    var layersShown = false;
+    final actions = CanvasWorkspacePanelActions(
+      CanvasWorkspacePanelActionHost(
+        setFloatingPanels: (visibility) => updatedPanels = visibility,
+        selectDesktopDock: (_, _, _, _) => fail('unexpected desktop dock'),
+        selectTemporaryPalette: (_) => fail('unexpected temporary palette'),
+        rememberStudioPalette: (_) => fail('unexpected tablet preference'),
+        persistLastDock: (_) => fail('unexpected preference write'),
+        showQuickAccessSheet: (_) => fail('unexpected Quick Access sheet'),
+        showHistorySheet: (_) => fail('unexpected History sheet'),
+        showColorSheet: (_) => fail('unexpected Color sheet'),
+        showLayersSheet: (_) => layersShown = true,
+      ),
+    );
+    late BuildContext actionContext;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) {
+            actionContext = context;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    actions.selectPanel(
+      panel: 'layers',
+      context: actionContext,
+      snapshot: _snapshot(
+        compactPhone: true,
+        floatingPanels: const CanvasFloatingPanelVisibility(tools: true),
+      ),
+    );
+
+    expect(layersShown, isTrue);
+    expect(updatedPanels, const CanvasFloatingPanelVisibility());
+  });
 }
 
 CanvasWorkspacePanelActionSnapshot _snapshot({
   bool wideDesktop = false,
-  bool tabletStudio = false,
-  bool tabletPlatform = false,
-  TabletWorkspaceMode tabletMode = TabletWorkspaceMode.simple,
+  bool studioTouchLayout = false,
+
+  bool compactPhone = false,
+  EditorMode editorMode = EditorMode.simple,
   CanvasFloatingPanelVisibility floatingPanels =
       const CanvasFloatingPanelVisibility(),
 }) => CanvasWorkspacePanelActionSnapshot(
   wideDesktop: wideDesktop,
-  tabletStudio: tabletStudio,
-  tabletPlatform: tabletPlatform,
-  tabletMode: tabletMode,
+  studioTouchLayout: studioTouchLayout,
+
+  editorMode: editorMode,
   layout: illustrationWorkspace,
   leftGroups: const [],
   rightGroups: const [],
   floatingPanels: floatingPanels,
+  compactPhone: compactPhone,
 );

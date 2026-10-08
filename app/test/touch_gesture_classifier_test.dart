@@ -61,4 +61,25 @@ void main() {
       isNull,
     );
   });
+
+  test('allows enough time to place and release a three-finger Redo tap', () {
+    expect(
+      classifyTouchGesture(
+        starts: points(3),
+        ends: points(3),
+        duration: const Duration(milliseconds: 500),
+        moved: false,
+      ),
+      TouchGestureKind.threeFingerTap,
+    );
+    expect(
+      classifyTouchGesture(
+        starts: points(3),
+        ends: points(3),
+        duration: const Duration(milliseconds: 601),
+        moved: false,
+      ),
+      isNull,
+    );
+  });
 }

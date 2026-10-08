@@ -38,11 +38,13 @@ import 'canvas_gesture_coordinator.dart';
 import 'canvas_history_actions.dart';
 import 'canvas_brush_projection.dart';
 import 'canvas_comic_panel_actions.dart';
+import 'canvas_panel_tool_actions.dart';
 import 'canvas_comic_workspace_notifications.dart';
 import 'canvas_command_search_dialog.dart';
 import 'canvas_macos_application_menu.dart';
 import 'canvas_native_input_subscriptions.dart';
 import 'canvas_compact_controls.dart';
+import 'canvas_phone_controls.dart';
 import 'canvas_document_actions.dart';
 import 'canvas_document_action_session.dart';
 import 'canvas_dangling_stroke_finalizer.dart';
@@ -146,7 +148,7 @@ class CanvasScreen extends StatefulWidget
     this.onPerformanceSnapshot,
     this.comicWorkspaceController,
     this.desktopDockEnabled = false,
-    this.workspaceModeOverride,
+    this.layoutModeOverride,
     this.workspaceDockWidth = 340,
     this.workspacePreferences,
     this.onWorkspacePreferencesChanged,
@@ -226,7 +228,7 @@ class CanvasScreen extends StatefulWidget
 
   /// Optional device-local layout override. It is intentionally not part of
   /// the document or Rust engine state.
-  final WorkspaceMode? workspaceModeOverride;
+  final CanvasLayoutMode? layoutModeOverride;
   final double workspaceDockWidth;
 
   /// Device-local workspace settings loaded by the app shell. These are
@@ -284,6 +286,7 @@ class _CanvasScreenState extends State<CanvasScreen>
           sampleColor: (position) => unawaited(_sampleCanvasColor(position)),
           enableStraighten: _strokeConstraintController.enableStraighten,
           enableConstrain: _strokeConstraintController.enableConstrain,
+          recordDiagnostic: _canvasDiagnostics.record,
         ),
       );
   late final CanvasPointerEventRouter _pointerEventRouter =
@@ -353,8 +356,8 @@ class _CanvasScreenState extends State<CanvasScreen>
   TileCache get _tileBytes => _tileSynchronization.tileBytes;
   TileImageCache get _tileImages => _tileSynchronization.tileImages;
   int get _renderRevision => _tileSynchronization.renderRevision;
-  ValueNotifier<LiveStrokePreview?> get _strokePreview =>
-      _previewSynchronization.strokePreview;
+  ValueNotifier<List<LiveStrokePreview>> get _strokePreview =>
+      _previewSynchronization.strokePreviews;
   late final EditorCommandRegistry _commands = EditorCommandRegistry(
     _dispatchAction,
   );
@@ -364,8 +367,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   late final CanvasStrokePreviewActions _strokePreviewActions =
       CanvasStrokePreviewActions(
         CanvasStrokePreviewHost(
-          preview: () => _strokePreview.value,
-          publishPreview: _setStrokePreview,
+          publishPreviews: _setStrokePreview,
           documentWidth: () => widget.engine.documentInfo.widthPx,
           documentHeight: () => widget.engine.documentInfo.heightPx,
           isInsideDocument: _positionIsInsideDocument,
@@ -436,8 +438,9 @@ class _CanvasScreenState extends State<CanvasScreen>
         isMounted: () => mounted,
         isDisposed: () => _disposed,
         snapshot: () {
-          final preview = _strokePreview.value;
-          if (preview == null) return null;
+          final previews = _strokePreview.value;
+          if (previews.isEmpty) return null;
+          final preview = _strokePreviewActions.currentPreview ?? previews.last;
           final pendingStart =
               preview.confirmedThrough.clamp(0, preview.points.length).toInt();
           final pendingFirst =
@@ -542,9 +545,8 @@ class _CanvasScreenState extends State<CanvasScreen>
               _nativePencilStrokeCoordinator.clearPageContact,
           setAwaitingPreviewCommit: (value) => _awaitingPreviewCommit = value,
           clearPreview: () {
-            _strokePreviewActions.clear();
+            _strokePreviewActions.cancelActivePreview();
             _lastPublishedPreviewAcknowledgement = null;
-            _setStrokePreview(null);
           },
           retirePreview:
               (source) => _retirePreviewIfAlreadyCpuCovered(source: source),
@@ -582,9 +584,8 @@ class _CanvasScreenState extends State<CanvasScreen>
       clearNativePageContact: _nativePencilStrokeCoordinator.clearPageContact,
       setAwaitingPreviewCommit: (value) => _awaitingPreviewCommit = value,
       clearPreview: () {
-        _strokePreviewActions.clear();
+        _strokePreviewActions.cancelActivePreview();
         _lastPublishedPreviewAcknowledgement = null;
-        _setStrokePreview(null);
       },
       finishConstraint: _finishConstraintStroke,
       cancelStylusHold: _drawAndHoldCoordinator.cancel,
@@ -618,9 +619,8 @@ class _CanvasScreenState extends State<CanvasScreen>
   bool _strokeActive = false;
   bool _activeStrokeIsTouch = false;
   bool get _strokeAutosaveHoldActive => _strokeAutosaveHold.isActive;
-  // After the crossing sample has been clipped by Rust, captured pointer
-  // motion outside the artwork (and any re-entry) cannot alter the stroke.
-  // Ignore those moves so a long off-canvas drag cannot backlog bridge work.
+  // Tracks a pointer gap after it leaves the artwork. Ignore off-page moves to
+  // bound bridge work, then resume the same stroke when it re-enters.
   bool _strokeCaptureEndedAtBoundary = false;
   late final NativePencilStrokeCoordinator _nativePencilStrokeCoordinator =
       NativePencilStrokeCoordinator(
@@ -781,6 +781,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   Color _activeColor = const Color(0xff202124);
   Color _subColor = Colors.white;
   final ValueNotifier<int> _colorPaletteRevision = ValueNotifier<int>(0);
+  final ValueNotifier<int> _layerPanelRevision = ValueNotifier<int>(0);
   bool _activeColorInitialized = false;
   bool _hasUserSelectedColor = false;
   final CanvasInputSettingsController _inputSettings =
@@ -852,6 +853,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   List<DockGroupLayout> get _leftDockGroups => _workspaceDockState.leftGroups;
   List<DockGroupLayout> get _rightDockGroups => _workspaceDockState.rightGroups;
   IllustrationTool _activeTool = IllustrationTool.brush;
+  List<Offset> _panelToolPreviewPoints = const [];
   Rect? _selectionGeometry;
   IllustrationTool? _selectionGeometryTool;
   int _activeBrushId = 1;
@@ -947,7 +949,27 @@ class _CanvasScreenState extends State<CanvasScreen>
       ComicWorkspaceController(
         onPersist: (bytes) => widget.engine.attachComicProject(bytes),
         readExisting: widget.engine.readComicProject,
+        createIllustrationPanelProject: () {
+          final engine = widget.engine;
+          if (engine is! FrbEngineApi) {
+            throw StateError(
+              'Panel editing requires the Rust document engine.',
+            );
+          }
+          final id = BigInt.from(DateTime.now().microsecondsSinceEpoch);
+          return engine.createStudioProjectForCurrentDocument(
+            projectId: id,
+            pageId: id + BigInt.one,
+            title: 'Illustration panels',
+          );
+        },
         onPanelGeometryChanged: _comicPanelActions.syncPanelGeometry,
+        onPanelRemoved: (panelId) async {
+          if (_comicClipPanelId == panelId) await _clearSelection();
+          await _refreshLayerProjection();
+          await _refreshTiles();
+          widget.autosave?.markDirty();
+        },
         onActivePageChanged: (handle) async {
           final engine = widget.engine;
           if (engine is FrbEngineApi) {
@@ -1047,6 +1069,11 @@ class _CanvasScreenState extends State<CanvasScreen>
       primaryLayerId: () => _layerSelection.primaryId,
       layers: () => _layers,
       layerEffectivelyVisible: _toolActions.layerEffectivelyVisible,
+      selectTargetLayer: (layerId) {
+        if (!mounted) return;
+        setState(() => _layerSelection.select(layerId));
+        _layerActions.queuePanelStatePersistence();
+      },
       showInvalidTarget: (target, {required effectivelyVisible}) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1086,6 +1113,8 @@ class _CanvasScreenState extends State<CanvasScreen>
       loadVectorSelection: _vectorActions.loadForSelection,
       mounted: () => mounted,
       setState: setState,
+      undoProjectIfLatest: _comicWorkspace.undoIfLatestCanvasEdit,
+      redoProjectIfLatest: _comicWorkspace.redoIfLatestCanvasEdit,
     ),
   );
   late final CanvasToolActions _toolActions = CanvasToolActions(
@@ -1173,7 +1202,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       },
       selectTemporaryPalette:
           (palette) => setState(() => _temporaryDesktopPalette = palette),
-      rememberTabletPalette: _workspacePresentation.rememberTabletPalette,
+      rememberStudioPalette: _workspacePresentation.rememberStudioPalette,
       persistLastDock:
           (panel) =>
               _workspaceLayoutActions.persistPreferences(lastDock: panel),
@@ -1207,16 +1236,49 @@ class _CanvasScreenState extends State<CanvasScreen>
           ),
         );
       },
-      showColorSheet: (sheetContext) {
+      showLayersSheet: (sheetContext) {
         unawaited(
-          showCanvasColorPaletteSheet(
+          showCanvasPhonePanelSheet(
             context: sheetContext,
+            title: 'Layers',
+            initialExtent: 0.46,
             child: ValueListenableBuilder<int>(
-              valueListenable: _colorPaletteRevision,
-              builder: (context, _, _) => _buildDockPalette('color', context),
+              valueListenable: _layerPanelRevision,
+              builder: (context, _, _) => _layerPanelContent(),
             ),
           ),
         );
+      },
+      showColorSheet: (sheetContext) {
+        if (MediaQuery.sizeOf(sheetContext).width < 600) {
+          unawaited(
+            showCanvasPhoneColorSheet(
+              context: sheetContext,
+              mainColor: _activeColor,
+              subColor: _subColor,
+              recentColors:
+                  widget.workspacePreferences?.recentColors ?? const [],
+              onApply: (mainColor, subColor) async {
+                if (mainColor != _activeColor) {
+                  await _brushColorActions.applyMainColor(mainColor);
+                }
+                if (subColor != _subColor) {
+                  _brushColorActions.selectSubColor(subColor);
+                }
+              },
+            ),
+          );
+        } else {
+          unawaited(
+            showCanvasColorPaletteSheet(
+              context: sheetContext,
+              child: ValueListenableBuilder<int>(
+                valueListenable: _colorPaletteRevision,
+                builder: (context, _, _) => _buildDockPalette('color', context),
+              ),
+            ),
+          );
+        }
       },
     ),
   );
@@ -1269,6 +1331,30 @@ class _CanvasScreenState extends State<CanvasScreen>
       refreshTiles: _refreshTiles,
     ),
   );
+  late final CanvasPanelToolActions _panelToolActions = CanvasPanelToolActions(
+    workspace: _comicWorkspace,
+    documentSize:
+        () => Size(
+          widget.engine.documentInfo.widthPx.toDouble(),
+          widget.engine.documentInfo.heightPx.toDouble(),
+        ),
+    dividerHitTolerance:
+        () => 24 / _viewportController.viewport.scale.clamp(0.1, 32),
+    dragThreshold: () => 24 / _viewportController.viewport.scale.clamp(0.1, 32),
+    gutterPx: () => _panelStyle.gutter,
+    borderPx: () => _panelStyle.border,
+    onApplied: _syncPanelFrames,
+    onPreviewChanged: (points) {
+      if (!mounted) return;
+      setState(() => _panelToolPreviewPoints = points);
+    },
+    onError: (message) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    },
+  );
   late final CanvasToolEventCoordinator _toolEventCoordinator =
       CanvasToolEventCoordinator(
         CanvasToolEventHost(
@@ -1293,13 +1379,17 @@ class _CanvasScreenState extends State<CanvasScreen>
               _comicClipPageIndex = null;
             });
           },
+          panelToolEvent: _panelToolActions.handleEvent,
         ),
       );
   late final CanvasLayerActions _layerActions = CanvasLayerActions(
     CanvasLayerActionHost(
       engine: () => widget.engine,
       mounted: () => mounted,
-      setState: setState,
+      setState: (callback) {
+        setState(callback);
+        _layerPanelRevision.value++;
+      },
       layers: () => _layers,
       selection: () => _layerSelection,
       engineGeneration: () => _engineGeneration,
@@ -1333,7 +1423,11 @@ class _CanvasScreenState extends State<CanvasScreen>
         followsDocumentType:
             () => widget.workspacePreferences?.followDocumentType == true,
         workspaceForDocument:
-            () => _comicWorkspace.snapshot == null ? 'illustration' : 'comic',
+            () => canvasWorkspaceForDocument(
+              hasProject: _comicWorkspace.snapshot != null,
+              isIllustrationPanelProject:
+                  _comicWorkspace.isIllustrationPanelProject,
+            ),
         selectWorkspace:
             (workspaceId) => _selectWorkspace(workspaceId, manual: false),
       );
@@ -1397,8 +1491,8 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
-  void _setStrokePreview(LiveStrokePreview? next) {
-    _previewSynchronization.setStrokePreview(next);
+  void _setStrokePreview(List<LiveStrokePreview> next) {
+    _previewSynchronization.setStrokePreviews(next);
   }
 
   void _scheduleLiveViewportSync() {
@@ -1464,6 +1558,13 @@ class _CanvasScreenState extends State<CanvasScreen>
       fallbackRightWidth: widget.workspaceDockWidth,
     );
     _comicWorkspaceNotifications.start();
+    final engine = widget.engine;
+    if (engine is FrbEngineApi) {
+      final recoveredProject = engine.takeRecoveryStudioProject();
+      if (recoveredProject != null) {
+        unawaited(_comicWorkspace.adoptRecoveredProject(recoveredProject));
+      }
+    }
     _tileSynchronization.startPolling(interval: _tilePollInterval);
     final platform = widget.targetPlatform ?? defaultTargetPlatform;
     // Every desktop and mobile target has a native adapter. Keep the generic
@@ -1536,6 +1637,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       );
       if (application == null) return;
       setState(() {});
+      _layerPanelRevision.value++;
       if (application.panelStateNeedsRepair) {
         _layerActions.queuePanelStatePersistence();
       }
@@ -1557,7 +1659,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     _workspacePresentation.setFloatingPanels(
       _workspacePresentation.floatingPanels.setVisible(
         CanvasFloatingPanel.layers,
-        widget.workspacePreferences?.tabletMode == TabletWorkspaceMode.studio,
+        widget.workspacePreferences?.editorMode == EditorMode.studio,
       ),
     );
   }
@@ -1613,7 +1715,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       _activeStrokeIsTouch = false;
       _tileSynchronization.resetForEngineReplacement();
       _layerProjectionService.clear();
-      _setStrokePreview(null);
+      _strokePreviewActions.clear();
       _previewSynchronization.resetStrokeCommitState();
       _layerSelection.clear();
       _layers = const [];
@@ -1642,8 +1744,10 @@ class _CanvasScreenState extends State<CanvasScreen>
   void _setFollowDocumentType(bool enabled) {
     final selection = _workspaceLayoutActions.setFollowDocumentType(
       enabled: enabled,
-      documentWorkspaceId:
-          _comicWorkspace.snapshot == null ? 'illustration' : 'comic',
+      documentWorkspaceId: canvasWorkspaceForDocument(
+        hasProject: _comicWorkspace.snapshot != null,
+        isIllustrationPanelProject: _comicWorkspace.isIllustrationPanelProject,
+      ),
     );
     if (selection == null) return;
     setState(() => _workspaceDockState.applySelection(selection));
@@ -1660,19 +1764,19 @@ class _CanvasScreenState extends State<CanvasScreen>
   Future<void> _resetBuiltInWorkspace(String workspaceId) =>
       _workspaceEditorActions.resetBuiltInWorkspace(workspaceId);
 
-  void _toggleTabletWorkspaceMode() {
+  void _toggleEditorMode() {
     final current =
-        widget.workspacePreferences?.tabletMode ?? TabletWorkspaceMode.simple;
-    late final TabletWorkspaceMode nextMode;
-    setState(() => nextMode = _workspacePresentation.toggleTabletMode(current));
-    _workspaceLayoutActions.persistPreferences(tabletMode: nextMode);
+        widget.workspacePreferences?.editorMode ?? EditorMode.simple;
+    late final EditorMode nextMode;
+    setState(() => nextMode = _workspacePresentation.toggleEditorMode(current));
+    _workspaceLayoutActions.persistPreferences(editorMode: nextMode);
   }
 
-  void _setTabletWorkspaceMode(TabletWorkspaceMode mode) {
+  void _setEditorMode(EditorMode mode) {
     final current =
-        widget.workspacePreferences?.tabletMode ?? TabletWorkspaceMode.simple;
+        widget.workspacePreferences?.editorMode ?? EditorMode.simple;
     if (mode == current) return;
-    _toggleTabletWorkspaceMode();
+    _toggleEditorMode();
   }
 
   void _toggleFocusMode() {
@@ -1743,6 +1847,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     _disposed = true;
     _pencilHoverPosition.dispose();
     _colorPaletteRevision.dispose();
+    _layerPanelRevision.dispose();
     _tileSynchronization.dispose();
     _canvasDiagnostics.record('canvas.session_ended', <String, Object?>{
       'engineRevision': widget.engine.revision,
@@ -1799,20 +1904,27 @@ class _CanvasScreenState extends State<CanvasScreen>
     rust.ComicPanelPreviewView panel,
   ) => _comicPanelActions.drawInsidePanel(pageIndex, panel);
 
-  void _selectTool(IllustrationTool tool) {
+  void _selectTool(IllustrationTool tool, {bool showToolsPanel = true}) {
     if (!mounted) return;
     _toolEventCoordinator.resetTransientState();
+    if (tool != IllustrationTool.panel) _panelToolActions.reset();
     setState(() {
       _activeTool = tool;
-      _workspacePresentation.setFloatingPanels(
-        _workspacePresentation.floatingPanels.setVisible(
-          CanvasFloatingPanel.tools,
-          true,
-        ),
-      );
+      if (tool != IllustrationTool.panel) _panelToolPreviewPoints = const [];
+      if (showToolsPanel) {
+        _workspacePresentation.setFloatingPanels(
+          _workspacePresentation.floatingPanels.setVisible(
+            CanvasFloatingPanel.tools,
+            true,
+          ),
+        );
+      }
       if (tool == IllustrationTool.eraser) _eraserActive = true;
       if (tool == IllustrationTool.brush) _eraserActive = false;
     });
+    if (tool == IllustrationTool.panel) {
+      unawaited(_comicWorkspace.ensureIllustrationPanelProject());
+    }
   }
 
   int? get _selectedVectorLayerId {
@@ -2092,9 +2204,9 @@ class _CanvasScreenState extends State<CanvasScreen>
     final platform = widget.targetPlatform ?? defaultTargetPlatform;
     return shouldUseWideDesktopLayout(
       desktopDockEnabled: widget.desktopDockEnabled,
-      workspaceMode: resolveWorkspaceMode(
+      layoutMode: resolveCanvasLayoutMode(
         context,
-        override: widget.workspaceModeOverride,
+        override: widget.layoutModeOverride,
         desktopDockEnabled: widget.desktopDockEnabled,
         targetPlatform: widget.targetPlatform,
       ),
@@ -2111,20 +2223,24 @@ class _CanvasScreenState extends State<CanvasScreen>
     final preferences =
         widget.workspacePreferences ?? const WorkspacePreferences();
     final platform = widget.targetPlatform ?? defaultTargetPlatform;
-    final tabletPlatform =
+    final touchPlatform =
         platform == TargetPlatform.iOS || platform == TargetPlatform.android;
-    final tabletStudio =
-        tabletPlatform &&
-        MediaQuery.sizeOf(context).width >= 600 &&
-        preferences.tabletMode == TabletWorkspaceMode.studio;
+    final width = MediaQuery.sizeOf(context).width;
+    final compactPhone = width < 600 && (touchPlatform || kIsWeb);
+    final wideDesktop = _wideDesktop(context);
+    final studioTouchLayout =
+        !compactPhone &&
+        !wideDesktop &&
+        preferences.editorMode == EditorMode.studio &&
+        (touchPlatform || (kIsWeb && width < 1100));
     _workspacePanelActions.selectPanel(
       panel: panel,
       context: context,
       snapshot: CanvasWorkspacePanelActionSnapshot(
-        wideDesktop: _wideDesktop(context),
-        tabletStudio: tabletStudio,
-        tabletPlatform: tabletPlatform,
-        tabletMode: preferences.tabletMode,
+        wideDesktop: wideDesktop,
+        compactPhone: compactPhone,
+        studioTouchLayout: studioTouchLayout,
+        editorMode: preferences.editorMode,
         layout: _workspaceLayoutActions.layoutFor(
           preferences.workspaceId,
           preferences.customWorkspaces,
@@ -2136,11 +2252,148 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
+  ({double gutter, double border, int count, int pageIndex}) get _panelStyle {
+    final snapshot = _comicWorkspace.snapshot;
+    final pageIndex = _comicWorkspace.activePageIndex;
+    final panels =
+        snapshot != null && pageIndex >= 0 && pageIndex < snapshot.pages.length
+            ? snapshot.pages[pageIndex].panels
+            : const <rust.ComicPanelPreviewView>[];
+    return (
+      gutter: panels.isEmpty ? 24 : panels.first.gutterPx,
+      border: panels.isEmpty ? 2 : panels.first.borderPx,
+      count: panels.length,
+      pageIndex: pageIndex,
+    );
+  }
+
+  Future<void> _applyPanelLayout(int panelCount) async {
+    await _comicWorkspace.ensureIllustrationPanelProject();
+    final style = _panelStyle;
+    await _comicWorkspace.applyPanelLayout(
+      pageIndex: style.pageIndex,
+      panelCount: panelCount,
+      gutterPx: style.gutter,
+      borderPx: style.border,
+    );
+    if (_comicWorkspace.error == null) await _syncPanelFrames();
+    if (_comicWorkspace.error != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _comicWorkspace.userFacingError ?? 'Panel layout failed.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _changePanelStyle(double gutterPx, double borderPx) async {
+    final style = _panelStyle;
+    await _comicWorkspace.setPanelStyle(
+      pageIndex: style.pageIndex,
+      gutterPx: gutterPx,
+      borderPx: borderPx,
+    );
+    if (_comicWorkspace.error == null) await _syncPanelFrames();
+  }
+
+  Future<void> _syncPanelFrames() async {
+    final snapshot = _comicWorkspace.snapshot;
+    final pageIndex = _comicWorkspace.activePageIndex;
+    if (snapshot == null ||
+        pageIndex < 0 ||
+        pageIndex >= snapshot.pages.length) {
+      return;
+    }
+    final page = snapshot.pages[pageIndex];
+    final engine = widget.engine;
+    final generation = _engineGeneration;
+    bool sessionIsCurrent() =>
+        mounted &&
+        identical(widget.engine, engine) &&
+        generation == _engineGeneration &&
+        identical(_comicWorkspace.snapshot, snapshot) &&
+        _comicWorkspace.activePageIndex == pageIndex;
+
+    final layerSummaries = await engine.layerSummaries();
+    if (!sessionIsCurrent()) return;
+    var framesLayer =
+        layerSummaries
+            .where(
+              (layer) =>
+                  layer.name == 'Panel Frames' &&
+                  layer.kind == 'Raster' &&
+                  layer.parent == null,
+            )
+            .firstOrNull;
+    if (framesLayer == null && page.panels.isEmpty) return;
+    if (framesLayer == null) {
+      final id = await engine.addLayer(kind: 'Raster');
+      if (!sessionIsCurrent()) return;
+      await engine.updateLayerPresentation(
+        layerId: id,
+        name: 'Panel Frames',
+        blendMode: 'Normal',
+        groupMode: 'Pass-through',
+        labelRgba: null,
+      );
+      if (!sessionIsCurrent()) return;
+      framesLayer =
+          (await engine.layerSummaries())
+              .where((layer) => layer.id == id)
+              .firstOrNull;
+      if (!sessionIsCurrent()) return;
+      if (framesLayer == null) {
+        throw StateError('Panel Frames layer was not created.');
+      }
+    }
+    final framePointCounts = <int>[];
+    final framePoints = <double>[];
+    for (final panel in page.panels) {
+      final polygon = panel.polygon;
+      if (polygon.length >= 6 && polygon.length.isEven) {
+        framePointCounts.add(polygon.length ~/ 2);
+        framePoints.addAll(polygon);
+      } else {
+        framePointCounts.add(4);
+        framePoints.addAll(<double>[
+          panel.x,
+          panel.y,
+          panel.x + panel.width,
+          panel.y,
+          panel.x + panel.width,
+          panel.y + panel.height,
+          panel.x,
+          panel.y + panel.height,
+        ]);
+      }
+    }
+    await engine.setPanelFrames(
+      layerId: framesLayer.id,
+      points: framePoints,
+      pointCounts: framePointCounts,
+      borderPx: page.panels.isEmpty ? 0 : page.panels.first.borderPx,
+    );
+    if (!sessionIsCurrent()) return;
+    await _refreshLayerProjection();
+    if (!sessionIsCurrent()) return;
+    await _refreshTiles();
+    if (!sessionIsCurrent()) return;
+    widget.autosave?.markDirty();
+  }
+
   Widget _toolPaletteContent() => CanvasToolPaletteContent(
     selected: _activeTool,
     onSelected: _selectTool,
     onClearSelection: _clearSelection,
     onTransformPreset: _toolActions.applyTransformPreset,
+    onApplyPanelLayout: _applyPanelLayout,
+    onPanelStyleChanged: _changePanelStyle,
+    panelCount: _panelStyle.count,
+    gutterPx: _panelStyle.gutter,
+    borderPx: _panelStyle.border,
+    panelLoading: _comicWorkspace.loading,
   );
 
   Widget _brushPaletteContent() => CanvasBrushPaletteContent(
@@ -2232,11 +2485,12 @@ class _CanvasScreenState extends State<CanvasScreen>
     selectedVectorLayerId: _selectedVectorLayerId,
     layerActions: _layerActions,
     vectorActions: _vectorActions,
-    tabletMode:
-        widget.workspacePreferences?.tabletMode ?? TabletWorkspaceMode.simple,
+    editorMode: widget.workspacePreferences?.editorMode ?? EditorMode.simple,
     targetPlatform: widget.targetPlatform,
     onPanelChanged: () {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      _layerPanelRevision.value++;
     },
   );
 
@@ -2262,8 +2516,9 @@ class _CanvasScreenState extends State<CanvasScreen>
       hasRightDock: layout.right != null,
       preferredLeftDockWidth: _workspaceDockState.leftWidth,
       preferredRightDockWidth: _workspaceDockState.rightWidth,
-      tabletMode: preferences.tabletMode,
+      editorMode: preferences.editorMode,
       desktopDockEnabled: widget.desktopDockEnabled,
+      isWeb: kIsWeb,
     );
     final desktopDock = workspaceFrame.desktopDock;
     final showLeftDock = workspaceFrame.showLeftDock;
@@ -2271,16 +2526,19 @@ class _CanvasScreenState extends State<CanvasScreen>
     final dockWidth = workspaceFrame.dockWidths.right;
     final leftDockWidth = workspaceFrame.dockWidths.left;
     final showComicCanvasPreview =
-        _comicWorkspace.pagePreviewBytes != null &&
-        ((_comicClipPanelId != null) ||
-            (showRightDock && _desktopDockTab == 'comics') ||
-            (!desktopDock &&
-                _workspacePresentation.floatingPanels.isVisible(
-                  CanvasFloatingPanel.comics,
-                )));
+        _activeTool == IllustrationTool.panel ||
+        (!_comicWorkspace.isIllustrationPanelProject &&
+            _comicWorkspace.pagePreviewBytes != null &&
+            (_comicClipPanelId != null ||
+                (showRightDock && _desktopDockTab == 'comics') ||
+                (!desktopDock &&
+                    _workspacePresentation.floatingPanels.isVisible(
+                      CanvasFloatingPanel.comics,
+                    ))));
     final safeAreaTop = MediaQuery.paddingOf(context).top;
-    final tabletStudioMode = workspaceFrame.tabletStudioMode;
-    final tabletSimpleMode = workspaceFrame.tabletSimpleMode;
+    final compactPhoneControls = workspaceFrame.phoneLayout;
+    final studioTouchLayout = workspaceFrame.studioTouchLayout;
+    final simpleTouchLayout = workspaceFrame.simpleTouchLayout;
     final useNativeMacMenus = workspaceFrame.useNativeMacMenus;
     final documentActionsEnabled =
         widget.documentPicker != null && !_documentActionRunning;
@@ -2312,7 +2570,10 @@ class _CanvasScreenState extends State<CanvasScreen>
                     tiles: _visibleImages.toList(growable: false),
                     selection: _selectionGeometry,
                     selectionTool: _selectionGeometryTool,
-                    previewPoints: _toolEventCoordinator.previewPoints,
+                    previewPoints:
+                        _activeTool == IllustrationTool.panel
+                            ? _panelToolPreviewPoints
+                            : _toolEventCoordinator.previewPoints,
                     rulerStart: _toolEventCoordinator.ruler.start,
                     rulerEnd: _toolEventCoordinator.ruler.end,
                   ),
@@ -2400,17 +2661,19 @@ class _CanvasScreenState extends State<CanvasScreen>
                     onGestureSettings: _showGestureSettings,
                     onAccessibilitySettings: _showAccessibilitySettings,
                     onComics: () => _selectPanel('comics', context),
+                    onSelectPanel: (panel) => _selectPanel(panel, context),
                     onUndo: () => _commands.dispatch(EditorActionId.undo),
                     onRedo: () => _commands.dispatch(EditorActionId.redo),
                     onCommandSearch:
                         () => _commands.dispatch(EditorActionId.commandSearch),
                     mirrored: _viewportController.mirrored,
-                    tabletSimpleMode: tabletSimpleMode,
-                    tabletStudioMode: tabletStudioMode,
-                    tabletModePreference:
-                        widget.workspacePreferences?.tabletMode ??
-                        TabletWorkspaceMode.simple,
-                    onTabletModeSelected: _setTabletWorkspaceMode,
+                    simpleTouchLayout: simpleTouchLayout,
+                    studioTouchLayout: studioTouchLayout,
+                    editorMode:
+                        widget.workspacePreferences?.editorMode ??
+                        EditorMode.simple,
+                    phoneLayout: compactPhoneControls,
+                    onEditorModeSelected: _setEditorMode,
                     onToggleFocus: _toggleFocusMode,
                     workspaceId:
                         widget.workspacePreferences?.workspaceId ??
@@ -2473,7 +2736,45 @@ class _CanvasScreenState extends State<CanvasScreen>
                             : null,
                   ),
                 ),
-              if (!_workspacePresentation.interfaceHidden && tabletSimpleMode)
+              if (!_workspacePresentation.interfaceHidden &&
+                  compactPhoneControls)
+                Positioned(
+                  left: 8,
+                  right: 8,
+                  bottom: MediaQuery.paddingOf(context).bottom + 8,
+                  height: 56,
+                  child: CanvasPhoneBottomControls(
+                    selectedBrush: _brushLibrary.selected,
+                    eraserActive: _eraserActive,
+                    onBrushChanged: _brushActions.updateBrushDraft,
+                    onBrushSizeChangeEnd: _brushActions.persistBrushSize,
+                    onBrushOpacityChangeEnd:
+                        (_) => _brushActions.persistSelectedBrushSettings(),
+                    onEyedropper:
+                        () => _commands.dispatch(EditorActionId.eyedropper),
+                    onTools: () => _selectPanel('tools', context),
+                    onBrushes: () => _selectPanel('brushes', context),
+                    onSelectBrush:
+                        () => _selectTool(
+                          IllustrationTool.brush,
+                          showToolsPanel: false,
+                        ),
+                    onLayers: () => _selectPanel('layers', context),
+                    activeColor: _activeColor,
+                    subColor: _subColor,
+                    transparentColorActive: _transparentColorActive,
+                    onMainColor: () => _selectPanel('color', context),
+                    onTransparentColor: _toggleTransparentColor,
+                    onSelectEraser:
+                        () => _selectTool(
+                          IllustrationTool.eraser,
+                          showToolsPanel: false,
+                        ),
+                  ),
+                ),
+              if (!_workspacePresentation.interfaceHidden &&
+                  simpleTouchLayout &&
+                  !compactPhoneControls)
                 Positioned(
                   left: _leftHandedToolbar ? null : 8,
                   right: _leftHandedToolbar ? 8 : null,
@@ -2509,7 +2810,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                 child: CanvasEditorAuxiliaryOverlays(
                   snapshot: CanvasEditorAuxiliaryOverlaySnapshot(
                     interfaceHidden: _workspacePresentation.interfaceHidden,
-                    tabletStudioMode: tabletStudioMode,
+                    studioTouchLayout: studioTouchLayout,
                     leftHanded: _leftHandedToolbar,
                     hasSelection: _selectionGeometry != null,
                     desktopDock: desktopDock,
@@ -2583,7 +2884,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                   rightDock: CanvasDesktopDockSnapshot(
                     isLeft: false,
                     width: dockWidth,
-                    title: 'Workspace',
+                    title: 'Workspace layout',
                     selectedTab: _desktopDockTab,
                     groups: _rightDockGroups,
                   ),
@@ -2681,7 +2982,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                     ),
                 interfaceHidden: _workspacePresentation.interfaceHidden,
                 desktopDock: desktopDock,
-                tabletStudioMode: tabletStudioMode,
+                studioTouchLayout: studioTouchLayout,
+                phoneLayout: compactPhoneControls,
                 leftHanded: _leftHandedToolbar,
                 safeAreaTop: safeAreaTop,
                 tools: _toolPaletteContent(),

@@ -165,3 +165,21 @@ Uint8List truncatePointerPacket(Uint8List packet, int sampleCount) {
   ByteData.sublistView(result).setUint16(2, sampleCount, Endian.little);
   return result;
 }
+
+/// Return samples from [startSample] onward from a validated pointer packet.
+Uint8List slicePointerPacket(Uint8List packet, int startSample) {
+  _validatePacket(packet);
+  final data = ByteData.sublistView(packet);
+  final packetSampleCount = data.getUint16(2, Endian.little);
+  if (startSample < 0 || startSample > packetSampleCount) {
+    throw RangeError.range(startSample, 0, packetSampleCount, 'startSample');
+  }
+  if (startSample == 0) return packet;
+  final sampleCount = packetSampleCount - startSample;
+  final result = Uint8List(4 + sampleCount * 48);
+  result[0] = packet[0];
+  result[1] = packet[1];
+  ByteData.sublistView(result).setUint16(2, sampleCount, Endian.little);
+  result.setRange(4, result.length, packet, 4 + startSample * 48);
+  return result;
+}

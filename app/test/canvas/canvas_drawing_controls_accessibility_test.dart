@@ -161,6 +161,52 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('Compact phone rail moves brush sliders into adjustment sheets', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 56,
+            height: 520,
+            child: CanvasSimpleEdgeControls(
+              selectedBrush: brush,
+              brushToolActive: true,
+              eraserActive: false,
+              onBrushChanged: (_) {},
+              onBrushSizeChangeEnd: (_) {},
+              onBrushOpacityChangeEnd: (_) {},
+              onEyedropper: () {},
+              onTools: () {},
+              onBrushes: () {},
+              onSelectBrush: () {},
+              onLayers: () {},
+              activeColor: Colors.black,
+              subColor: Colors.white,
+              transparentColorActive: false,
+              onMainColor: () {},
+              onTransparentColor: () {},
+              onSelectEraser: () {},
+              compactPhone: true,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(Slider), findsNothing);
+    final sizeButton = find.bySemanticsLabel('Brush size');
+    expect(sizeButton, findsOneWidget);
+    expect(tester.getSize(sizeButton).width, greaterThanOrEqualTo(48));
+
+    await tester.tap(sizeButton);
+    await tester.pumpAndSettle();
+    expect(find.byType(Slider), findsOneWidget);
+    expect(find.text('0.25 px to 512 px'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Color palette names both roles and distinguishes transparency', (
     tester,
   ) async {

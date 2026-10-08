@@ -434,6 +434,24 @@ class CanvasLayerActions {
     }
   }
 
+  Future<void> clearLayerContent(LayerView layer) async {
+    if (!layer.canEditProperties || layer.locked) {
+      host.showMessage(
+        layer.editPropertiesReason ?? 'Unlock this layer first.',
+      );
+      return;
+    }
+    try {
+      await engine.clearLayer(layerId: layer.id);
+      await loadPhase2Projections();
+      await refreshTiles();
+      host.markDirty();
+      if (host.mounted()) host.setState(() {});
+    } catch (error, stack) {
+      debugPrint('Project Ink layer clear rejected: $error\n$stack');
+    }
+  }
+
   void applyLayerPresentation(LayerView changed) {
     if (!host.mounted()) return;
     unawaited(commitLayerPresentation(changed));
