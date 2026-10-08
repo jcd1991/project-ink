@@ -163,72 +163,22 @@ and verify both inventory and process list are clear after cleanup.
   recorded in the Phase 3.85.be brush section; no source code was changed for
   this audit.
 
-- [ ] **P1 General layer lock is missing (current-tree audit, 2026-09-30).**
-  The Rust `Layer` model and Flutter `LayerView` expose `alpha_lock`, but no
-  independent whole-layer `locked` property or lock/unlock command is present
-  in the model, panel, bridge, or engine API. Alpha lock only constrains paint
-  to existing opaque pixels; it does not protect a finished layer from paint,
-  erase, transform, merge, or delete. Procreate and Krita document a separate
-  layer lock, with a visible padlock; Procreate describes it as protecting the
-  layer from edits. Suggested handoff: add a serde-defaulted `locked` field to
-  Rust and Flutter projections, a validated/journaled update command and bridge
-  path, and an accessible lock indicator/action. Define policy before coding:
-  block content edits and destructive merge/delete/transform on locked targets;
-  allow visibility/reorder/rename/unlock; decide explicitly whether locking a
-  group recursively blocks descendants. Add engine tests that prove rejected
-  edits leave pixels and history unchanged, undo/redo and save/reopen preserve
-  lock state, and Flutter tests for the control and clear locked-target
-  feedback. Touchpoints: `rust/crates/ink-model/src/lib.rs` (`Layer`),
-  `rust/crates/ink-engine/src/lib.rs` (layer-property validation/commands),
-  `rust/crates/ink-bridge/src/api.rs`, generated bridge only if API changes,
-  `app/lib/layers/{layer_panel.dart,layer_panel_model.dart}`,
-  `app/lib/bridge/engine_api.dart`, layer/compositor/storage tests. This is
-  distinct from the already implemented alpha-lock and does not imply general
-  selection or mask-lock parity. References: [Procreate layer lock](https://help.procreate.com/procreate/handbook/5.3/layers/layers-mask),
-  [Krita layer lock](https://docs.krita.org/en/reference_manual/dockers/layers.html).
+- [x] **P1 Full layer/group lock was missing (resolved 2026-10-08).** Rust
+  `Layer.locked` is independent of `alpha_lock`; an undoable lock command blocks
+  content and property edits, including edits beneath a locked group, while
+  visibility and unlocking remain available. The Layers panel exposes the
+  lock state and action capabilities. Engine and bridge regressions cover
+  inherited rejection and undo/redo; see Gate 4 in
+  `specifications/release-readiness.md` for remaining combined device acceptance.
 
-- [ ] **P1 Active paint-layer target is ambiguous and can silently fall back
-  (reproduced in isolated macOS app, 2026-09-30).** The layer panel
-  permits multi-selection through long-press/right-swipe, but
-  `LayerSelectionModel` stores only selected IDs; the UI gives selected rows
-  the same state and does not identify a primary drawing layer.
-  `CanvasScreen._beginActiveBrushStroke` filters the current layer snapshot to
-  selected Raster/Mask entries and chooses the first; if none qualify (for
-  example, only a Group, Vector, Tone, or Adjustment is selected), it falls
-  back to `documentInfo.primaryRasterLayer`. That can route a stroke to a
-  different layer than the artist believes is active. Procreate explicitly
-  distinguishes one Primary layer from Secondary selections, with painting on
-  the Primary. Suggested handoff: define an explicit `primaryId`; single-tap
-  makes that layer primary, multi-select either retains it or deliberately
-  changes it, and removing primary chooses a deterministic paintable survivor.
-  Render primary and secondary selection distinctly. If primary is not
-  paintable, prompt/select explicitly or reject with visible feedback—never
-  silently redirect. In live QA, added a temporary Group above `Ink`, left the
-  Group selected, and drew a disposable stroke. Hiding the Group left that
-  stroke visible; hiding `Ink` removed it. This confirms the stroke went to
-  `Ink` despite the visible active selection being the Group. The QA app was
-  closed without an explicit project save; all marks were disposable recovery
-  test state. A second blank-document pass selected `Layer 2` first, added
-  `Ink` with right-swipe, drew with both selected, then hid `Ink`; the stroke
-  disappeared. Thus reverse-order multi-select also paints into `Ink`, not the
-  first-selected `Layer 2`. This matches the source's stable Rust layer
-  projection iteration, not an explicit active-primary contract. Test primary
-  removal and other non-paintable-only selection at the
-  Flutter callback/bridge boundary, then prove non-target raster pixels remain
-  unchanged. Touchpoints: `app/lib/layers/layer_panel_model.dart`
-  (`LayerSelectionModel`), `app/lib/layers/layer_panel.dart` (selection
-  affordance), `app/lib/canvas/canvas_screen.dart`
-  (`_beginActiveBrushStroke`; coordinate with the other-chat refactor owner),
-  and layer/canvas interaction tests. The Group-only fallback is now live-
-  reproduced, including the reverse-order two-raster case; primary/secondary
-  indication and other non-paintable types still need separate acceptance.
-  Reference: [Procreate layer
-  organization](https://help.procreate.com/procreate/handbook/5.0/layers/layers-organize).
-  Current `flutter test test/layer_panel_model_test.dart
-  test/layer_panel_gesture_test.dart` passes 24/24, but covers additive set
-  membership/right-swipe—not primary-target routing—so it does not close this
-  defect. The test app was closed; fresh CUA inventory and process search show
-  no Project Ink window or executable/Flutter runner.
+- [x] **P1 Active paint-layer target could silently fall back (resolved
+  2026-10-08).** `LayerSelectionModel` now owns an explicit primary target,
+  secondary selections do not change it, and stroke start rejects a missing,
+  hidden, or non-paintable primary instead of redirecting paint. The primary
+  target persists in version-6 layer-panel state and the Layers panel labels
+  it with a visible, accessible `Primary` badge. Model, stroke-start,
+  reconciliation, and layer-panel tests cover the target contract. Remaining
+  physical-device acceptance is tracked in Gate 4.
 
 - [~] **P0 shutdown recovery flush raced engine closure (2026-09-29).** The
   app's `dispose()` previously launched `AutosaveCoordinator.dispose()` and
@@ -703,23 +653,13 @@ and verify both inventory and process list are clear after cleanup.
   measured performance at multiple zoom levels, and app/device pixel-exact
   preview handoff remain open; mouse evidence is not stylus parity.
 
-- [x] **Drawing ignored the selected layer (2026-09-29).** Both native-stylus
-  and Flutter pointer paths began brush strokes through a bridge call that
-  always targeted `primary_raster_layer()`, even when the Layers panel selected
-  another raster or mask (including a comic panel's Ink child). Added a
-  selected-layer stroke-start API through Rust, generated FRB, and `EngineApi`;
-  the canvas now routes to the first selected paintable layer and retains the
-  primary-raster fallback when selection is absent/non-paintable. A Rust bridge
-  regression verifies the selected layer receives the dab while the primary
-  layer remains untouched. A Flutter interaction test selects a second raster
-  and asserts its ID is sent. In a fresh macOS build, drawing on Layer 2 and
-  hiding it made the stroke disappear from the otherwise blank canvas, directly
-  confirming it was not written to the base layer. `cargo test -p ink_bridge`
-  (31), `flutter test test/canvas_pointer_failure_test.dart` (15),
-  `flutter analyze`, `cargo fmt --check`, and `flutter build macos --debug`
-  pass. The test also exposed a debug assertion for `ExpansionTile` inside
-  decorated inspector surfaces; a transparent local Material now owns its ink
-  effects, and the same interaction test runs without framework exceptions.
+- [x] **Drawing ignored the selected layer (resolved 2026-09-29; primary
+  targeting hardened 2026-10-08).** Rust/FRB and Flutter route strokes to the
+  explicit primary layer, including panel-owned paint children. A missing,
+  hidden, or non-paintable primary is rejected; the engine no longer falls back
+  to the base raster. Bridge, Flutter interaction, and stroke-start regressions
+  verify the target ID and rejection behavior. The primary target is persisted
+  with the layer-panel state and visibly labeled in the Layers panel.
 
 - [x] Legacy v2 comic panel bindings can contain 128-bit child-layer IDs that
   Flutter `int` cannot represent; the prior bridge rejected the primary layer,

@@ -791,6 +791,39 @@ void main() {
     expect(selection.selected, <int>{2});
   });
 
+  testWidgets('primary edit target is visibly labeled in the layer list', (
+    tester,
+  ) async {
+    final selection =
+        LayerSelectionModel()
+          ..select(2)
+          ..toggleSecondary(1);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 320,
+            height: 220,
+            child: LayerPanel(
+              layers: const [
+                LayerView(id: 1, name: 'Sketch', kind: LayerKind.raster),
+                LayerView(id: 2, name: 'Ink', kind: LayerKind.raster, order: 1),
+              ],
+              selection: selection,
+              onLayerChanged: (_) {},
+              onSelectionChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Primary'), findsOneWidget);
+    expect(find.byTooltip('Primary editing target'), findsOneWidget);
+    expect(find.text('Sketch'), findsOneWidget);
+    expect(find.text('Ink'), findsOneWidget);
+  });
+
   testWidgets('selection mode adds rows without changing the primary target', (
     tester,
   ) async {

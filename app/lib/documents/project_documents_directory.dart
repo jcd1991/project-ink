@@ -6,21 +6,23 @@ import 'package:path_provider/path_provider.dart';
 
 /// Resolve Project Ink's local documents directory.
 ///
-/// Debug builds may supply `PROJECT_INK_TEST_DOCUMENTS_PATH` to isolate
-/// recovery and diagnostic files during desktop acceptance. Release builds
-/// always use the platform documents directory.
+/// Non-release builds may supply `PROJECT_INK_TEST_DOCUMENTS_PATH` to isolate
+/// recovery and diagnostic files during desktop or device acceptance. Release
+/// builds always use the platform documents directory.
 Future<Directory> projectDocumentsDirectory() async {
   const compileTimeTestPath = String.fromEnvironment(
     'PROJECT_INK_TEST_DOCUMENTS_PATH',
   );
   final runtimeTestPath =
-      kDebugMode ? Platform.environment['PROJECT_INK_TEST_DOCUMENTS_PATH'] : null;
+      !kReleaseMode
+          ? Platform.environment['PROJECT_INK_TEST_DOCUMENTS_PATH']
+          : null;
   final normalizedTestPath =
       (runtimeTestPath?.trim().isNotEmpty == true
               ? runtimeTestPath!
               : compileTimeTestPath)
           .trim();
-  if (kDebugMode && normalizedTestPath.isNotEmpty) {
+  if (!kReleaseMode && normalizedTestPath.isNotEmpty) {
     if (!path.isAbsolute(normalizedTestPath)) {
       throw ArgumentError.value(
         normalizedTestPath,

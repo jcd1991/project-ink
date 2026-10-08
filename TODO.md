@@ -490,7 +490,8 @@
 - [x] Give the layer selection one explicit primary owner and preserve
   secondary selection without changing the edit target. Brush input no longer
   falls back to another layer when the primary target is missing, hidden, or
-  non-paintable. Selection is still session state and is not yet persisted.
+  non-paintable. The primary target and collapsed groups are stored in the
+  version-6 per-document layer-panel state and restored on reopen.
 - [x] Route layer opacity/color-range selection, bucket/gradient fill, and
   raster transforms through the explicit primary layer ID, including ancestor
   visibility checks and gesture-start target capture. Reject unsupported mask

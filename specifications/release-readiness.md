@@ -202,8 +202,10 @@ resulting project revisions.
   - [x] Basic raster path: create/select, rename, reorder, hide/show, opacity,
     selected-layer drawing, delete/undo, save, and reopen (macOS integration
     evidence dated 2026-10-08 below).
-  - [ ] Groups, masks, locks, rollback failures, and broader undo/redo coverage
-    remain open.
+  - [x] Engine lifecycle regression covers group lock inheritance, alpha lock,
+    attached masks, clipping, undo/redo, and save/reopen (2026-10-08).
+  - [ ] Physical macOS/Android combined layer acceptance and rollback-failure
+    handling remain open.
 - [ ] Edit a custom brush, preview it, cancel and commit drafts, export/import
   it, select it, and prove the committed settings change rendered output.
   - [x] Custom-brush draft edit, preview, discard, save, rendered-output change,

@@ -6610,6 +6610,96 @@ fn layer_panel_state_is_validated_not_undoable_and_persisted_per_page() {
 }
 
 #[test]
+fn grouped_layer_locks_masks_and_clipping_survive_undo_save_and_reopen() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_907), spec).expect("valid doc");
+    let group = doc.add_layer(LayerKind::Group).expect("group");
+    let paint = doc
+        .add_layer_with_parent(LayerKind::Raster, Some(group))
+        .expect("paint child");
+    let clipped = doc
+        .add_layer_with_parent(LayerKind::Raster, Some(group))
+        .expect("clipped child");
+    let mask = doc
+        .add_layer_with_parent(LayerKind::Mask, Some(group))
+        .expect("group mask");
+    let find_layer = |layers: &[ink_model::Layer], id| {
+        layers
+            .iter()
+            .find(|layer| layer.id == id)
+            .cloned()
+            .expect("expected layer")
+    };
+
+    assert_eq!(find_layer(&doc.layers(), mask).mask_owner, Some(group));
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo mask creation");
+    assert!(!doc.layers().iter().any(|layer| layer.id == mask));
+    doc.dispatch(EditorCommand::Redo)
+        .expect("redo mask creation");
+    assert_eq!(find_layer(&doc.layers(), mask).mask_owner, Some(group));
+
+    doc.dispatch(EditorCommand::SetLayerClipping {
+        layer: clipped,
+        enabled: true,
+    })
+    .expect("enable clipping");
+    doc.dispatch(EditorCommand::SetLayerAlphaLock {
+        layer: paint,
+        enabled: true,
+    })
+    .expect("enable alpha lock");
+    doc.dispatch(EditorCommand::SetLayerLocked {
+        layer: group,
+        locked: true,
+    })
+    .expect("lock group");
+    doc.dispatch(EditorCommand::Undo).expect("undo group lock");
+    assert!(!find_layer(&doc.layers(), group).locked);
+    doc.dispatch(EditorCommand::Redo).expect("redo group lock");
+    assert!(find_layer(&doc.layers(), group).locked);
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-trust-layer-loop-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("layers.inkproj");
+    doc.save_as(&path).expect("save layers");
+    let mut reopened = Document::open(&path).expect("reopen layers");
+    let reopened_layers = reopened.layers();
+    assert!(find_layer(&reopened_layers, group).locked);
+    assert!(find_layer(&reopened_layers, paint).alpha_lock);
+    assert!(find_layer(&reopened_layers, clipped).clipping);
+    assert_eq!(find_layer(&reopened_layers, mask).mask_owner, Some(group));
+    assert!(
+        reopened
+            .dispatch(EditorCommand::SetLayerOpacity {
+                layer: paint,
+                opacity: 50_000,
+            })
+            .is_err(),
+        "a reopened group lock must still reject descendant edits"
+    );
+    reopened
+        .dispatch(EditorCommand::Undo)
+        .expect("undo reopened lock");
+    assert!(!find_layer(&reopened.layers(), group).locked);
+    reopened
+        .dispatch(EditorCommand::Redo)
+        .expect("redo reopened lock");
+    assert!(find_layer(&reopened.layers(), group).locked);
+    std::fs::remove_dir_all(root).expect("cleanup project");
+}
+
+#[test]
 fn raster_merge_down_capability_reports_engine_structural_restrictions() {
     let spec = DocumentSpec {
         width_px: 64,

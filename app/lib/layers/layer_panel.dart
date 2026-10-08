@@ -1051,6 +1051,7 @@ class LayerPanel extends StatelessWidget {
         subtitle: Row(
           children: [
             Flexible(child: Text(_friendlyStatus(layer, orderedLayers))),
+            if (selection.primaryId == layer.id) const _PrimaryLayerBadge(),
             if (soloLayerId == layer.id)
               const _LayerBadge(icon: Icons.filter_center_focus, label: 'Solo'),
             if (layer.alphaLock)
@@ -2127,6 +2128,39 @@ class _LayerBadge extends StatelessWidget {
       child: Semantics(label: label, child: Icon(icon, size: 14)),
     ),
   );
+}
+
+class _PrimaryLayerBadge extends StatelessWidget {
+  const _PrimaryLayerBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textStyle = Theme.of(context).textTheme.labelSmall;
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: Tooltip(
+        message: 'Primary editing target',
+        child: Semantics(
+          label: 'Primary layer target',
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: colorScheme.primary,
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              'Primary',
+              style: textStyle?.copyWith(
+                color: colorScheme.onPrimary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _LayerColorBadge extends StatelessWidget {

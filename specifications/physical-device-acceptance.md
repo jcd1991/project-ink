@@ -58,6 +58,18 @@ and tile cache are warm.
 
 ## Install and collect
 
+For a disposable Android device run, keep recovery documents in a separate
+app-private directory by supplying an absolute path in a non-release build:
+
+```sh
+flutter build apk --profile --target-platform android-arm64 \
+  --dart-define=PROJECT_INK_TEST_DOCUMENTS_PATH=/data/user/0/org.projectink.studio/files/ProjectInkAlphaValidation/android-s23
+```
+
+Profile and debug builds honor this override; release builds ignore it. Use a
+new directory for each run. Do not point it at an existing project or the
+normal app documents directory.
+
 Android:
 
 ```sh
