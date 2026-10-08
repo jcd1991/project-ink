@@ -1022,6 +1022,13 @@ fn validate_post_effect(effect: &PostEffect, max_halo_px: u32) -> Result<(), Bru
     Ok(())
 }
 
+// A strict coordinate change catches every representable subpixel movement;
+// an epsilon here could delay the start taper and suppress real input.
+#[allow(clippy::float_cmp)]
+fn has_coordinate_movement(sample: &PointerSample, initial: (f32, f32)) -> bool {
+    sample.canvas_x != initial.0 || sample.canvas_y != initial.1
+}
+
 impl CompiledBrush {
     /// Radius needed to include the largest dab when applying a bounded
     /// stroke-finalization effect.
@@ -1119,9 +1126,9 @@ impl CompiledBrush {
             let first = samples[0];
             (first.canvas_x, first.canvas_y)
         });
-        let has_initial_segment = samples.iter().any(|sample| {
-            sample.canvas_x != initial_position.0 || sample.canvas_y != initial_position.1
-        });
+        let has_initial_segment = samples
+            .iter()
+            .any(|sample| has_coordinate_movement(sample, initial_position));
         state.stroke_has_moved |= has_initial_segment;
         let stroke_has_moved = state.stroke_has_moved;
         let eraser = samples
@@ -2262,26 +2269,26 @@ mod tests {
                 .collect::<Vec<_>>();
             if fixed_response.contains(&preset.metadata.name.as_str()) {
                 assert!(pressure_bindings.is_empty(), "{}", preset.metadata.name);
-                assert_eq!(preset.stroke.taper_start, 0.0, "{}", preset.metadata.name);
+                assert!(preset.stroke.taper_start.abs() < f32::EPSILON);
             } else {
                 assert!(
                     !pressure_bindings.is_empty(),
                     "{} should respond to stylus pressure",
                     preset.metadata.name
                 );
-                assert_eq!(preset.stroke.taper_start, 1.0, "{}", preset.metadata.name);
+                assert!((preset.stroke.taper_start - 1.0).abs() < f32::EPSILON);
             }
             assert!(pressure_bindings.iter().all(|binding| {
                 binding
                     .curve
                     .points
                     .first()
-                    .is_some_and(|point| point.x == 0.0)
+                    .is_some_and(|point| point.x.abs() < f32::EPSILON)
                     && binding
                         .curve
                         .points
                         .last()
-                        .is_some_and(|point| point.x == 1.0)
+                        .is_some_and(|point| (point.x - 1.0).abs() < f32::EPSILON)
             }));
         }
 
@@ -2390,7 +2397,7 @@ mod tests {
         let moving_dabs = compiled.render(&[down, moved]).expect("moving stroke");
 
         assert!(moving_dabs.len() > 1);
-        assert_eq!(moving_dabs[0].opacity, 0.0);
+        assert!(moving_dabs[0].opacity.abs() < f32::EPSILON);
         assert!(moving_dabs[1].opacity > 0.0);
         assert!(
             moving_dabs[1].opacity < 0.1,
@@ -2437,7 +2444,7 @@ mod tests {
             .render_incremental(&[down, short_move], &mut state)
             .expect("short initial segment");
         assert_eq!(first_batch.len(), 1);
-        assert_eq!(first_batch[0].opacity, 0.0);
+        assert!(first_batch[0].opacity.abs() < f32::EPSILON);
 
         let mut continued_move = sample(2.0, u16::MAX / 2, 3);
         continued_move.phase = Phase::Move;
@@ -2473,7 +2480,7 @@ mod tests {
             .render_incremental(&[short_move], &mut moving_state)
             .expect("short movement confirms a stroke");
         assert_eq!(start_dab.len(), 1);
-        assert_eq!(start_dab[0].opacity, 0.0);
+        assert!(start_dab[0].opacity.abs() < f32::EPSILON);
 
         let mut tap_state = CompiledBrushState::default();
         assert!(
