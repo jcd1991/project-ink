@@ -184,6 +184,12 @@ transfer check that is independent of platform filesystem order or font caches.
 stick-figure fixture for create/close/recover, page reorder, gutter,
 dialogue-search, JSON/SVG export, JSON round-trip, and segmentation tests.
 
+The SVG frame geometry carries its stable decimal `data-panel-id`; each dialogue
+text node carries `data-balloon-id` and, when linked, `data-balloon-panel-id`.
+These values match the serialized comic IDs, so exported dialogue remains
+associated with its panel without relying on display order. Unified page SVG
+exports may embed the page's PNG artwork beneath this editable comic structure.
+
 ## Raster print-preview boundary
 
 `render_page_preview` produces a bounded RGBA PNG for the selected page. The

@@ -2045,6 +2045,7 @@ impl ComicProject {
             let mask = panel
                 .mask_layer_id
                 .map_or_else(String::new, |id| format!(r#" data-mask-layer="{id}""#));
+            let panel_reference = format!(r#" data-panel-id="{}""#, panel.id);
             if panel.shape == PanelShape::Polygon && !panel.polygon.is_empty() {
                 let points = panel
                     .polygon
@@ -2054,20 +2055,22 @@ impl ComicProject {
                     .join(" ");
                 writeln!(
                     svg,
-                    r##"<polygon points="{points}" fill="none" stroke="#111" stroke-width="{gutter:.3}"{mask}/>"##,
+                    r##"<polygon points="{points}" fill="none" stroke="#111" stroke-width="{gutter:.3}"{panel_reference}{mask}/>"##,
                     gutter = panel.border_px.max(0.0),
+                    panel_reference = panel_reference,
                     mask = mask
                 )
                 .map_err(|_| ComicError::InvalidJson("SVG formatting failed".into()))?;
             } else {
                 writeln!(
                     svg,
-                    r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="none" stroke="#111" stroke-width="{gutter:.3}"{mask}/>"##,
+                    r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" fill="none" stroke="#111" stroke-width="{gutter:.3}"{panel_reference}{mask}/>"##,
                     x = r.x,
                     y = r.y,
                     w = r.width,
                     h = r.height,
                     gutter = panel.border_px.max(0.0),
+                    panel_reference = panel_reference,
                     mask = mask
                 )
                 .map_err(|_| ComicError::InvalidJson("SVG formatting failed".into()))?;
@@ -2095,6 +2098,13 @@ impl ComicProject {
         for balloon in &page.balloons {
             let r = balloon.bounds;
             let text_style = &balloon.style;
+            let balloon_reference = format!(
+                r#" data-balloon-id="{}"{}"#,
+                balloon.id,
+                balloon.panel_id.map_or_else(String::new, |panel_id| {
+                    format!(r#" data-balloon-panel-id="{panel_id}""#)
+                })
+            );
             let tail_points = balloon
                 .tail
                 .iter()
@@ -2155,7 +2165,7 @@ impl ComicProject {
             if balloon.shape == BalloonShape::Narration {
                 writeln!(
                     svg,
-                    r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" rx="{radius:.3}" fill="#fff" stroke="#111" data-balloon-shape="narration"/><text x="{tx:.3}" y="{ty:.3}" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}>{text}</text>"##,
+                    r##"<rect x="{x:.3}" y="{y:.3}" width="{w:.3}" height="{h:.3}" rx="{radius:.3}" fill="#fff" stroke="#111" data-balloon-shape="narration"/><text x="{tx:.3}" y="{ty:.3}" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}{balloon_reference}>{text}</text>"##,
                     x = r.x,
                     y = r.y,
                     w = r.width,
@@ -2170,6 +2180,7 @@ impl ComicProject {
                     fill_b = text_style.fill_rgba[2],
                     text_outline = text_outline,
                     orientation = orientation,
+                    balloon_reference = balloon_reference,
                     text = text_markup
                 )
             } else if balloon.shape == BalloonShape::Thought {
@@ -2179,7 +2190,7 @@ impl ComicProject {
                 let bubble_two_y = r.y + r.height * 1.12;
                 writeln!(
                     svg,
-                    r##"<ellipse cx="{cx:.3}" cy="{cy:.3}" rx="{rx:.3}" ry="{ry:.3}" fill="#fff" stroke="#111" data-balloon-shape="thought"/><circle cx="{bubble_one_x:.3}" cy="{bubble_one_y:.3}" r="{bubble_one_r:.3}" fill="#fff" stroke="#111"/><circle cx="{bubble_two_x:.3}" cy="{bubble_two_y:.3}" r="{bubble_two_r:.3}" fill="#fff" stroke="#111"/><text x="{tx:.3}" y="{ty:.3}" text-anchor="middle" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}>{text}</text>"##,
+                    r##"<ellipse cx="{cx:.3}" cy="{cy:.3}" rx="{rx:.3}" ry="{ry:.3}" fill="#fff" stroke="#111" data-balloon-shape="thought"/><circle cx="{bubble_one_x:.3}" cy="{bubble_one_y:.3}" r="{bubble_one_r:.3}" fill="#fff" stroke="#111"/><circle cx="{bubble_two_x:.3}" cy="{bubble_two_y:.3}" r="{bubble_two_r:.3}" fill="#fff" stroke="#111"/><text x="{tx:.3}" y="{ty:.3}" text-anchor="middle" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}{balloon_reference}>{text}</text>"##,
                     cx = r.x + r.width / 2.0,
                     cy = r.y + r.height / 2.0,
                     rx = r.width / 2.0,
@@ -2199,6 +2210,7 @@ impl ComicProject {
                     fill_b = text_style.fill_rgba[2],
                     text_outline = text_outline,
                     orientation = orientation,
+                    balloon_reference = balloon_reference,
                     text = text_markup
                 )
             } else if balloon.shape == BalloonShape::Burst {
@@ -2209,7 +2221,7 @@ impl ComicProject {
                     .join(" ");
                 writeln!(
                     svg,
-                    r##"<polygon points="{points}" fill="#fff" stroke="#111" data-balloon-shape="burst"/><text x="{tx:.3}" y="{ty:.3}" text-anchor="middle" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}>{text}</text>"##,
+                    r##"<polygon points="{points}" fill="#fff" stroke="#111" data-balloon-shape="burst"/><text x="{tx:.3}" y="{ty:.3}" text-anchor="middle" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}{balloon_reference}>{text}</text>"##,
                     points = points,
                     tx = r.x + r.width / 2.0,
                     ty = text_y,
@@ -2220,12 +2232,13 @@ impl ComicProject {
                     fill_b = text_style.fill_rgba[2],
                     text_outline = text_outline,
                     orientation = orientation,
+                    balloon_reference = balloon_reference,
                     text = text_markup
                 )
             } else {
                 writeln!(
                     svg,
-                    r##"<ellipse cx="{cx:.3}" cy="{cy:.3}" rx="{rx:.3}" ry="{ry:.3}" fill="#fff" stroke="#111" data-balloon-shape="{shape}"/><text x="{tx:.3}" y="{ty:.3}" text-anchor="middle" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}>{text}</text>"##,
+                    r##"<ellipse cx="{cx:.3}" cy="{cy:.3}" rx="{rx:.3}" ry="{ry:.3}" fill="#fff" stroke="#111" data-balloon-shape="{shape}"/><text x="{tx:.3}" y="{ty:.3}" text-anchor="middle" font-family="{font}" font-size="{size:.3}" fill="#{fill:02x}{fill_g:02x}{fill_b:02x}"{text_outline}{orientation}{balloon_reference}>{text}</text>"##,
                     cx = r.x + r.width / 2.0,
                     cy = r.y + r.height / 2.0,
                     rx = r.width / 2.0,
@@ -2245,6 +2258,7 @@ impl ComicProject {
                     },
                     text_outline = text_outline,
                     orientation = orientation,
+                    balloon_reference = balloon_reference,
                     text = text_markup
                 )
             }
@@ -2963,6 +2977,14 @@ mod tests {
         let svg = String::from_utf8(restored.page_svg(0).expect("fixture SVG"))
             .expect("fixture SVG is UTF-8");
         assert!(svg.contains("data-ink-line=\"true\""));
+        assert!(svg.contains(&format!(
+            "data-panel-id=\"{}\"",
+            restored.pages[0].panels[0].id
+        )));
+        assert!(svg.contains(&format!(
+            "data-balloon-id=\"{}\" data-balloon-panel-id=\"{}\"",
+            restored.pages[0].balloons[0].id, restored.pages[0].panels[0].id
+        )));
         assert_eq!(restored.search_dialogue("NEXT").len(), 32);
     }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
@@ -853,25 +854,63 @@ class ComicWorkspaceController extends ChangeNotifier {
     int pageIndex = 0,
     int shape = 0,
     bool verticalText = false,
+    BigInt? panelId,
   }) async {
     final handle = _handle;
-    if (handle == null) return;
+    final snapshot = _snapshot;
+    if (handle == null ||
+        snapshot == null ||
+        pageIndex < 0 ||
+        pageIndex >= snapshot.pages.length) {
+      return;
+    }
+    final page = snapshot.pages[pageIndex];
+    rust.ComicPanelPreviewView? linkedPanel;
+    if (panelId != null) {
+      for (final panel in page.panels) {
+        if (panel.id == panelId) {
+          linkedPanel = panel;
+          break;
+        }
+      }
+      if (linkedPanel == null) return;
+    }
+    final width = linkedPanel == null
+        ? 420.0
+        : math.min(360.0, linkedPanel.width * 0.82);
+    final height = linkedPanel == null
+        ? 180.0
+        : math.min(150.0, linkedPanel.height * 0.22);
+    final tailLength = linkedPanel == null
+        ? 48.0
+        : math.min(48.0, linkedPanel.height * 0.08);
+    final x = linkedPanel == null
+        ? page.widthPx * 0.08
+        : linkedPanel.x + (linkedPanel.width - width) / 2;
+    final y = linkedPanel == null
+        ? page.heightPx * 0.06
+        : linkedPanel.y + linkedPanel.height * 0.08;
     try {
       _snapshot = await rust.studioAddStyledBalloon(
         handle: handle,
         pageIndex: pageIndex,
         balloonId: _newLocalId(),
-        panelId: null,
+        panelId: panelId,
         shape: shape,
-        tail: <double>[420, 1060, 380, 1120],
+        tail: <double>[
+          x + width / 2,
+          y + height,
+          x + width / 2,
+          y + height + tailLength,
+        ],
         orientation: verticalText ? 1 : 0,
         fontFamily: verticalText ? 'serif' : 'sans-serif',
         fontSizePx: 32,
         outlinePx: shape == 2 ? 2 : 0,
-        x: 180,
-        y: 900,
-        width: 300,
-        height: 160,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
         text: 'New dialogue',
       );
       await _persist();

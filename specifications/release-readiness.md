@@ -213,8 +213,31 @@ resulting project revisions.
   - [ ] Custom-brush package export/import round-trip remains open.
 - [ ] Verify adjustment visibility, order, parameters, undo/redo, save/reopen,
   and deterministic export for the supported adjustment set.
-- [ ] Create and edit a multi-page comic with panels and dialogue, save/reopen,
+- [x] Create and edit a multi-page comic with panels and dialogue, save/reopen,
   then produce and inspect one useful export with references intact.
+  - [x] Mac Flutter/Rust integration `app/integration_test/comic_artist_journey_test.dart`
+    created an original two-page, four-panel-per-page comic with panel-linked
+    dialogue and editable stick-figure ink, saved `.inkproj`, closed and
+    reopened it, then exported both pages. Reopen retained all eight panels,
+    eight dialogue balloons, panel links, text, and page artwork. The
+    self-contained SVGs were checked for embedded PNG artwork, panel and
+    balloon IDs, and dialogue; the 2400×1800 PNG artwork exports were opened
+    and visually checked. The story is an original sparse stick-figure comic,
+    not a copy of a published strip.
+  - [x] `flutter test test/comic_workspace_search_test.dart` covers the visible
+    2/3/4-panel presets and adding a speech balloon to its selected panel.
+    Those UI controls are widget-tested; the full journey drives the Rust-backed
+    controller and document APIs and does not simulate canvas pointer input.
+  - [x] Preserved local fixture: `artifacts/comic-artist-journey/`. Both
+    2400×1800 page documents are revision 11. SHA-256: page-0001.png
+    `5208c12d50d7bce32312a402d31845292ef499b606d2d3fe154f9229963d81d7`,
+    page-0001.svg
+    `a6eeef670d90fb1a8b985a8e1643f6556c86e81ac4c42c21fbac788131d2f9c1`,
+    page-0002.png
+    `5208c12d50d7bce32312a402d31845292ef499b606d2d3fe154f9229963d81d7`,
+    page-0002.svg
+    `fe94da920f2688bfeb555d212ff84d0840d9fed1d9d4766a9dc6c008de2c2832`.
+    The fixture is ignored local output; it is not part of the source commit.
 - [ ] Verify live preview-to-committed tile equivalence, long-stroke undo
   grouping, and memory/performance limits on physical pen devices.
 - [x] Rust engine regression preserves an available Redo when a touch stroke

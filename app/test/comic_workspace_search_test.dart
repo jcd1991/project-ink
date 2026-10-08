@@ -179,14 +179,28 @@ class _BalloonController extends _SearchController {
   _BalloonController(super.project);
 
   int? addedShape;
+  BigInt? addedPanel;
+  int? appliedPanelCount;
 
   @override
   Future<void> addBalloon({
     int pageIndex = 0,
     int shape = 0,
     bool verticalText = false,
+    BigInt? panelId,
   }) async {
     addedShape = shape;
+    addedPanel = panelId;
+  }
+
+  @override
+  Future<void> applyPanelLayout({
+    required int pageIndex,
+    required int panelCount,
+    required double gutterPx,
+    required double borderPx,
+  }) async {
+    appliedPanelCount = panelCount;
   }
 }
 
@@ -916,6 +930,81 @@ void main() {
     await tester.tap(find.text('Thought balloon'));
     await tester.pumpAndSettle();
     expect(controller.addedShape, 1);
+  });
+
+  testWidgets('panel inspector can add a balloon linked to that panel', (
+    tester,
+  ) async {
+    final panel = rust.ComicPanelPreviewView(
+      id: BigInt.from(620),
+      shape: 0,
+      x: 120,
+      y: 180,
+      width: 480,
+      height: 960,
+      gutterPx: 24,
+      borderPx: 1,
+      maskLayerId: BigInt.from(621),
+      polygon: Float32List.fromList(const <double>[]),
+    );
+    final controller = _BalloonController(
+      rust.ComicProjectView(
+        id: BigInt.from(62),
+        template: 1,
+        title: 'Linked balloon fixture',
+        pageCount: 1,
+        pages: <rust.ComicPageView>[
+          _page(
+            1,
+            'Panel dialogue',
+            BigInt.from(622),
+            panels: <rust.ComicPanelPreviewView>[panel],
+          ),
+        ],
+        materials: const [],
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ComicWorkspace(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+    await _selectComicSection(tester, 'Panel');
+    final linkedBalloon = find.byTooltip('Add speech balloon to panel');
+    await tester.ensureVisible(linkedBalloon);
+    await tester.tap(linkedBalloon);
+    await tester.pumpAndSettle();
+
+    expect(controller.addedPanel, panel.id);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('blank comic page offers quick panel layout presets', (
+    tester,
+  ) async {
+    final controller = _BalloonController(
+      rust.ComicProjectView(
+        id: BigInt.from(63),
+        template: 1,
+        title: 'Panel layout fixture',
+        pageCount: 1,
+        pages: <rust.ComicPageView>[_page(1, 'Blank page', BigInt.from(630))],
+        materials: const [],
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: ComicWorkspace(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+    await _selectComicSection(tester, 'Panel');
+    await tester.tap(find.text('4 panels'));
+    await tester.pumpAndSettle();
+
+    expect(controller.appliedPanelCount, 4);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('local material library can remove a project asset', (

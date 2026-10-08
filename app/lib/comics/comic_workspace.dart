@@ -928,6 +928,22 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
                               label: const Text('Panel'),
                             ),
                           if (_selectedInspectorSection ==
+                                  _ComicInspectorSection.panel &&
+                              snapshot != null &&
+                              snapshot.pages[selectedIndex].panels.isEmpty)
+                            for (final panelCount in const <int>[2, 3, 4])
+                              FilledButton.tonal(
+                                onPressed: () => unawaited(
+                                  widget.controller.applyPanelLayout(
+                                    pageIndex: selectedIndex,
+                                    panelCount: panelCount,
+                                    gutterPx: 24,
+                                    borderPx: 3,
+                                  ),
+                                ),
+                                child: Text('$panelCount panels'),
+                              ),
+                          if (_selectedInspectorSection ==
                               _ComicInspectorSection.text)
                             FilledButton.tonalIcon(
                               onPressed:
@@ -1133,6 +1149,11 @@ class _ComicWorkspaceState extends State<ComicWorkspace> {
                         onEditPageLayout: _editPageLayout,
                         onEditPanelBounds: _editPanelBounds,
                         onRemovePanel: _confirmRemovePanel,
+                        onAddLinkedBalloon: (pageIndex, panel) =>
+                            widget.controller.addBalloon(
+                              pageIndex: pageIndex,
+                              panelId: panel.id,
+                            ),
                         onEditDialogue: _editDialogue,
                         onEditPanelPolygon: _editPanelPolygon,
                         onDrawInsidePanel: widget.onDrawInsidePanel,
@@ -1432,6 +1453,7 @@ class _ComicPageInspector extends StatelessWidget {
     required this.onEditPageLayout,
     required this.onEditPanelBounds,
     required this.onRemovePanel,
+    required this.onAddLinkedBalloon,
     this.onDrawInsidePanel,
     required this.onEditDialogue,
     required this.onEditPanelPolygon,
@@ -1455,6 +1477,8 @@ class _ComicPageInspector extends StatelessWidget {
   onEditPanelBounds;
   final Future<void> Function(int pageIndex, rust.ComicPanelPreviewView panel)
   onRemovePanel;
+  final Future<void> Function(int pageIndex, rust.ComicPanelPreviewView panel)
+  onAddLinkedBalloon;
   final Future<void> Function(int pageIndex, rust.ComicPanelPreviewView panel)?
   onDrawInsidePanel;
   final Future<void> Function(
@@ -1570,6 +1594,12 @@ class _ComicPageInspector extends StatelessWidget {
                             trailing: Wrap(
                               spacing: 0,
                               children: [
+                                InkCommandButton(
+                                  label: 'Add speech balloon to panel',
+                                  icon: Icons.chat_bubble_outline,
+                                  onPressed: () =>
+                                      onAddLinkedBalloon(pageIndex, panel),
+                                ),
                                 if (onDrawInsidePanel != null)
                                   InkCommandButton(
                                     label: 'Draw inside panel',
