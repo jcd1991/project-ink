@@ -14,6 +14,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and contribution checks,
 
 ## Status
 
+For the immediate experimental GitHub alpha, use
+[`specifications/alpha-release-checklist.md`](specifications/alpha-release-checklist.md).
+It targets artist feedback through verified macOS/Android packages as they
+become available; iOS/iPadOS can follow independently. The broader support
+gates below define the supported-release roadmap.
+
 The illustration/workspace foundation and full Flutter widget suite pass on
 the current host. Native texture-registry, physical-device, hosted
 Windows/Linux, and final release validation remain gated work. Physical and
@@ -23,15 +29,14 @@ The six platforms named above are development targets; none is currently
 claimed as release-supported. A platform becomes supported only after its
 signed install, input, document-provider, offline, recovery, and export checks
 are recorded in the release acceptance matrix.
-The first public release candidates are macOS and iPadOS. They remain
+The first supported-release candidates are macOS and iPadOS. They remain
 unsupported until those acceptance gates pass; the other four platforms remain
 development targets for a later release.
 The app-specific interface copy is currently English only; no translated
 catalogs are included.
-Project Ink is not yet a release candidate: live dirty-close acceptance, signed
-platform packages, physical-device acceptance, and the public release workflow
-remain open. The Save/Discard/Cancel flow is implemented and has widget
-coverage; the real AppKit close/quit path still needs interactive confirmation.
+Project Ink's final release packages and physical-device acceptance remain
+open. Save/Discard/Cancel has widget coverage and recorded manual AppKit
+close/quit acceptance; native XCUITest automation remains incomplete.
 The requirement-by-requirement gate list is in
 [`specifications/release-readiness.md`](specifications/release-readiness.md).
 The intended first-release journeys and explicit non-goals are in

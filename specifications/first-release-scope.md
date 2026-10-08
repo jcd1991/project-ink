@@ -1,9 +1,14 @@
-# First public release scope
+# First supported release scope
 
-This document defines the acceptance scope for the first public release. It is
-not a statement that Project Ink is currently release-ready or that either
+This document defines the acceptance scope for the first supported release.
+It is not a statement that Project Ink is currently release-ready or that either
 candidate platform is already supported. See
 [`release-readiness.md`](release-readiness.md) for the evidence gates.
+
+The earlier experimental GitHub alpha has its own bounded
+[alpha-release-checklist.md](alpha-release-checklist.md). Verified alpha
+downloads may be offered independently for macOS, Android, and iOS/iPadOS;
+they do not imply that the full support requirements below have passed.
 
 ## Candidate platforms
 

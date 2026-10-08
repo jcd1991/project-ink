@@ -1,9 +1,13 @@
 # Project Ink release readiness
 
-This checklist defines the gates for a public release. A debug build or a
-passing unit suite is evidence for only the checks it directly exercises.
+This checklist defines the gates for a supported public release. For the
+immediate experimental GitHub prerelease, use
+[alpha-release-checklist.md](alpha-release-checklist.md). Its bounded launch
+scope allows verified artifacts independently, without claiming full support.
+A debug build or a passing unit suite is evidence for only the checks it
+directly exercises.
 Keep all six platforms currently named in the README visible in the matrix:
-iPadOS, iOS, Android, macOS, Windows, and Linux. The first public release
+iPadOS, iOS, Android, macOS, Windows, and Linux. The first supported-release
 candidates are macOS and iPadOS; they are candidates, not support claims. Do
 not describe a platform as supported until its install, document, input,
 offline, and recovery gates below pass. At present, none is
