@@ -143,9 +143,9 @@ pub(super) struct ActiveStroke {
     /// this separately lets us clip the incoming segment instead of pinning
     /// every off-canvas point to the nearest edge.
     pub(super) last_input_sample: Option<ink_input::PointerSample>,
-    /// Once a stroke exits after entering the page, ignore further captured
-    /// motion until pointer-up. This prevents accidentally connecting the exit
-    /// and re-entry points through the page while keeping the transaction live.
+    /// True while captured pointer motion is outside after a page exit. On
+    /// re-entry, the brush path state is reset so the new segment cannot
+    /// connect across the off-canvas gap.
     pub(super) stopped_at_page_edge: bool,
     /// Last spacing anchor for incremental legacy-brush resampling.
     pub(super) legacy_resample_anchor: Option<Dab>,

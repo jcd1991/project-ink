@@ -4,6 +4,46 @@ use ink_live_render::{GpuLiveSurface, LiveSurfaceConfig};
 use ink_model::{ColorSpace, DocumentSpec, Rgba8};
 
 #[test]
+fn applied_panel_frames_are_separate_layer_content_and_clear_undoably() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document =
+        Document::new(DocumentId::from_u128(0x5041_4e45_4c46_5241), spec).expect("document");
+    let layer = document.add_layer(LayerKind::Raster).expect("frame layer");
+
+    document
+        .set_panel_frames(
+            layer,
+            vec![vec![(8.0, 8.0), (40.0, 8.0), (40.0, 40.0), (8.0, 40.0)]],
+            2.0,
+        )
+        .expect("apply frames");
+    assert!(
+        document
+            .layer_has_allocated_tiles(layer)
+            .expect("frame tiles")
+    );
+    let tile = document
+        .read_tile(layer, TileCoord { x: 0, y: 0 })
+        .expect("frame tile");
+    let pixel = |x: usize, y: usize| tile[(y * 256 + x) * 4 + 3];
+    assert!(pixel(8, 20) > 0, "frame border is stored as layer pixels");
+    assert_eq!(pixel(20, 20), 0, "panel interior remains transparent");
+
+    document
+        .clear_layer_content(layer)
+        .expect("clear frame layer");
+    assert!(!document.layer_has_allocated_tiles(layer).expect("cleared"));
+    document.dispatch(EditorCommand::Undo).expect("undo clear");
+    assert!(document.layer_has_allocated_tiles(layer).expect("restored"));
+}
+
+#[test]
 fn brush_projection_marks_factory_origin_without_relying_on_numeric_cutoffs() {
     let spec = DocumentSpec {
         width_px: 64,
@@ -368,8 +408,8 @@ fn opacity_only_builtin_brushes_project_their_pressure_curve_for_preview() {
         .find(|summary| summary.id == BrushId::from_u128(4))
         .expect("Soft Airbrush summary");
 
-    assert_eq!(airbrush.pressure_size, 0.0);
-    assert_eq!(airbrush.pressure_opacity, 0.85);
+    assert!(airbrush.pressure_size.abs() < f32::EPSILON);
+    assert!((airbrush.pressure_opacity - 0.85).abs() < f32::EPSILON);
     assert_eq!(airbrush.pressure_curve_points.get(2), Some(&0.003));
     assert_eq!(airbrush.pressure_curve_points.get(3), Some(&0.005));
 }
@@ -6856,7 +6896,7 @@ fn oversized_pointer_packet_is_rejected_before_queue_copy() {
 }
 
 #[test]
-fn pointer_samples_outside_canvas_are_clipped_at_the_page_boundary() {
+fn pointer_samples_resume_as_a_new_path_after_reentering_the_canvas() {
     let spec = DocumentSpec {
         width_px: 64,
         height_px: 64,
@@ -6875,24 +6915,42 @@ fn pointer_samples_outside_canvas_are_clipped_at_the_page_boundary() {
     .expect("begin");
     doc.push_pointer_packet(&ink_test_support::one_sample(32.0, 32.0, 1.0))
         .expect("inside sample");
-    doc.push_pointer_packet(&ink_test_support::one_sample(65_536.0, -65_536.0, 1.0))
-        .expect("outside sample");
-    doc.push_pointer_packet(&ink_test_support::one_sample(65_536.0, -32.0, 1.0))
-        .expect("captured motion remains outside");
-    doc.push_pointer_packet(&ink_test_support::one_sample(32.0, 8.0, 1.0))
-        .expect("re-entry sample is ignored until pointer-up");
+    let sample = |canvas_x, canvas_y, sequence| ink_input::PointerSample {
+        pointer_id: 0,
+        flags: 0,
+        device_kind: ink_input::DeviceKind::Unknown,
+        phase: ink_input::Phase::Move,
+        canvas_x,
+        canvas_y,
+        pressure: u16::MAX,
+        tilt_x: 0.0,
+        tilt_y: 0.0,
+        azimuth: 0.0,
+        twist: 0.0,
+        timestamp_ns: u64::from(sequence),
+        sequence,
+    };
+    doc.push_pointer_packet(&ink_test_support::pointer_packet(&[
+        sample(65_536.0, -65_536.0, 2),
+        sample(65_536.0, -32.0, 3),
+        sample(32.0, 8.0, 4),
+    ]))
+    .expect("off-page gap and re-entry packet");
     doc.flush_input().expect("bounded samples are rendered");
     {
         let state = lock_recover(&doc.state);
         let samples = &state.active_stroke.as_ref().expect("active stroke").samples;
-        assert_eq!(samples.len(), 2);
+        assert_eq!(samples.len(), 4);
         assert_eq!(samples[1].canvas_x.to_bits(), 63.0_f32.to_bits());
         assert!((samples[1].canvas_y - 0.9697).abs() < 0.001);
-        assert_eq!(
-            samples.len(),
-            2,
-            "captured outside motion cannot draw a border or re-entry chord"
+        assert!((samples[2].canvas_x - 63.0).abs() < 0.001);
+        assert!(
+            (samples[2].canvas_y - 7.981).abs() < 0.01,
+            "re-entry boundary sample: {:?}",
+            samples[2]
         );
+        assert!((samples[3].canvas_x - 32.0).abs() < f32::EPSILON);
+        assert!((samples[3].canvas_y - 8.0).abs() < f32::EPSILON);
     }
     doc.dispatch(EditorCommand::EndStroke { stroke })
         .expect("finish stroke");

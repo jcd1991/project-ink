@@ -12,6 +12,7 @@
 use ink_model::Rgba8;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Fixed tile edge required by the v1 renderer.
 pub const TILE_SIZE: u32 = 256;
@@ -27,13 +28,15 @@ pub struct TileCoord {
 /// Premultiplied BGRA tile bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tile {
-    bytes: Vec<u8>,
+    // Layer history snapshots clone Tile values frequently. Sharing immutable
+    // pixel buffers keeps those snapshots cheap; mutation detaches on write.
+    bytes: Arc<Vec<u8>>,
 }
 
 impl Default for Tile {
     fn default() -> Self {
         Self {
-            bytes: vec![0; PIXELS_PER_TILE * 4],
+            bytes: Arc::new(vec![0; PIXELS_PER_TILE * 4]),
         }
     }
 }
@@ -44,7 +47,9 @@ impl Tile {
         if bytes.len() != PIXELS_PER_TILE * 4 {
             return Err(RasterError::InvalidTileLength);
         }
-        Ok(Self { bytes })
+        Ok(Self {
+            bytes: Arc::new(bytes),
+        })
     }
 
     /// Return bytes in on-screen BGRA order.
@@ -66,6 +71,7 @@ impl Tile {
         if x >= TILE_SIZE || y >= TILE_SIZE {
             return;
         }
+        let bytes = Arc::make_mut(&mut self.bytes);
         let offset = ((y * TILE_SIZE + x) * 4) as usize;
         let alpha = (u32::from(source.a) * u32::from(opacity) + 32_767) / 65_535;
         let inv = 255 - alpha;
@@ -74,12 +80,12 @@ impl Tile {
         let sg = (u32::from(source.g) * alpha + 127) / 255;
         let sr = (u32::from(source.r) * alpha + 127) / 255;
         for (index, value) in [(0, sb), (1, sg), (2, sr)] {
-            self.bytes[offset + index] = value
-                .saturating_add((u32::from(self.bytes[offset + index]) * inv + 127) / 255)
+            bytes[offset + index] = value
+                .saturating_add((u32::from(bytes[offset + index]) * inv + 127) / 255)
                 .min(255) as u8;
         }
-        self.bytes[offset + 3] = alpha
-            .saturating_add((u32::from(self.bytes[offset + 3]) * inv + 127) / 255)
+        bytes[offset + 3] = alpha
+            .saturating_add((u32::from(bytes[offset + 3]) * inv + 127) / 255)
             .min(255) as u8;
     }
 
@@ -88,8 +94,9 @@ impl Tile {
         if x >= TILE_SIZE || y >= TILE_SIZE {
             return;
         }
+        let bytes = Arc::make_mut(&mut self.bytes);
         let offset = ((y * TILE_SIZE + x) * 4) as usize;
-        self.bytes[offset..offset + 4].fill(0);
+        bytes[offset..offset + 4].fill(0);
     }
 
     /// Read one pixel as straight-alpha RGBA for bounded pickup/smudge tools.
@@ -120,7 +127,7 @@ pub enum RasterError {
     InvalidTransform,
 }
 
-/// Sparse document raster with dirty tracking and copy-on-first-write snapshots.
+/// Sparse document raster with dirty tracking and copy-on-write tile snapshots.
 #[derive(Clone, Debug, Default)]
 pub struct TileStore {
     tiles: HashMap<TileCoord, Tile>,
@@ -128,9 +135,10 @@ pub struct TileStore {
 }
 
 impl TileStore {
-    /// Clone only the requested tile payloads into an immutable sparse
-    /// snapshot. Callers use this to release document locks before running
-    /// expensive compositing work over those pixels.
+    /// Clone only the requested tile handles into an immutable sparse
+    /// snapshot. Pixel storage stays shared until either store mutates it,
+    /// when that store detaches its copy. Callers use this to release document
+    /// locks before running expensive compositing work over those pixels.
     #[must_use]
     pub fn snapshot_tiles(&self, coordinates: &[TileCoord]) -> Self {
         let mut snapshot = Self::default();
@@ -204,12 +212,13 @@ impl TileStore {
             y: i32::try_from(y / TILE_SIZE).unwrap_or(i32::MAX),
         };
         let tile = self.tiles.entry(coord).or_default();
+        let bytes = Arc::make_mut(&mut tile.bytes);
         let offset = (((y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4) as usize;
         let alpha = source.a;
-        tile.bytes[offset] = (u16::from(source.b) * u16::from(alpha) / 255) as u8;
-        tile.bytes[offset + 1] = (u16::from(source.g) * u16::from(alpha) / 255) as u8;
-        tile.bytes[offset + 2] = (u16::from(source.r) * u16::from(alpha) / 255) as u8;
-        tile.bytes[offset + 3] = alpha;
+        bytes[offset] = (u16::from(source.b) * u16::from(alpha) / 255) as u8;
+        bytes[offset + 1] = (u16::from(source.g) * u16::from(alpha) / 255) as u8;
+        bytes[offset + 2] = (u16::from(source.r) * u16::from(alpha) / 255) as u8;
+        bytes[offset + 3] = alpha;
         self.dirty.insert(coord);
         coord
     }
@@ -264,7 +273,7 @@ impl TileStore {
         let mut tiles: Vec<_> = self
             .tiles
             .iter()
-            .map(|(coordinate, tile)| (*coordinate, tile.bytes.clone()))
+            .map(|(coordinate, tile)| (*coordinate, tile.bytes.as_ref().clone()))
             .collect();
         tiles.sort_unstable_by_key(|(coordinate, _)| (coordinate.y, coordinate.x));
         tiles
@@ -529,7 +538,7 @@ impl TileStore {
                     // sample rather than repeatedly blending premultiplied
                     // bytes and changing opacity.
                     if dest_tile.bytes[dest_offset + 3] == 0 {
-                        dest_tile.bytes[dest_offset..dest_offset + 4]
+                        Arc::make_mut(&mut dest_tile.bytes)[dest_offset..dest_offset + 4]
                             .copy_from_slice(&tile.bytes[source_offset..source_offset + 4]);
                     }
                 }
@@ -570,6 +579,36 @@ mod tests {
     #[test]
     fn untouched_tiles_are_sparse() {
         assert_eq!(TileStore::default().allocated_tiles(), 0);
+    }
+
+    #[test]
+    fn cloned_stores_share_tiles_until_mutation_then_remain_isolated() {
+        let mut store = TileStore::default();
+        store.set_pixel(
+            3,
+            4,
+            Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+        let snapshot = store.clone();
+
+        store.set_pixel(
+            3,
+            4,
+            Rgba8 {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            },
+        );
+
+        assert_eq!(store.sample_pixel(3, 4).b, 255);
+        assert_eq!(snapshot.sample_pixel(3, 4).r, 255);
     }
 
     #[test]

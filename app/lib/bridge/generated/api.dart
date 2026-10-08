@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `blend_mode_name`, `bound_studio_history_stack`, `bounded_text`, `comic_project_mut`, `comic_project`, `comic_template`, `comic_view`, `decode_live_dab_packet`, `document_mut`, `document_state`, `document`, `encode_live_dab_packet`, `group_mode_name`, `inspection_view`, `layer_kind_name`, `make_page_document_from_snapshot`, `make_page_document`, `materialize_and_set_panel_mask`, `materialize_studio_panel_layers`, `new_document_handle`, `page_document_snapshot`, `panel_mask_points`, `payload_bytes`, `purge_expired_brush_imports`, `report_view`, `restore_page_document`, `staged_brush_import`, `studio_active_document_mut`, `studio_active_document`, `studio_capture_state`, `studio_from_project`, `studio_mutate`, `studio_panel_binding`, `studio_project_mut`, `studio_project`, `studio_push_history`, `studio_restore_state`, `studio_snapshot_payload_bytes`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentHandleState`, `DocumentMutRef`, `DocumentRef`, `StagedBrushImport`, `StudioProjectHistoryState`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `blend_mode_name`, `bound_studio_history_stack`, `bounded_text`, `comic_project_mut`, `comic_project`, `comic_template`, `comic_view`, `decode_live_dab_packet`, `document_mut`, `document_state`, `document`, `encode_live_dab_packet`, `group_mode_name`, `inspection_view`, `layer_kind_name`, `make_page_document_from_snapshot`, `make_page_document`, `materialize_and_set_panel_mask`, `materialize_studio_panel_layers`, `new_document_handle`, `page_document_snapshot`, `panel_mask_points`, `payload_bytes`, `purge_expired_brush_imports`, `refresh_applied_panel_frames`, `report_view`, `restore_page_document`, `staged_brush_import`, `studio_active_document_mut`, `studio_active_document`, `studio_capture_state`, `studio_from_project`, `studio_mutate`, `studio_panel_binding`, `studio_project_mut`, `studio_project`, `studio_push_history`, `studio_restore_state`, `studio_snapshot_payload_bytes`, `with_document_save_snapshot`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentHandleState`, `DocumentMutRef`, `DocumentRef`, `StagedBrushImport`, `StudioProjectHistoryEntry`, `StudioProjectHistoryState`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Inspect an external brush before conversion or installation.
 Future<BrushImportInspectionView> inspectBrushImport({required String path}) =>
@@ -72,8 +72,8 @@ Future<ComicProjectHandle> createComicProject({
   title: title,
 );
 
-/// Return a deterministic eight-page stick-figure example for acceptance and
-/// first-run onboarding.
+/// Return a deterministic eight-page stick-figure fixture for acceptance and
+/// compatibility tests.
 Future<ComicProjectHandle> createXkcdStickFigureComic() =>
     RustLib.instance.api.crateApiCreateXkcdStickFigureComic();
 
@@ -94,6 +94,21 @@ Future<StudioProjectHandle> createStudioProject({
   widthPx: widthPx,
   heightPx: heightPx,
   dpi: dpi,
+);
+
+/// Adopt the currently open illustration document as the only page of a
+/// structural panel project. The cloned handle is an Arc-backed capability to
+/// the same Rust document; artwork and command history stay in one authority.
+Future<StudioProjectHandle> createStudioProjectForDocument({
+  required DocumentHandle handle,
+  required BigInt projectId,
+  required BigInt pageId,
+  required String title,
+}) => RustLib.instance.api.crateApiCreateStudioProjectForDocument(
+  handle: handle,
+  projectId: projectId,
+  pageId: pageId,
+  title: title,
 );
 
 /// Create a unified project from canonical comic metadata. Page documents are
@@ -128,6 +143,16 @@ Future<ComicProjectView> redoProject({required StudioProjectHandle handle}) =>
 
 Future<bool> projectCanUndo({required StudioProjectHandle handle}) =>
     RustLib.instance.api.crateApiProjectCanUndo(handle: handle);
+
+/// True when the most recent canvas edit is a project-structure mutation.
+/// This lets the shared Undo command preserve the order between page pixels
+/// and comic structure without maintaining a second mutable history in Flutter.
+Future<bool> projectUndoIsLatest({required StudioProjectHandle handle}) =>
+    RustLib.instance.api.crateApiProjectUndoIsLatest(handle: handle);
+
+/// True when the next redo belongs to comic structure rather than page pixels.
+Future<bool> projectRedoIsLatest({required StudioProjectHandle handle}) =>
+    RustLib.instance.api.crateApiProjectRedoIsLatest(handle: handle);
 
 Future<bool> projectCanRedo({required StudioProjectHandle handle}) =>
     RustLib.instance.api.crateApiProjectCanRedo(handle: handle);
@@ -304,6 +329,90 @@ Future<ComicProjectView> studioResizeGutter({
   pageIndex: pageIndex,
   panelId: panelId,
   gutterPx: gutterPx,
+);
+
+/// Apply a 2-, 3-, or 4-panel preset to a page that has no panels. All layer
+/// trees and masks are materialized as one undoable project operation.
+Future<ComicProjectView> studioApplyPanelLayout({
+  required StudioProjectHandle handle,
+  required int pageIndex,
+  required List<BigInt> panelIds,
+  required double gutterPx,
+  required double borderPx,
+}) => RustLib.instance.api.crateApiStudioApplyPanelLayout(
+  handle: handle,
+  pageIndex: pageIndex,
+  panelIds: panelIds,
+  gutterPx: gutterPx,
+  borderPx: borderPx,
+);
+
+/// Remove one panel guide and refresh any applied frame layer in the same
+/// undoable project edit. Panel artwork layers remain in the page document;
+/// dialogue attached to the removed panel becomes page-level dialogue.
+Future<ComicProjectView> studioRemovePanel({
+  required StudioProjectHandle handle,
+  required int pageIndex,
+  required BigInt panelId,
+}) => RustLib.instance.api.crateApiStudioRemovePanel(
+  handle: handle,
+  pageIndex: pageIndex,
+  panelId: panelId,
+);
+
+/// Create a new divider in an existing panel, or create the first frame and
+/// split it in one undoable operation when the illustration has no panels.
+Future<ComicProjectView> studioCreatePanelSplit({
+  required StudioProjectHandle handle,
+  required int pageIndex,
+  required BigInt panelId,
+  required BigInt firstId,
+  required BigInt secondId,
+  required int axis,
+  required double ratio,
+  required double gutterPx,
+  required double borderPx,
+}) => RustLib.instance.api.crateApiStudioCreatePanelSplit(
+  handle: handle,
+  pageIndex: pageIndex,
+  panelId: panelId,
+  firstId: firstId,
+  secondId: secondId,
+  axis: axis,
+  ratio: ratio,
+  gutterPx: gutterPx,
+  borderPx: borderPx,
+);
+
+/// Set saved gutter and outline widths on all panels on one page as one undoable edit.
+Future<ComicProjectView> studioSetPanelStyle({
+  required StudioProjectHandle handle,
+  required int pageIndex,
+  required double gutterPx,
+  required double borderPx,
+}) => RustLib.instance.api.crateApiStudioSetPanelStyle(
+  handle: handle,
+  pageIndex: pageIndex,
+  gutterPx: gutterPx,
+  borderPx: borderPx,
+);
+
+/// Resize one divider shared by two aligned panels and rewrite both masks as
+/// one history operation, preserving the pixels on the bound page document.
+Future<ComicProjectView> studioResizePanelDivider({
+  required StudioProjectHandle handle,
+  required int pageIndex,
+  required BigInt firstId,
+  required BigInt secondId,
+  required int axis,
+  required double position,
+}) => RustLib.instance.api.crateApiStudioResizePanelDivider(
+  handle: handle,
+  pageIndex: pageIndex,
+  firstId: firstId,
+  secondId: secondId,
+  axis: axis,
+  position: position,
 );
 
 Future<ComicProjectView> studioAddStyledBalloon({
@@ -1317,6 +1426,12 @@ Future<BigInt> deleteLayer({
   required BigInt layer,
 }) => RustLib.instance.api.crateApiDeleteLayer(handle: handle, layer: layer);
 
+/// Clear all paint from a raster or vector layer as one undoable edit.
+Future<BigInt> clearLayer({
+  required DocumentHandle handle,
+  required BigInt layer,
+}) => RustLib.instance.api.crateApiClearLayer(handle: handle, layer: layer);
+
 /// Delete several selected layer roots and descendants as one undoable edit.
 Future<BigInt> deleteLayers({
   required DocumentHandle handle,
@@ -1558,6 +1673,22 @@ Future<BigInt> setPanelMaskGeometry({
   handle: handle,
   mask: mask,
   points: points,
+);
+
+/// Replace a normal raster layer with the applied outlines for one panel map.
+/// `frames` contains bounded `(x, y, width, height)` tuples in document pixels.
+Future<BigInt> setPanelFrames({
+  required DocumentHandle handle,
+  required BigInt layer,
+  required List<double> points,
+  required List<int> pointCounts,
+  required double borderPx,
+}) => RustLib.instance.api.crateApiSetPanelFrames(
+  handle: handle,
+  layer: layer,
+  points: points,
+  pointCounts: pointCounts,
+  borderPx: borderPx,
 );
 
 /// Merge two standalone raster layers. The source is removed only after the
@@ -3036,6 +3167,7 @@ class ComicPanelPreviewView {
   final double width;
   final double height;
   final double gutterPx;
+  final double borderPx;
   final BigInt? maskLayerId;
 
   /// Stable page-document layer ownership IDs. `None` is retained for
@@ -3058,6 +3190,7 @@ class ComicPanelPreviewView {
     required this.width,
     required this.height,
     required this.gutterPx,
+    required this.borderPx,
     this.maskLayerId,
     this.panelGroupId,
     this.sketchLayerId,
@@ -3077,6 +3210,7 @@ class ComicPanelPreviewView {
       width.hashCode ^
       height.hashCode ^
       gutterPx.hashCode ^
+      borderPx.hashCode ^
       maskLayerId.hashCode ^
       panelGroupId.hashCode ^
       sketchLayerId.hashCode ^
@@ -3098,6 +3232,7 @@ class ComicPanelPreviewView {
           width == other.width &&
           height == other.height &&
           gutterPx == other.gutterPx &&
+          borderPx == other.borderPx &&
           maskLayerId == other.maskLayerId &&
           panelGroupId == other.panelGroupId &&
           sketchLayerId == other.sketchLayerId &&

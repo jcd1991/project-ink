@@ -100,6 +100,16 @@ pub enum EditorCommand {
         mask: LayerId,
         points: Vec<(f32, f32)>,
     },
+    /// Replace the contents of a raster layer with rendered panel borders.
+    SetPanelFrames {
+        layer: LayerId,
+        frames: Vec<Vec<(f32, f32)>>,
+        border_px: f32,
+    },
+    /// Remove all paint/vector contents from one paint layer.
+    ClearLayer {
+        layer: LayerId,
+    },
     SetLayerOpacity {
         layer: LayerId,
         opacity: u16,
@@ -448,6 +458,28 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
                 bytes.extend_from_slice(&x.to_le_bytes());
                 bytes.extend_from_slice(&y.to_le_bytes());
             }
+        }
+        EditorCommand::SetPanelFrames {
+            layer,
+            frames,
+            border_px,
+        } => {
+            bytes.push(50);
+            append_id(&mut bytes, *layer);
+            bytes.extend_from_slice(&border_px.to_le_bytes());
+            let count = u16::try_from(frames.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for frame in frames.iter().take(usize::from(count)) {
+                bytes.push(u8::try_from(frame.len()).unwrap_or(u8::MAX));
+                for (x, y) in frame {
+                    bytes.extend_from_slice(&x.to_le_bytes());
+                    bytes.extend_from_slice(&y.to_le_bytes());
+                }
+            }
+        }
+        EditorCommand::ClearLayer { layer } => {
+            bytes.push(51);
+            append_id(&mut bytes, *layer);
         }
         EditorCommand::SetLayerOpacity { layer, opacity } => {
             bytes.push(4);
@@ -994,6 +1026,34 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
             }
             EditorCommand::SetPanelMaskGeometry { mask, points }
         }
+        50 => {
+            let layer = Id::from_u128(read_id(bytes, &mut cursor)?);
+            let border_px = read_f32(bytes, &mut cursor)?;
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count > 256 || !(0.0..=128.0).contains(&border_px) {
+                return Err(CommandDecodeError::TrailingBytes);
+            }
+            let mut frames = Vec::with_capacity(count);
+            for _ in 0..count {
+                let point_count = usize::from(read_u8(bytes, &mut cursor)?);
+                if !(3..=64).contains(&point_count) {
+                    return Err(CommandDecodeError::TrailingBytes);
+                }
+                let mut points = Vec::with_capacity(point_count);
+                for _ in 0..point_count {
+                    points.push((read_f32(bytes, &mut cursor)?, read_f32(bytes, &mut cursor)?));
+                }
+                frames.push(points);
+            }
+            EditorCommand::SetPanelFrames {
+                layer,
+                frames,
+                border_px,
+            }
+        }
+        51 => EditorCommand::ClearLayer {
+            layer: Id::from_u128(read_id(bytes, &mut cursor)?),
+        },
         4 => EditorCommand::SetLayerOpacity {
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
             opacity: read_u16(bytes, &mut cursor)?,
@@ -1685,6 +1745,14 @@ mod tests {
             EditorCommand::SetPanelMaskGeometry {
                 mask: LayerId::from_u128(22),
                 points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+            },
+            EditorCommand::SetPanelFrames {
+                layer: LayerId::from_u128(6),
+                frames: vec![vec![(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]],
+                border_px: 2.0,
+            },
+            EditorCommand::ClearLayer {
+                layer: LayerId::from_u128(6),
             },
             EditorCommand::SetLayerOpacity {
                 layer: LayerId::from_u128(5),

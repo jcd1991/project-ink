@@ -179,7 +179,15 @@ pub struct Panel {
     pub bounds: Rect,
     pub polygon: Vec<(f32, f32)>,
     pub gutter_px: f32,
+    /// Panel outline width in document pixels. Older v2 metadata defaults to
+    /// a one-pixel outline when it is read.
+    #[serde(default = "default_panel_border_px")]
+    pub border_px: f32,
     pub mask_layer_id: Option<u128>,
+}
+
+fn default_panel_border_px() -> f32 {
+    1.0
 }
 
 /// Stable document/layer ownership metadata for a panel. Pixels remain in
@@ -200,7 +208,11 @@ pub struct PanelLayerBinding {
 impl Panel {
     fn validate(&self) -> Result<(), ComicError> {
         self.bounds.validate()?;
-        if !self.gutter_px.is_finite() || !(0.0..=4096.0).contains(&self.gutter_px) {
+        if !self.gutter_px.is_finite()
+            || !(0.0..=4096.0).contains(&self.gutter_px)
+            || !self.border_px.is_finite()
+            || !(0.0..=128.0).contains(&self.border_px)
+        {
             return Err(ComicError::InvalidGeometry);
         }
         if self.shape == PanelShape::Polygon {
@@ -733,6 +745,296 @@ impl ComicProject {
         Ok(())
     }
 
+    /// Remove a panel frame while preserving its page artwork and dialogue.
+    /// Dialogue attached to the removed panel becomes page-level dialogue.
+    pub fn remove_panel(&mut self, page_index: usize, panel_id: u128) -> Result<Panel, ComicError> {
+        let page = self
+            .pages
+            .get_mut(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        let panel_index = page
+            .panels
+            .iter()
+            .position(|panel| panel.id == panel_id)
+            .ok_or(ComicError::DanglingReference)?;
+        let panel = page.panels.remove(panel_index);
+        for balloon in &mut page.balloons {
+            if balloon.panel_id == Some(panel_id) {
+                balloon.panel_id = None;
+            }
+        }
+        self.panel_layers
+            .retain(|binding| binding.panel_id != panel_id);
+        Ok(panel)
+    }
+
+    /// Create an equal-cell two-, three-, or four-panel layout on a blank page.
+    /// The cells share one common gutter and are added as one validated model
+    /// operation; callers provide stable IDs so the document can undo/save it.
+    pub fn apply_panel_layout(
+        &mut self,
+        page_index: usize,
+        panel_ids: &[u128],
+        gutter_px: f32,
+        border_px: f32,
+    ) -> Result<(), ComicError> {
+        let count = panel_ids.len();
+        if !matches!(count, 2..=4)
+            || !gutter_px.is_finite()
+            || !(0.0..=4096.0).contains(&gutter_px)
+            || !border_px.is_finite()
+            || !(0.0..=128.0).contains(&border_px)
+        {
+            return Err(ComicError::InvalidGeometry);
+        }
+        let page = self
+            .pages
+            .get(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        if !page.panels.is_empty() {
+            return Err(ComicError::InvalidGeometry);
+        }
+        let (columns, rows): (usize, usize) = match count {
+            2 => (2, 1),
+            3 => (1, 3),
+            _ => (2, 2),
+        };
+        let width = page.spec.width_px as f32;
+        let height = page.spec.height_px as f32;
+        if gutter_px * (columns.saturating_sub(1)) as f32 >= width
+            || gutter_px * (rows.saturating_sub(1)) as f32 >= height
+        {
+            return Err(ComicError::InvalidGeometry);
+        }
+        let cell_width = (width - gutter_px * (columns.saturating_sub(1)) as f32) / columns as f32;
+        let cell_height = (height - gutter_px * (rows.saturating_sub(1)) as f32) / rows as f32;
+        let mut panels = Vec::with_capacity(count);
+        for row in 0..rows {
+            for column in 0..columns {
+                let id = panel_ids[panels.len()];
+                panels.push(Panel {
+                    id,
+                    shape: PanelShape::Rectangle,
+                    bounds: Rect {
+                        x: column as f32 * (cell_width + gutter_px),
+                        y: row as f32 * (cell_height + gutter_px),
+                        width: cell_width,
+                        height: cell_height,
+                    },
+                    polygon: Vec::new(),
+                    gutter_px,
+                    border_px,
+                    mask_layer_id: None,
+                });
+            }
+        }
+        for panel in panels {
+            self.add_panel(page_index, panel)?;
+        }
+        Ok(())
+    }
+
+    /// Change gutter spacing and outline width for every panel on a page.
+    pub fn set_panel_style(
+        &mut self,
+        page_index: usize,
+        gutter_px: f32,
+        border_px: f32,
+    ) -> Result<(), ComicError> {
+        if !gutter_px.is_finite()
+            || !(0.0..=4096.0).contains(&gutter_px)
+            || !border_px.is_finite()
+            || !(0.0..=128.0).contains(&border_px)
+        {
+            return Err(ComicError::InvalidGeometry);
+        }
+        let page = self
+            .pages
+            .get(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        let original = page.panels.clone();
+        let mut starts_x = original
+            .iter()
+            .map(|panel| panel.bounds.x)
+            .collect::<Vec<_>>();
+        let mut ends_x = original
+            .iter()
+            .map(|panel| panel.bounds.x + panel.bounds.width)
+            .collect::<Vec<_>>();
+        let mut starts_y = original
+            .iter()
+            .map(|panel| panel.bounds.y)
+            .collect::<Vec<_>>();
+        let mut ends_y = original
+            .iter()
+            .map(|panel| panel.bounds.y + panel.bounds.height)
+            .collect::<Vec<_>>();
+
+        // Preserve each divider's center while changing its width. Pairwise
+        // edge updates let a panel participate in dividers on both sides of a
+        // grid without overwriting one another's bounds.
+        for left_index in 0..original.len() {
+            let left = &original[left_index];
+            if left.shape != PanelShape::Rectangle {
+                continue;
+            }
+            for right_index in 0..original.len() {
+                if left_index == right_index {
+                    continue;
+                }
+                let right = &original[right_index];
+                if right.shape != PanelShape::Rectangle || left.bounds.x >= right.bounds.x {
+                    continue;
+                }
+                let shared_height = (left.bounds.y + left.bounds.height)
+                    .min(right.bounds.y + right.bounds.height)
+                    - left.bounds.y.max(right.bounds.y);
+                if shared_height < 1.0 {
+                    continue;
+                }
+                let gap = right.bounds.x - (left.bounds.x + left.bounds.width);
+                let old_gutter = f32::midpoint(left.gutter_px, right.gutter_px);
+                if gap < -1.0 || (gap - old_gutter).abs() > 1.0 {
+                    continue;
+                }
+                let center = (left.bounds.x + left.bounds.width + right.bounds.x) / 2.0;
+                ends_x[left_index] = center - gutter_px / 2.0;
+                starts_x[right_index] = center + gutter_px / 2.0;
+            }
+        }
+        for top_index in 0..original.len() {
+            let top = &original[top_index];
+            if top.shape != PanelShape::Rectangle {
+                continue;
+            }
+            for bottom_index in 0..original.len() {
+                if top_index == bottom_index {
+                    continue;
+                }
+                let bottom = &original[bottom_index];
+                if bottom.shape != PanelShape::Rectangle || top.bounds.y >= bottom.bounds.y {
+                    continue;
+                }
+                let shared_width = (top.bounds.x + top.bounds.width)
+                    .min(bottom.bounds.x + bottom.bounds.width)
+                    - top.bounds.x.max(bottom.bounds.x);
+                if shared_width < 1.0 {
+                    continue;
+                }
+                let gap = bottom.bounds.y - (top.bounds.y + top.bounds.height);
+                let old_gutter = f32::midpoint(top.gutter_px, bottom.gutter_px);
+                if gap < -1.0 || (gap - old_gutter).abs() > 1.0 {
+                    continue;
+                }
+                let center = (top.bounds.y + top.bounds.height + bottom.bounds.y) / 2.0;
+                ends_y[top_index] = center - gutter_px / 2.0;
+                starts_y[bottom_index] = center + gutter_px / 2.0;
+            }
+        }
+
+        let page = self
+            .pages
+            .get_mut(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        for (index, panel) in page.panels.iter_mut().enumerate() {
+            let width = ends_x[index] - starts_x[index];
+            let height = ends_y[index] - starts_y[index];
+            if width < 1.0
+                || height < 1.0
+                || starts_x[index] < 0.0
+                || starts_y[index] < 0.0
+                || ends_x[index] > page.spec.width_px as f32
+                || ends_y[index] > page.spec.height_px as f32
+            {
+                return Err(ComicError::InvalidGeometry);
+            }
+            panel.bounds = Rect {
+                x: starts_x[index],
+                y: starts_y[index],
+                width,
+                height,
+            };
+            panel.gutter_px = gutter_px;
+            panel.border_px = border_px;
+        }
+        Ok(())
+    }
+
+    /// Move a divider shared by two aligned rectangular panels. The position
+    /// is the divider center; the gutter stays centered around that position.
+    pub fn resize_panel_divider(
+        &mut self,
+        page_index: usize,
+        first_id: u128,
+        second_id: u128,
+        axis: u8,
+        position: f32,
+    ) -> Result<(), ComicError> {
+        if axis > 1 || !position.is_finite() {
+            return Err(ComicError::InvalidGeometry);
+        }
+        let page = self
+            .pages
+            .get_mut(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        let first_index = page
+            .panels
+            .iter()
+            .position(|panel| panel.id == first_id)
+            .ok_or(ComicError::DanglingReference)?;
+        let second_index = page
+            .panels
+            .iter()
+            .position(|panel| panel.id == second_id)
+            .ok_or(ComicError::DanglingReference)?;
+        let first = page.panels[first_index].clone();
+        let second = page.panels[second_index].clone();
+        if first.shape != PanelShape::Rectangle || second.shape != PanelShape::Rectangle {
+            return Err(ComicError::InvalidGeometry);
+        }
+        let gap = f32::midpoint(first.gutter_px, second.gutter_px);
+        let aligned = if axis == 0 {
+            (first.bounds.y - second.bounds.y).abs() <= 1.0
+                && (first.bounds.height - second.bounds.height).abs() <= 1.0
+                && first.bounds.x + first.bounds.width <= second.bounds.x + 1.0
+        } else {
+            (first.bounds.x - second.bounds.x).abs() <= 1.0
+                && (first.bounds.width - second.bounds.width).abs() <= 1.0
+                && first.bounds.y + first.bounds.height <= second.bounds.y + 1.0
+        };
+        if !aligned {
+            return Err(ComicError::InvalidGeometry);
+        }
+        if axis == 0 {
+            let outer_start = first.bounds.x;
+            let outer_end = second.bounds.x + second.bounds.width;
+            let first_end = position - gap / 2.0;
+            let second_start = position + gap / 2.0;
+            let first_width = first_end - outer_start;
+            let second_width = outer_end - second_start;
+            if first_width < 1.0 || second_width < 1.0 {
+                return Err(ComicError::InvalidGeometry);
+            }
+            page.panels[first_index].bounds.width = first_width;
+            page.panels[second_index].bounds.x = second_start;
+            page.panels[second_index].bounds.width = second_width;
+        } else {
+            let outer_start = first.bounds.y;
+            let outer_end = second.bounds.y + second.bounds.height;
+            let first_end = position - gap / 2.0;
+            let second_start = position + gap / 2.0;
+            let first_height = first_end - outer_start;
+            let second_height = outer_end - second_start;
+            if first_height < 1.0 || second_height < 1.0 {
+                return Err(ComicError::InvalidGeometry);
+            }
+            page.panels[first_index].bounds.height = first_height;
+            page.panels[second_index].bounds.y = second_start;
+            page.panels[second_index].bounds.height = second_height;
+        }
+        Ok(())
+    }
+
     pub fn add_balloon(&mut self, page_index: usize, balloon: Balloon) -> Result<(), ComicError> {
         balloon.validate()?;
         if self.contains_id(balloon.id) {
@@ -1004,6 +1306,7 @@ impl ComicProject {
                     },
                     polygon: Vec::new(),
                     gutter_px: gap,
+                    border_px: original.border_px,
                     mask_layer_id: original.mask_layer_id,
                 },
                 Panel {
@@ -1016,6 +1319,7 @@ impl ComicProject {
                     },
                     polygon: Vec::new(),
                     gutter_px: gap,
+                    border_px: original.border_px,
                     mask_layer_id: Some(second_mask_id),
                 },
             )
@@ -1036,6 +1340,7 @@ impl ComicProject {
                     },
                     polygon: Vec::new(),
                     gutter_px: gap,
+                    border_px: original.border_px,
                     mask_layer_id: original.mask_layer_id,
                 },
                 Panel {
@@ -1048,6 +1353,7 @@ impl ComicProject {
                     },
                     polygon: Vec::new(),
                     gutter_px: gap,
+                    border_px: original.border_px,
                     mask_layer_id: Some(second_mask_id),
                 },
             )
@@ -1482,26 +1788,28 @@ impl ComicProject {
             2.0,
         );
         for panel in &page.panels {
-            if panel.shape == PanelShape::Polygon && panel.polygon.len() >= 3 {
-                draw_polygon_outline(
-                    &mut pixels,
-                    width,
-                    height,
-                    &panel.polygon,
-                    scale,
-                    [29, 78, 121, 255],
-                    panel.gutter_px,
-                );
-            } else {
-                draw_rect_outline(
-                    &mut pixels,
-                    width,
-                    height,
-                    panel.bounds,
-                    scale,
-                    [29, 78, 121, 255],
-                    panel.gutter_px,
-                );
+            if panel.border_px > 0.0 {
+                if panel.shape == PanelShape::Polygon && panel.polygon.len() >= 3 {
+                    draw_polygon_outline(
+                        &mut pixels,
+                        width,
+                        height,
+                        &panel.polygon,
+                        scale,
+                        [29, 78, 121, 255],
+                        panel.border_px,
+                    );
+                } else {
+                    draw_rect_outline(
+                        &mut pixels,
+                        width,
+                        height,
+                        panel.bounds,
+                        scale,
+                        [29, 78, 121, 255],
+                        panel.border_px,
+                    );
+                }
             }
         }
         for line in &page.ink_lines {
@@ -1747,7 +2055,7 @@ impl ComicProject {
                 writeln!(
                     svg,
                     r##"<polygon points="{points}" fill="none" stroke="#111" stroke-width="{gutter:.3}"{mask}/>"##,
-                    gutter = panel.gutter_px.max(1.0),
+                    gutter = panel.border_px.max(0.0),
                     mask = mask
                 )
                 .map_err(|_| ComicError::InvalidJson("SVG formatting failed".into()))?;
@@ -1759,7 +2067,7 @@ impl ComicProject {
                     y = r.y,
                     w = r.width,
                     h = r.height,
-                    gutter = panel.gutter_px.max(1.0),
+                    gutter = panel.border_px.max(0.0),
                     mask = mask
                 )
                 .map_err(|_| ComicError::InvalidJson("SVG formatting failed".into()))?;
@@ -2514,8 +2822,8 @@ pub fn print_page(width_px: u32, height_px: u32, dpi: f32, page_number: u32, id:
     }
 }
 
-/// A deterministic eight-page stick-figure comic used by acceptance tests and
-/// as a first-run example. It exercises page reordering, panel gutters,
+/// A deterministic eight-page stick-figure fixture used by acceptance tests.
+/// It exercises page reordering, panel gutters,
 /// project-wide dialogue search, and visible vector stick-figure artwork
 /// without requiring external raster fixtures.
 pub fn xkcd_stick_figure_comic() -> ComicProject {
@@ -2545,6 +2853,7 @@ pub fn xkcd_stick_figure_comic() -> ComicProject {
                 },
                 polygon: Vec::new(),
                 gutter_px: 24.0,
+                border_px: 1.0,
                 mask_layer_id: Some(0x3000 + panel_id),
             };
             let panel_bounds = panel.bounds;
@@ -2689,6 +2998,117 @@ mod tests {
             legacy_bytes,
             serde_json::to_vec(&legacy).expect("source unchanged")
         );
+    }
+
+    #[test]
+    fn v2_panels_without_border_width_keep_the_legacy_default() {
+        let project = xkcd_stick_figure_comic();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&project.to_json().expect("encode project"))
+                .expect("decode project JSON");
+        for page in legacy["pages"].as_array_mut().expect("pages") {
+            for panel in page["panels"].as_array_mut().expect("panels") {
+                panel
+                    .as_object_mut()
+                    .expect("panel object")
+                    .remove("border_px");
+            }
+        }
+        let legacy_bytes = serde_json::to_vec(&legacy).expect("encode legacy v2");
+        let restored = ComicProject::from_json(&legacy_bytes).expect("restore legacy v2");
+        assert!(
+            restored
+                .pages
+                .iter()
+                .flat_map(|page| &page.panels)
+                .all(|panel| panel.border_px == default_panel_border_px())
+        );
+    }
+
+    #[test]
+    fn illustration_panel_presets_create_two_three_and_four_panel_grids() {
+        for count in [2_usize, 3, 4] {
+            let mut project = ComicProject::new(
+                0xA100 + count as u128,
+                ProjectTemplate::Illustration,
+                "Illustration",
+            );
+            project
+                .add_page(print_page(1200, 1800, 300.0, 1, 0xA200 + count as u128))
+                .expect("add illustration page");
+            let panel_ids = (0..count)
+                .map(|index| 0xA300 + count as u128 * 16 + index as u128)
+                .collect::<Vec<_>>();
+            project
+                .apply_panel_layout(0, &panel_ids, 24.0, 3.0)
+                .expect("apply preset");
+            let panels = &project.pages[0].panels;
+            assert_eq!(panels.len(), count);
+            assert!(panels.iter().all(|panel| panel.border_px == 3.0));
+            match count {
+                2 => {
+                    assert_eq!(panels[0].bounds.y, panels[1].bounds.y);
+                    assert_eq!(panels[0].bounds.height, panels[1].bounds.height);
+                    assert_eq!(
+                        panels[1].bounds.x - (panels[0].bounds.x + panels[0].bounds.width),
+                        24.0
+                    );
+                }
+                3 => {
+                    assert!(panels.iter().all(|panel| panel.bounds.x == 0.0));
+                    for pair in panels.windows(2) {
+                        assert_eq!(
+                            pair[1].bounds.y - (pair[0].bounds.y + pair[0].bounds.height),
+                            24.0
+                        );
+                    }
+                }
+                _ => {
+                    assert_eq!(panels[0].bounds.y, panels[1].bounds.y);
+                    assert_eq!(panels[2].bounds.y, panels[3].bounds.y);
+                    assert!(panels[2].bounds.y > panels[0].bounds.y);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn removing_panel_detaches_its_dialogue_and_layer_binding() {
+        let mut project = xkcd_stick_figure_comic();
+        let panel_id = project.pages[0].panels[0].id;
+        let balloon_id = project.pages[0].balloons[0].id;
+        assert!(
+            project
+                .panel_layers
+                .iter()
+                .any(|binding| binding.panel_id == panel_id)
+        );
+
+        let removed = project.remove_panel(0, panel_id).expect("remove panel");
+
+        assert_eq!(removed.id, panel_id);
+        assert!(
+            !project.pages[0]
+                .panels
+                .iter()
+                .any(|panel| panel.id == panel_id)
+        );
+        assert_eq!(
+            project.pages[0]
+                .balloons
+                .iter()
+                .find(|balloon| balloon.id == balloon_id)
+                .expect("balloon remains")
+                .panel_id,
+            None
+        );
+        assert!(
+            !project
+                .panel_layers
+                .iter()
+                .any(|binding| binding.panel_id == panel_id)
+        );
+        project.validate().expect("project remains valid");
     }
 
     #[test]
@@ -2934,6 +3354,7 @@ mod tests {
                     },
                     polygon: Vec::new(),
                     gutter_px: 16.0,
+                    border_px: 1.0,
                     mask_layer_id: None,
                 },
             )
@@ -2991,6 +3412,7 @@ mod tests {
                     },
                     polygon: Vec::new(),
                     gutter_px: 16.0,
+                    border_px: 1.0,
                     mask_layer_id: None,
                 },
             ),
@@ -3168,6 +3590,7 @@ mod tests {
             },
             polygon: Vec::new(),
             gutter_px: 24.0,
+            border_px: 1.0,
             mask_layer_id: Some(44),
         });
         project.add_page(page).expect("page");
@@ -3212,6 +3635,7 @@ mod tests {
                     },
                     polygon: Vec::new(),
                     gutter_px: 24.0,
+                    border_px: 1.0,
                     mask_layer_id: None,
                 },
             )
@@ -3294,6 +3718,7 @@ mod tests {
             },
             polygon: Vec::new(),
             gutter_px: 20.0,
+            border_px: 1.0,
             mask_layer_id: Some(54),
         });
         project.add_page(page).expect("page");
@@ -3336,6 +3761,7 @@ mod tests {
                     },
                     polygon: Vec::new(),
                     gutter_px: 16.0,
+                    border_px: 1.0,
                     mask_layer_id: None,
                 },
             )

@@ -2243,6 +2243,25 @@ impl Document {
         self.dispatch(EditorCommand::SetPanelMaskGeometry { mask, points })
     }
 
+    /// Replace one raster layer with the applied panel frame outlines.
+    pub fn set_panel_frames(
+        &mut self,
+        layer: LayerId,
+        frames: Vec<Vec<(f32, f32)>>,
+        border_px: f32,
+    ) -> Result<u64, EngineError> {
+        self.dispatch(EditorCommand::SetPanelFrames {
+            layer,
+            frames,
+            border_px,
+        })
+    }
+
+    /// Clear raster or vector paint from one layer as one undoable command.
+    pub fn clear_layer_content(&mut self, layer: LayerId) -> Result<u64, EngineError> {
+        self.dispatch(EditorCommand::ClearLayer { layer })
+    }
+
     /// Merge a standalone raster source into a raster target as one undoable
     /// command. The explicit IDs are stable across UI reorder operations.
     pub fn merge_layers(&mut self, target: LayerId, source: LayerId) -> Result<u64, EngineError> {
@@ -2860,7 +2879,20 @@ fn flush_deferred_dual_dabs(
             start = end;
         }
     }
-    for (dab_index, dab) in all_dabs.iter().copied().enumerate() {
+    dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
+    dirty.dedup();
+    publish_deferred_dual_dabs(state, stroke, sequence, &all_dabs, dirty.len());
+    Ok(dirty)
+}
+
+fn publish_deferred_dual_dabs(
+    state: &mut EngineState,
+    stroke: StrokeId,
+    sequence: u32,
+    dabs: &[BrushDab],
+    dirty_tile_count: usize,
+) {
+    for (dab_index, dab) in dabs.iter().copied().enumerate() {
         queue_live_dab(
             state,
             ink_live_render::LiveDab {
@@ -2877,10 +2909,8 @@ fn flush_deferred_dual_dabs(
             },
         );
     }
-    dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
-    dirty.dedup();
     if let Some(active) = state.active_stroke.as_mut() {
-        for dab in &all_dabs {
+        for dab in dabs {
             if let Some((previous_x, previous_y)) = active.compiled_dab_last_position {
                 let step = (dab.x - previous_x).hypot(dab.y - previous_y);
                 active.compiled_dab_path_length += f64::from(step);
@@ -2888,13 +2918,12 @@ fn flush_deferred_dual_dabs(
             }
             active.compiled_dab_last_position = Some((dab.x, dab.y));
         }
-        active.compiled_rendered_dabs =
-            active.compiled_rendered_dabs.saturating_add(all_dabs.len());
-        active.compiled_cpu_tile_updates =
-            active.compiled_cpu_tile_updates.saturating_add(dirty.len());
-        active.cpu_tile_updates = active.cpu_tile_updates.saturating_add(dirty.len());
+        active.compiled_rendered_dabs = active.compiled_rendered_dabs.saturating_add(dabs.len());
+        active.compiled_cpu_tile_updates = active
+            .compiled_cpu_tile_updates
+            .saturating_add(dirty_tile_count);
+        active.cpu_tile_updates = active.cpu_tile_updates.saturating_add(dirty_tile_count);
     }
-    Ok(dirty)
 }
 
 mod commands;
@@ -2923,7 +2952,8 @@ fn history_kind(command: &EditorCommand) -> &'static str {
         | EditorCommand::DuplicateLayers { .. }
         | EditorCommand::GroupLayers { .. }
         | EditorCommand::UngroupLayer { .. }
-        | EditorCommand::CreatePanelLayerTree { .. } => "layer",
+        | EditorCommand::CreatePanelLayerTree { .. }
+        | EditorCommand::ClearLayer { .. } => "layer",
         EditorCommand::MergeLayers { .. } | EditorCommand::MergeLayersBulk { .. } => "merge",
         EditorCommand::MoveLayer { .. } | EditorCommand::ReorderLayers { .. } => "reorder",
         EditorCommand::SetLayerName { .. } => "rename",
@@ -2944,7 +2974,9 @@ fn history_kind(command: &EditorCommand) -> &'static str {
         | EditorCommand::SetLayerClipping { .. }
         | EditorCommand::SetLayerReference { .. }
         | EditorCommand::SetLayerLabel { .. } => "layer_property",
-        EditorCommand::SetPanelMaskGeometry { .. } => "panel",
+        EditorCommand::SetPanelMaskGeometry { .. } | EditorCommand::SetPanelFrames { .. } => {
+            "panel"
+        }
         EditorCommand::FillRegion { .. } | EditorCommand::GradientFill { .. } => "fill",
         EditorCommand::TransformLayer { .. }
         | EditorCommand::PerspectiveLayer { .. }
@@ -2983,6 +3015,8 @@ fn history_label(command: &EditorCommand) -> String {
         EditorCommand::ReorderLayers { .. } => "Reorder selected layers".into(),
         EditorCommand::CreatePanelLayerTree { .. } => "Create panel layers".into(),
         EditorCommand::SetPanelMaskGeometry { .. } => "Edit panel geometry".into(),
+        EditorCommand::SetPanelFrames { .. } => "Apply panel frames".into(),
+        EditorCommand::ClearLayer { .. } => "Clear layer".into(),
         EditorCommand::SetLayerOpacity { .. } => "Change layer opacity".into(),
         EditorCommand::SetLayerVisibility { .. } => "Change layer visibility".into(),
         EditorCommand::SetLayerBlendMode { .. } => "Change blend mode".into(),
@@ -3965,6 +3999,17 @@ impl Document {
         self.snapshot_unflushed()
     }
 
+    /// Flush accepted input and take a lossless snapshot for persistence.
+    ///
+    /// Callers that coordinate document access with a broader lock can release
+    /// that lock after this method returns and perform storage I/O from the
+    /// owned snapshot without blocking document commands for the duration of
+    /// the write.
+    pub fn snapshot_for_save(&self) -> Result<ProjectSnapshot, EngineError> {
+        self.flush_input()?;
+        Ok(self.snapshot_unflushed())
+    }
+
     /// Return the bounded Rust-authoritative history projection.
     pub fn history_snapshot(&mut self, limit: u16) -> Result<HistoryProjection, EngineError> {
         self.flush_input()?;
@@ -4101,8 +4146,7 @@ impl Document {
 
     /// Atomically save the current document as a native `.inkproj` directory.
     pub fn save_as(&self, destination: &std::path::Path) -> Result<(), EngineError> {
-        self.flush_input()?;
-        ink_storage::save_project(destination, &self.snapshot_unflushed())
+        ink_storage::save_project(destination, &self.snapshot_for_save()?)
             .map_err(EngineError::from)
     }
 

@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -23,6 +25,7 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   rust.DocumentHandle _handle;
   rust.DocumentHandle? _fallbackHandle;
   rust.StudioProjectHandle? _projectHandle;
+  rust.StudioProjectHandle? _pendingRecoveryStudioProject;
   bool _usingProjectHandle = false;
   @override
   DocumentInfo documentInfo;
@@ -84,6 +87,76 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
     }
     debugPrint('Project Ink: document opened');
     return _fromHandle(handle);
+  }
+
+  /// Reopen the app-owned recovery checkpoint using its persisted project
+  /// type. Studio packages must be opened as complete projects so page
+  /// documents, comic structure, and the canvas all share one Rust authority.
+  static Future<FrbEngineApi> openRecovery(String path) async {
+    await _initializeBridge();
+    if (!await _isStudioProjectDirectory(path)) return open(path);
+
+    rust.StudioProjectHandle? project;
+    rust.DocumentHandle? page;
+    try {
+      project = await rust.openStudioProject(path: path);
+      final snapshot = await rust.projectSnapshot(handle: project);
+      if (snapshot.pages.isEmpty) {
+        throw const DocumentOpenException(
+          'The recovery project does not contain a page.',
+        );
+      }
+      page = await rust.projectActiveDocument(handle: project);
+      final engine = await _fromHandle(page);
+      engine._projectHandle = project;
+      engine._usingProjectHandle = true;
+      engine._pendingRecoveryStudioProject = project;
+      return engine;
+    } catch (error, stack) {
+      if (page != null) {
+        await rust.closeDocument(handle: page);
+      }
+      if (project != null) {
+        await rust.closeStudioProject(handle: project);
+      }
+      if (error is DocumentOpenException) {
+        Error.throwWithStackTrace(error, stack);
+      }
+      Error.throwWithStackTrace(
+        const DocumentOpenException(
+          'Could not open the saved recovery project. It was left untouched.',
+        ),
+        stack,
+      );
+    }
+  }
+
+  static Future<bool> _isStudioProjectDirectory(String path) async {
+    final manifestFile = File('$path${Platform.pathSeparator}manifest.json');
+    if (!await manifestFile.exists()) return false;
+    final length = await manifestFile.length();
+    // Storage accepts a bounded manifest. Keep the type probe bounded too.
+    if (length > 256 * 1024) return false;
+    try {
+      final decoded = jsonDecode(await manifestFile.readAsString());
+      return isStudioProjectManifest(decoded);
+    } on FormatException {
+      return false;
+    }
+  }
+
+  @visibleForTesting
+  static bool isStudioProjectManifest(Object? manifest) =>
+      manifest is Map &&
+      manifest['project_id'] is String &&
+      manifest['page_count'] is int;
+
+  /// Transfer the recovery project's owning capability to the comic session.
+  /// The engine retains a non-owning reference for complete-project saves.
+  rust.StudioProjectHandle? takeRecoveryStudioProject() {
+    final project = _pendingRecoveryStudioProject;
+    _pendingRecoveryStudioProject = null;
+    return project;
   }
 
   static Future<void> _initializeBridge() async {
@@ -189,6 +262,31 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   /// active page capability. Passing null restores standalone document saves.
   void bindStudioProject(rust.StudioProjectHandle? handle) {
     _projectHandle = handle;
+  }
+
+  /// Create or reuse a one-page project capability around the active
+  /// illustration document, preserving its pixels and document history.
+  Future<rust.StudioProjectHandle> createStudioProjectForCurrentDocument({
+    required BigInt projectId,
+    required BigInt pageId,
+    required String title,
+  }) async {
+    _requireOpen();
+    final existing = _projectHandle;
+    if (existing != null) return existing;
+    final fallback = _fallbackHandle;
+    if (fallback == null) throw StateError('no illustration document is open');
+    final project = await rust.createStudioProjectForDocument(
+      handle: _handle,
+      projectId: projectId,
+      pageId: pageId,
+      title: title,
+    );
+    _fallbackHandle ??= _handle;
+    _projectHandle = project;
+    _usingProjectHandle = true;
+    _handle = await rust.projectActiveDocument(handle: project);
+    return project;
   }
 
   @override
@@ -1006,6 +1104,17 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<void> clearLayer({required int layerId}) async {
+    _requireOpen();
+    if (layerId <= 0) throw ArgumentError.value(layerId, 'layerId');
+    _revision =
+        (await rust.clearLayer(
+          handle: _handle,
+          layer: _layerIds.toRust(layerId),
+        )).toInt();
+  }
+
+  @override
   Future<void> deleteLayers({required List<int> layerIds}) async {
     _requireOpen();
     if (layerIds.isEmpty ||
@@ -1344,6 +1453,35 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           handle: _handle,
           mask: _layerIds.toRust(maskLayerId),
           points: points,
+        )).toInt();
+  }
+
+  @override
+  Future<void> setPanelFrames({
+    required int layerId,
+    required List<double> points,
+    required List<int> pointCounts,
+    required double borderPx,
+  }) async {
+    _requireOpen();
+    if (layerId <= 0 ||
+        pointCounts.length > 256 ||
+        pointCounts.any((count) => count < 3 || count > 64) ||
+        pointCounts.fold<int>(0, (sum, count) => sum + count) * 2 !=
+            points.length ||
+        points.any((value) => !value.isFinite) ||
+        !borderPx.isFinite ||
+        borderPx < 0 ||
+        borderPx > 128) {
+      throw ArgumentError('invalid panel frame layer data');
+    }
+    _revision =
+        (await rust.setPanelFrames(
+          handle: _handle,
+          layer: _layerIds.toRust(layerId),
+          points: points,
+          pointCounts: pointCounts,
+          borderPx: borderPx,
         )).toInt();
   }
 
@@ -2195,6 +2333,11 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    final pendingProject = _pendingRecoveryStudioProject;
+    _pendingRecoveryStudioProject = null;
+    if (pendingProject != null) {
+      await rust.closeStudioProject(handle: pendingProject);
+    }
     final fallback = _fallbackHandle;
     if (_usingProjectHandle && fallback != null) {
       await rust.closeDocument(handle: fallback);

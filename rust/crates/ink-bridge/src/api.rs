@@ -442,8 +442,8 @@ pub struct StudioProjectHandle {
     project: Option<ComicProject>,
     pages: BTreeMap<u128, DocumentHandle>,
     active_page: Option<u128>,
-    project_undo: Vec<StudioProjectHistoryState>,
-    project_redo: Vec<StudioProjectHistoryState>,
+    project_undo: Vec<StudioProjectHistoryEntry>,
+    project_redo: Vec<StudioProjectHistoryEntry>,
 }
 
 /// A project-manager checkpoint contains the comic graph and every page
@@ -455,6 +455,13 @@ struct StudioProjectHistoryState {
     project: ComicProject,
     pages: BTreeMap<u128, ink_storage::ProjectSnapshot>,
     active_page: Option<u128>,
+    document_history_cursor: u32,
+}
+
+#[derive(Clone)]
+struct StudioProjectHistoryEntry {
+    state: StudioProjectHistoryState,
+    counterpart_cursor: u32,
 }
 
 impl StudioProjectHistoryState {
@@ -516,6 +523,7 @@ pub struct ComicPanelPreviewView {
     pub width: f32,
     pub height: f32,
     pub gutter_px: f32,
+    pub border_px: f32,
     pub mask_layer_id: Option<u128>,
     /// Stable page-document layer ownership IDs. `None` is retained for
     /// legacy v1 comic metadata that has not yet materialized its binding.
@@ -665,7 +673,7 @@ where
         operation(project).map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
         comic_view(project)
     };
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(view)
 }
 
@@ -799,6 +807,46 @@ fn panel_mask_points(panel: &Panel) -> Vec<(f32, f32)> {
     }
 }
 
+/// Rebuild an existing applied frame layer from the remaining structural
+/// panel map. The layer is optional: Comic panel guides do not need raster
+/// pixels unless the user explicitly applied them.
+fn refresh_applied_panel_frames(
+    document: &mut DocumentHandle,
+    page: &ink_comic::Page,
+) -> Result<(), EngineError> {
+    let Some(layer) = layer_summaries(document)?.into_iter().find(|layer| {
+        layer.name == "Panel Frames" && layer.kind == "Raster" && layer.parent.is_none()
+    }) else {
+        return Ok(());
+    };
+    let info = document_info(document)?;
+    let document_width = u16::try_from(info.width_px)
+        .map_err(|_| EngineError::InvalidCommand("document width is outside limits".into()))?;
+    let document_height = u16::try_from(info.height_px)
+        .map_err(|_| EngineError::InvalidCommand("document height is outside limits".into()))?;
+    let page_width = u16::try_from(page.spec.width_px)
+        .map_err(|_| EngineError::InvalidCommand("page width is outside limits".into()))?;
+    let page_height = u16::try_from(page.spec.height_px)
+        .map_err(|_| EngineError::InvalidCommand("page height is outside limits".into()))?;
+    let scale_x = f32::from(document_width) / f32::from(page_width);
+    let scale_y = f32::from(document_height) / f32::from(page_height);
+    let mut points = Vec::new();
+    let mut point_counts = Vec::with_capacity(page.panels.len());
+    for panel in &page.panels {
+        let frame_points = panel_mask_points(panel);
+        point_counts.push(
+            u32::try_from(frame_points.len())
+                .map_err(|_| EngineError::InvalidCommand("panel frame is too large".into()))?,
+        );
+        for (x, y) in frame_points {
+            points.extend([x * scale_x, y * scale_y]);
+        }
+    }
+    let border_px = page.panels.first().map_or(0.0, |panel| panel.border_px);
+    set_panel_frames(document, layer.id, points, point_counts, border_px)?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn studio_panel_binding(
     handle: &StudioProjectHandle,
@@ -921,31 +969,47 @@ fn studio_capture_state(
             "project history checkpoint exceeds the memory limit".into(),
         ));
     }
+    let mut active_document = studio_active_document(handle)?.clone();
+    let document_history_cursor = document_mut(&mut active_document)?
+        .history_snapshot(1)?
+        .cursor;
     Ok(StudioProjectHistoryState {
         project: studio_project(handle)?.clone(),
         pages,
         active_page: handle.active_page,
+        document_history_cursor,
     })
 }
 
-fn studio_push_history(handle: &mut StudioProjectHandle, state: StudioProjectHistoryState) {
+fn studio_push_history(
+    handle: &mut StudioProjectHandle,
+    state: StudioProjectHistoryState,
+) -> Result<(), EngineError> {
+    let mut active_document = studio_active_document(handle)?.clone();
+    let counterpart_cursor = document_mut(&mut active_document)?
+        .history_snapshot(1)?
+        .cursor;
     if handle.project_undo.len() >= MAX_STUDIO_PROJECT_HISTORY {
         handle.project_undo.remove(0);
     }
-    handle.project_undo.push(state);
+    handle.project_undo.push(StudioProjectHistoryEntry {
+        state,
+        counterpart_cursor,
+    });
     handle.project_redo.clear();
     bound_studio_history_stack(&mut handle.project_undo);
+    Ok(())
 }
 
-fn bound_studio_history_stack(stack: &mut Vec<StudioProjectHistoryState>) {
+fn bound_studio_history_stack(stack: &mut Vec<StudioProjectHistoryEntry>) {
     let mut total = stack
         .iter()
-        .map(StudioProjectHistoryState::payload_bytes)
+        .map(|entry| entry.state.payload_bytes())
         .sum::<usize>();
     while (stack.len() > MAX_STUDIO_PROJECT_HISTORY || total > MAX_STUDIO_HISTORY_BYTES)
         && stack.len() > 1
     {
-        total = total.saturating_sub(stack.remove(0).payload_bytes());
+        total = total.saturating_sub(stack.remove(0).state.payload_bytes());
     }
 }
 
@@ -957,15 +1021,29 @@ fn studio_restore_state(
         .project
         .validate()
         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
-    let mut pages = BTreeMap::new();
+    let mut restored = BTreeMap::new();
     for (page_id, snapshot) in state.pages {
-        pages.insert(page_id, make_page_document_from_snapshot(snapshot)?);
+        restored.insert(page_id, Document::from_snapshot(snapshot)?);
     }
     for page in &state.project.pages {
-        if !pages.contains_key(&page.id) {
+        if !restored.contains_key(&page.id) {
             return Err(EngineError::InvalidCommand(
                 "project history is missing a page document".into(),
             ));
+        }
+    }
+    let mut pages = BTreeMap::new();
+    for (page_id, document) in restored {
+        if let Some(existing) = handle.pages.get(&page_id) {
+            let existing = existing.clone();
+            let mut state = document_state(&existing)?;
+            state.inner = Some(document);
+            state.active_stroke = None;
+            state.staged_brush_imports.clear();
+            drop(state);
+            pages.insert(page_id, existing);
+        } else {
+            pages.insert(page_id, new_document_handle(document));
         }
     }
     handle.project = Some(state.project);
@@ -979,8 +1057,16 @@ fn restore_page_document(
     page_id: u128,
     snapshot: ink_storage::ProjectSnapshot,
 ) -> Result<(), EngineError> {
-    let restored = make_page_document_from_snapshot(snapshot)?;
-    handle.pages.insert(page_id, restored);
+    let restored = Document::from_snapshot(snapshot)?;
+    if let Some(existing) = handle.pages.get(&page_id) {
+        let existing = existing.clone();
+        let mut state = document_state(&existing)?;
+        state.inner = Some(restored);
+        state.active_stroke = None;
+        state.staged_brush_imports.clear();
+    } else {
+        handle.pages.insert(page_id, new_document_handle(restored));
+    }
     Ok(())
 }
 
@@ -1027,6 +1113,7 @@ fn comic_view(project: &ComicProject) -> ComicProjectView {
                             width: panel.bounds.width,
                             height: panel.bounds.height,
                             gutter_px: panel.gutter_px,
+                            border_px: panel.border_px,
                             mask_layer_id: binding
                                 .map(|value| value.mask_layer_id)
                                 .or(panel.mask_layer_id),
@@ -1138,8 +1225,8 @@ pub fn create_comic_project(
     })
 }
 
-/// Return a deterministic eight-page stick-figure example for acceptance and
-/// first-run onboarding.
+/// Return a deterministic eight-page stick-figure fixture for acceptance and
+/// compatibility tests.
 pub fn create_xkcd_stick_figure_comic() -> ComicProjectHandle {
     ComicProjectHandle {
         inner: Some(ink_comic::xkcd_stick_figure_comic()),
@@ -1167,6 +1254,87 @@ pub fn create_studio_project(
         project: Some(project),
         pages: BTreeMap::from([(page_id, document)]),
         active_page: Some(page_id),
+        project_undo: Vec::new(),
+        project_redo: Vec::new(),
+    })
+}
+
+/// Adopt the currently open illustration document as the only page of a
+/// structural panel project. The cloned handle is an Arc-backed capability to
+/// the same Rust document; artwork and command history stay in one authority.
+pub fn create_studio_project_for_document(
+    handle: &DocumentHandle,
+    project_id: u128,
+    page_id: u128,
+    title: String,
+) -> Result<StudioProjectHandle, EngineError> {
+    let (document_id, width_px, height_px, dpi, comic_bytes, rollback_snapshot) = {
+        let document = document(handle)?;
+        (
+            document.id.0,
+            document.spec.width_px,
+            document.spec.height_px,
+            document.spec.dpi,
+            document.comic_json(),
+            document.snapshot(),
+        )
+    };
+    let project = if let Some(bytes) = comic_bytes {
+        ComicProject::from_json(&bytes)
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?
+    } else {
+        let mut project = ComicProject::new(project_id, ProjectTemplate::Illustration, title);
+        project
+            .add_page(ink_comic::print_page(width_px, height_px, dpi, 1, page_id))
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+        let page_document = project
+            .page_documents
+            .iter_mut()
+            .find(|reference| reference.page_id == page_id)
+            .ok_or_else(|| {
+                EngineError::InvalidCommand("page document reference is missing".into())
+            })?;
+        page_document.document_id = document_id;
+        project
+    };
+    project
+        .validate()
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+    if project.template != ProjectTemplate::Illustration || project.pages.len() != 1 {
+        return Err(EngineError::InvalidCommand(
+            "panel editing can only adopt a single-page illustration".into(),
+        ));
+    }
+    let page = &project.pages[0];
+    let page_document = project
+        .page_documents
+        .iter()
+        .find(|reference| reference.page_id == page.id)
+        .ok_or_else(|| EngineError::InvalidCommand("page document reference is missing".into()))?;
+    if page_document.document_id != document_id {
+        return Err(EngineError::InvalidCommand(
+            "saved illustration page does not match the active document".into(),
+        ));
+    }
+    if page.spec.width_px != width_px || page.spec.height_px != height_px {
+        return Err(EngineError::InvalidCommand(
+            "saved panel geometry does not match the active illustration size".into(),
+        ));
+    }
+    let active_page = page.id;
+    let mut pages = BTreeMap::from([(active_page, handle.clone())]);
+    if let Err(error) = materialize_studio_panel_layers(&project, &mut pages) {
+        let restored = Document::from_snapshot(rollback_snapshot)?;
+        let shared_handle = handle.clone();
+        let mut shared = document_state(&shared_handle)?;
+        shared.inner = Some(restored);
+        shared.active_stroke = None;
+        return Err(error);
+    }
+    Ok(StudioProjectHandle {
+        project: Some(project),
+        pages,
+        active_page: Some(active_page),
         project_undo: Vec::new(),
         project_redo: Vec::new(),
     })
@@ -1238,46 +1406,86 @@ pub fn project_snapshot(handle: &StudioProjectHandle) -> Result<ComicProjectView
 /// page's raster/vector document snapshot. Drawing commands continue to use
 /// the active page document's own undo timeline.
 pub fn undo_project(handle: &mut StudioProjectHandle) -> Result<ComicProjectView, EngineError> {
-    let Some(target) = handle.project_undo.pop() else {
+    let Some(entry) = handle.project_undo.pop() else {
         return Err(EngineError::InvalidCommand(
             "project undo stack is empty".into(),
         ));
     };
+    let target = entry.state;
     let current = studio_capture_state(handle)?;
     if let Err(error) = studio_restore_state(handle, target.clone()) {
-        handle.project_undo.push(target);
+        handle.project_undo.push(StudioProjectHistoryEntry {
+            state: target,
+            counterpart_cursor: entry.counterpart_cursor,
+        });
         return Err(error);
     }
     if handle.project_redo.len() >= MAX_STUDIO_PROJECT_HISTORY {
         handle.project_redo.remove(0);
     }
-    handle.project_redo.push(current);
+    handle.project_redo.push(StudioProjectHistoryEntry {
+        state: current,
+        counterpart_cursor: target.document_history_cursor,
+    });
     bound_studio_history_stack(&mut handle.project_redo);
     Ok(comic_view(studio_project(handle)?))
 }
 
 /// Redo a project-manager structural edit.
 pub fn redo_project(handle: &mut StudioProjectHandle) -> Result<ComicProjectView, EngineError> {
-    let Some(target) = handle.project_redo.pop() else {
+    let Some(entry) = handle.project_redo.pop() else {
         return Err(EngineError::InvalidCommand(
             "project redo stack is empty".into(),
         ));
     };
+    let target = entry.state;
     let current = studio_capture_state(handle)?;
     if let Err(error) = studio_restore_state(handle, target.clone()) {
-        handle.project_redo.push(target);
+        handle.project_redo.push(StudioProjectHistoryEntry {
+            state: target,
+            counterpart_cursor: entry.counterpart_cursor,
+        });
         return Err(error);
     }
     if handle.project_undo.len() >= MAX_STUDIO_PROJECT_HISTORY {
         handle.project_undo.remove(0);
     }
-    handle.project_undo.push(current);
+    handle.project_undo.push(StudioProjectHistoryEntry {
+        state: current,
+        counterpart_cursor: target.document_history_cursor,
+    });
     bound_studio_history_stack(&mut handle.project_undo);
     Ok(comic_view(studio_project(handle)?))
 }
 
 pub fn project_can_undo(handle: &StudioProjectHandle) -> bool {
     !handle.project_undo.is_empty()
+}
+
+/// True when the most recent canvas edit is a project-structure mutation.
+/// This lets the shared Undo command preserve the order between page pixels
+/// and comic structure without maintaining a second mutable history in Flutter.
+pub fn project_undo_is_latest(handle: &StudioProjectHandle) -> Result<bool, EngineError> {
+    let Some(entry) = handle.project_undo.last() else {
+        return Ok(false);
+    };
+    let mut active_document = studio_active_document(handle)?.clone();
+    let cursor = document_mut(&mut active_document)?
+        .history_snapshot(1)?
+        .cursor;
+    Ok(cursor == entry.counterpart_cursor)
+}
+
+/// True when the next redo belongs to comic structure rather than page pixels.
+pub fn project_redo_is_latest(handle: &StudioProjectHandle) -> Result<bool, EngineError> {
+    let Some(entry) = handle.project_redo.last() else {
+        return Ok(false);
+    };
+    let mut active_document = studio_active_document(handle)?.clone();
+    let cursor = document_mut(&mut active_document)?
+        .history_snapshot(1)?
+        .cursor;
+    Ok(cursor == entry.counterpart_cursor)
 }
 
 pub fn project_can_redo(handle: &StudioProjectHandle) -> bool {
@@ -1333,7 +1541,7 @@ pub fn add_project_page(
         .add_page(page)
         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
     handle.pages.insert(page_id, document);
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(comic_view(studio_project(handle)?))
 }
 
@@ -1375,6 +1583,7 @@ pub fn add_project_panel(
                 },
                 polygon: Vec::new(),
                 gutter_px,
+                border_px: 1.0,
                 mask_layer_id: None,
             },
         )
@@ -1435,7 +1644,7 @@ pub fn add_project_panel(
         restore_page_document(handle, page_id, prior_document)?;
         return Err(error);
     }
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(comic_view(studio_project(handle)?))
 }
 
@@ -1494,7 +1703,7 @@ pub fn set_project_panel_bounds(
         restore_page_document(handle, page_id, prior_document)?;
         return Err(error);
     }
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(comic_view(studio_project(handle)?))
 }
 
@@ -1555,7 +1764,7 @@ pub fn set_project_panel_polygon(
         restore_page_document(handle, page_id, prior_document)?;
         return Err(error);
     }
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(comic_view(studio_project(handle)?))
 }
 
@@ -1652,7 +1861,7 @@ pub fn split_project_panel(
         restore_page_document(handle, page_id, prior_document)?;
         return Err(error);
     }
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(comic_view(studio_project(handle)?))
 }
 
@@ -1690,7 +1899,7 @@ pub fn studio_remove_page(
         let next_index = index.min(project.pages.len() - 1);
         handle.active_page = Some(project.pages[next_index].id);
     }
-    studio_push_history(handle, before);
+    studio_push_history(handle, before)?;
     Ok(comic_view(studio_project(handle)?))
 }
 
@@ -1747,6 +1956,230 @@ pub fn studio_resize_gutter(
     studio_mutate(handle, |project| {
         project.resize_gutter(page_index as usize, panel_id, gutter_px)
     })
+}
+
+/// Apply a 2-, 3-, or 4-panel preset to a page that has no panels. All layer
+/// trees and masks are materialized as one undoable project operation.
+pub fn studio_apply_panel_layout(
+    handle: &mut StudioProjectHandle,
+    page_index: u32,
+    panel_ids: Vec<u128>,
+    gutter_px: f32,
+    border_px: f32,
+) -> Result<ComicProjectView, EngineError> {
+    let page_index = usize::try_from(page_index)
+        .map_err(|_| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    let before = studio_capture_state(handle)?;
+    let old_project = studio_project(handle)?.clone();
+    if let Err(error) =
+        studio_project_mut(handle)?.apply_panel_layout(page_index, &panel_ids, gutter_px, border_px)
+    {
+        return Err(EngineError::InvalidCommand(error.to_string()));
+    }
+    let project = studio_project(handle)?.clone();
+    if let Err(error) = materialize_studio_panel_layers(&project, &mut handle.pages) {
+        *studio_project_mut(handle)? = old_project;
+        studio_restore_state(handle, before)?;
+        return Err(error);
+    }
+    studio_push_history(handle, before)?;
+    Ok(comic_view(studio_project(handle)?))
+}
+
+/// Remove one panel guide and refresh any applied frame layer in the same
+/// undoable project edit. Panel artwork layers remain in the page document;
+/// dialogue attached to the removed panel becomes page-level dialogue.
+pub fn studio_remove_panel(
+    handle: &mut StudioProjectHandle,
+    page_index: u32,
+    panel_id: u128,
+) -> Result<ComicProjectView, EngineError> {
+    let page_index = usize::try_from(page_index)
+        .map_err(|_| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    let page_id = studio_project(handle)?
+        .pages
+        .get(page_index)
+        .map(|page| page.id)
+        .ok_or_else(|| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    let before = studio_capture_state(handle)?;
+    let result = (|| {
+        studio_project_mut(handle)?
+            .remove_panel(page_index, panel_id)
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+        let page = studio_project(handle)?
+            .pages
+            .get(page_index)
+            .cloned()
+            .ok_or_else(|| EngineError::InvalidCommand("page index is outside limits".into()))?;
+        let document = handle
+            .pages
+            .get_mut(&page_id)
+            .ok_or_else(|| EngineError::InvalidCommand("page document is unavailable".into()))?;
+        refresh_applied_panel_frames(document, &page)
+    })();
+    if let Err(error) = result {
+        studio_restore_state(handle, before.clone())?;
+        return Err(error);
+    }
+    studio_push_history(handle, before)?;
+    Ok(comic_view(studio_project(handle)?))
+}
+
+/// Create a new divider in an existing panel, or create the first frame and
+/// split it in one undoable operation when the illustration has no panels.
+// Keep the scalar FRB call shape and the canvas model's f32 geometry contract.
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+pub fn studio_create_panel_split(
+    handle: &mut StudioProjectHandle,
+    page_index: u32,
+    panel_id: u128,
+    first_id: u128,
+    second_id: u128,
+    axis: u8,
+    ratio: f32,
+    gutter_px: f32,
+    border_px: f32,
+) -> Result<ComicProjectView, EngineError> {
+    let page_index = usize::try_from(page_index)
+        .map_err(|_| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    let before = studio_capture_state(handle)?;
+    let old_project = studio_project(handle)?.clone();
+    let page = studio_project(handle)?
+        .pages
+        .get(page_index)
+        .ok_or_else(|| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    if page.panels.is_empty() {
+        let panel = Panel {
+            id: panel_id,
+            shape: PanelShape::Rectangle,
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: page.spec.width_px as f32,
+                height: page.spec.height_px as f32,
+            },
+            polygon: Vec::new(),
+            gutter_px,
+            border_px,
+            mask_layer_id: None,
+        };
+        studio_project_mut(handle)?
+            .add_panel(page_index, panel)
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+    }
+    if let Err(error) = studio_project_mut(handle)?
+        .split_panel(page_index, panel_id, first_id, second_id, axis, ratio)
+    {
+        *studio_project_mut(handle)? = old_project;
+        return Err(EngineError::InvalidCommand(error.to_string()));
+    }
+    let project = studio_project(handle)?.clone();
+    if let Err(error) = materialize_studio_panel_layers(&project, &mut handle.pages) {
+        *studio_project_mut(handle)? = old_project;
+        studio_restore_state(handle, before)?;
+        return Err(error);
+    }
+    studio_push_history(handle, before)?;
+    Ok(comic_view(studio_project(handle)?))
+}
+
+/// Set saved gutter and outline widths on all panels on one page as one undoable edit.
+pub fn studio_set_panel_style(
+    handle: &mut StudioProjectHandle,
+    page_index: u32,
+    gutter_px: f32,
+    border_px: f32,
+) -> Result<ComicProjectView, EngineError> {
+    let page_index = usize::try_from(page_index)
+        .map_err(|_| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    let before = studio_capture_state(handle)?;
+    let page_id = studio_project(handle)?
+        .pages
+        .get(page_index)
+        .ok_or_else(|| EngineError::InvalidCommand("page index is outside limits".into()))?
+        .id;
+    let old_project = studio_project(handle)?.clone();
+    if let Err(error) =
+        studio_project_mut(handle)?.set_panel_style(page_index, gutter_px, border_px)
+    {
+        return Err(EngineError::InvalidCommand(error.to_string()));
+    }
+    let result = (|| {
+        let panels = studio_project(handle)?
+            .pages
+            .get(page_index)
+            .ok_or_else(|| EngineError::InvalidCommand("page index is outside limits".into()))?
+            .panels
+            .clone();
+        let panel_masks = panels
+            .into_iter()
+            .map(|panel| {
+                let (_, binding, panel) = studio_panel_binding(handle, page_index, panel.id)?;
+                Ok((binding, panel_mask_points(&panel)))
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        let page_document = handle
+            .pages
+            .get_mut(&page_id)
+            .ok_or_else(|| EngineError::InvalidCommand("page document is unavailable".into()))?;
+        for (binding, points) in panel_masks {
+            materialize_and_set_panel_mask(page_document, &binding, points)?;
+        }
+        Ok::<(), EngineError>(())
+    })();
+    if let Err(error) = result {
+        *studio_project_mut(handle)? = old_project;
+        restore_page_document(handle, page_id, before.pages[&page_id].clone())?;
+        return Err(error);
+    }
+    studio_push_history(handle, before)?;
+    Ok(comic_view(studio_project(handle)?))
+}
+
+/// Resize one divider shared by two aligned panels and rewrite both masks as
+/// one history operation, preserving the pixels on the bound page document.
+pub fn studio_resize_panel_divider(
+    handle: &mut StudioProjectHandle,
+    page_index: u32,
+    first_id: u128,
+    second_id: u128,
+    axis: u8,
+    position: f32,
+) -> Result<ComicProjectView, EngineError> {
+    let page_index = usize::try_from(page_index)
+        .map_err(|_| EngineError::InvalidCommand("page index is outside limits".into()))?;
+    let before = studio_capture_state(handle)?;
+    let page_id = studio_project(handle)?
+        .pages
+        .get(page_index)
+        .ok_or_else(|| EngineError::InvalidCommand("page index is outside limits".into()))?
+        .id;
+    let old_project = studio_project(handle)?.clone();
+    if let Err(error) = studio_project_mut(handle)?
+        .resize_panel_divider(page_index, first_id, second_id, axis, position)
+    {
+        return Err(EngineError::InvalidCommand(error.to_string()));
+    }
+    let result = (|| {
+        for panel_id in [first_id, second_id] {
+            let (_, binding, panel) = studio_panel_binding(handle, page_index, panel_id)?;
+            materialize_and_set_panel_mask(
+                handle.pages.get_mut(&page_id).ok_or_else(|| {
+                    EngineError::InvalidCommand("page document is unavailable".into())
+                })?,
+                &binding,
+                panel_mask_points(&panel),
+            )?;
+        }
+        Ok::<(), EngineError>(())
+    })();
+    if let Err(error) = result {
+        *studio_project_mut(handle)? = old_project;
+        restore_page_document(handle, page_id, before.pages[&page_id].clone())?;
+        return Err(error);
+    }
+    studio_push_history(handle, before)?;
+    Ok(comic_view(studio_project(handle)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2779,6 +3212,7 @@ pub fn comic_add_panel(
                 },
                 polygon: Vec::new(),
                 gutter_px,
+                border_px: 1.0,
                 mask_layer_id,
             },
         )
@@ -3881,6 +4315,11 @@ pub fn delete_layer(handle: &mut DocumentHandle, layer: u128) -> Result<u64, Eng
     document_mut(handle)?.delete_layer(ink_model::LayerId::from_u128(layer))
 }
 
+/// Clear all paint from a raster or vector layer as one undoable edit.
+pub fn clear_layer(handle: &mut DocumentHandle, layer: u128) -> Result<u64, EngineError> {
+    document_mut(handle)?.clear_layer_content(ink_model::LayerId::from_u128(layer))
+}
+
 /// Delete several selected layer roots and descendants as one undoable edit.
 pub fn delete_layers(handle: &mut DocumentHandle, layers: Vec<u128>) -> Result<u64, EngineError> {
     document_mut(handle)?.delete_layers(
@@ -4401,6 +4840,54 @@ pub fn set_panel_mask_geometry(
         ink_model::LayerId::from_u128(mask),
         pairs.iter().map(|pair| (pair[0], pair[1])).collect(),
     )
+}
+
+/// Replace a normal raster layer with the applied outlines for one panel map.
+/// `frames` contains bounded `(x, y, width, height)` tuples in document pixels.
+pub fn set_panel_frames(
+    handle: &mut DocumentHandle,
+    layer: u128,
+    points: Vec<f32>,
+    point_counts: Vec<u32>,
+    border_px: f32,
+) -> Result<u64, EngineError> {
+    if point_counts.len() > 256
+        || point_counts.iter().any(|count| !(3..=64).contains(count))
+        || point_counts
+            .iter()
+            .try_fold(0_usize, |sum, count| {
+                sum.checked_add(usize::try_from(*count).ok()?)
+            })
+            .and_then(|count| count.checked_mul(2))
+            != Some(points.len())
+    {
+        return Err(EngineError::InvalidCommand(
+            "panel frames require at most 256 bounded polygons".into(),
+        ));
+    }
+    if points.iter().any(|value| !value.is_finite())
+        || !border_px.is_finite()
+        || !(0.0..=128.0).contains(&border_px)
+    {
+        return Err(EngineError::InvalidCommand(
+            "panel frame geometry must be finite and bounded".into(),
+        ));
+    }
+    let (pairs, remainder) = points.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    let mut cursor = 0;
+    let mut frames = Vec::with_capacity(point_counts.len());
+    for count in point_counts {
+        let end = cursor + usize::try_from(count).unwrap_or(0);
+        frames.push(
+            pairs[cursor..end]
+                .iter()
+                .map(|pair| (pair[0], pair[1]))
+                .collect(),
+        );
+        cursor = end;
+    }
+    document_mut(handle)?.set_panel_frames(ink_model::LayerId::from_u128(layer), frames, border_px)
 }
 
 /// Merge two standalone raster layers. The source is removed only after the
@@ -5498,10 +5985,24 @@ pub fn push_pointer_packet(handle: &mut DocumentHandle, packet: &[u8]) -> Result
 /// Atomically save a native project.
 pub fn save_document(handle: &DocumentHandle, path: String) -> Result<(), String> {
     let path = std::path::PathBuf::from(path);
-    document(handle)
-        .map_err(|error| error.to_string())?
-        .save_as(&path)
-        .map_err(|error| error.to_string())
+    with_document_save_snapshot(handle, |snapshot| {
+        ink_storage::save_project(&path, snapshot).map_err(EngineError::from)
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Snapshot the document under its handle lock, then persist the owned value
+/// after releasing that lock. Autosave storage work must not serialize undo,
+/// drawing, or other document commands behind filesystem I/O.
+fn with_document_save_snapshot(
+    handle: &DocumentHandle,
+    persist: impl FnOnce(&ink_storage::ProjectSnapshot) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    let snapshot = {
+        let document = document(handle)?;
+        document.snapshot_for_save()?
+    };
+    persist(&snapshot)
 }
 
 /// Attach validated comic structure to the native document before checkpoint.

@@ -14,6 +14,10 @@ class InMemoryEngineApi implements EngineApi {
   InMemoryEngineApi();
 
   int _revision = 0;
+  int _nextLayerId = 2;
+  final List<LayerSummaryView> _layers = <LayerSummaryView>[
+    const LayerSummaryView(id: 1, name: 'Paint Layer 1', kind: 'Raster'),
+  ];
   int? activeBrushColorRgba;
   int _nextOpacityEditId = 1;
   int _nextBrushDraft = 1;
@@ -204,6 +208,29 @@ class InMemoryEngineApi implements EngineApi {
     }
     if (labelRgba != null && (labelRgba < 0 || labelRgba > 0xffffffff)) {
       throw ArgumentError('invalid layer label');
+    }
+    final index = _layers.indexWhere((layer) => layer.id == layerId);
+    if (index >= 0) {
+      final old = _layers[index];
+      _layers[index] = LayerSummaryView(
+        id: old.id,
+        name: name,
+        kind: old.kind,
+        order: old.order,
+        parent: old.parent,
+        maskOwner: old.maskOwner,
+        maskEnabled: old.maskEnabled,
+        maskInverted: old.maskInverted,
+        opacity: old.opacity,
+        visible: old.visible,
+        blendMode: blendMode,
+        groupMode: groupMode,
+        alphaLock: old.alphaLock,
+        locked: old.locked,
+        clipping: old.clipping,
+        reference: old.reference,
+        labelRgba: labelRgba,
+      );
     }
     _revision++;
   }
@@ -428,7 +455,9 @@ class InMemoryEngineApi implements EngineApi {
     };
     if (!valid.contains(kind)) throw ArgumentError('unknown layer kind');
     _revision++;
-    return _revision;
+    final id = _nextLayerId++;
+    _layers.add(LayerSummaryView(id: id, name: kind, kind: kind));
+    return id;
   }
 
   @override
@@ -448,7 +477,11 @@ class InMemoryEngineApi implements EngineApi {
     };
     if (!valid.contains(kind)) throw ArgumentError('unknown layer kind');
     _revision++;
-    return _revision;
+    final id = _nextLayerId++;
+    _layers.add(
+      LayerSummaryView(id: id, name: kind, kind: kind, parent: parentId),
+    );
+    return id;
   }
 
   @override
@@ -482,6 +515,13 @@ class InMemoryEngineApi implements EngineApi {
   @override
   Future<void> deleteLayer({required int layerId}) async {
     if (layerId <= 0) throw ArgumentError('invalid layer ID');
+    _layers.removeWhere((layer) => layer.id == layerId);
+    _revision++;
+  }
+
+  @override
+  Future<void> clearLayer({required int layerId}) async {
+    if (layerId <= 0) throw ArgumentError('invalid layer ID');
     _revision++;
   }
 
@@ -492,6 +532,7 @@ class InMemoryEngineApi implements EngineApi {
         layerIds.toSet().length != layerIds.length) {
       throw ArgumentError('delete requires unique layer IDs');
     }
+    _layers.removeWhere((layer) => layerIds.contains(layer.id));
     _revision++;
   }
 
@@ -705,6 +746,27 @@ class InMemoryEngineApi implements EngineApi {
         !points.length.isEven ||
         points.any((value) => !value.isFinite)) {
       throw ArgumentError('invalid panel mask geometry');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<void> setPanelFrames({
+    required int layerId,
+    required List<double> points,
+    required List<int> pointCounts,
+    required double borderPx,
+  }) async {
+    if (layerId <= 0 ||
+        pointCounts.length > 256 ||
+        pointCounts.any((count) => count < 3 || count > 64) ||
+        pointCounts.fold<int>(0, (sum, count) => sum + count) * 2 !=
+            points.length ||
+        points.any((value) => !value.isFinite) ||
+        !borderPx.isFinite ||
+        borderPx < 0 ||
+        borderPx > 128) {
+      throw ArgumentError('invalid panel frame layer data');
     }
     _revision++;
   }
@@ -1226,9 +1288,8 @@ class InMemoryEngineApi implements EngineApi {
   ];
 
   @override
-  Future<List<LayerSummaryView>> layerSummaries() async => const [
-    LayerSummaryView(id: 1, name: 'Paint Layer 1', kind: 'Raster'),
-  ];
+  Future<List<LayerSummaryView>> layerSummaries() async =>
+      List<LayerSummaryView>.unmodifiable(_layers);
 
   @override
   Future<List<VectorStrokeSummaryView>> vectorStrokeSummaries({

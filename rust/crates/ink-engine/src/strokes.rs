@@ -443,6 +443,54 @@ pub(super) fn consume_packet_with_sample_limit(
             "stroke_work_limit_reached: confirmed input could not be continued safely".into(),
         ));
     }
+    // A single native packet may contain coalesced samples from both sides of
+    // a page exit and re-entry. Consume the pre-gap segment first so resetting
+    // the brush path below cannot accidentally join samples from both sides.
+    let max_x = state.width_px.saturating_sub(1) as f32;
+    let max_y = state.height_px.saturating_sub(1) as f32;
+    let mut raw_previous = state
+        .active_stroke
+        .as_ref()
+        .and_then(|active| active.last_input_sample);
+    let mut outside_after_exit = state
+        .active_stroke
+        .as_ref()
+        .is_some_and(|active| active.stopped_at_page_edge);
+    let mut reentry_indices = Vec::new();
+    for (index, sample) in packet.samples.iter().enumerate() {
+        if sample.flags & (flags::HOVER | flags::PALM_REJECTED | flags::PREDICTED) != 0 {
+            continue;
+        }
+        let inside = sample_inside_document(*sample, max_x, max_y);
+        if outside_after_exit && inside {
+            if index > 0 {
+                reentry_indices.push(index);
+            }
+            outside_after_exit = false;
+        }
+        if raw_previous
+            .is_some_and(|previous| sample_inside_document(previous, max_x, max_y) && !inside)
+        {
+            outside_after_exit = true;
+        }
+        raw_previous = Some(*sample);
+    }
+    if !reentry_indices.is_empty() {
+        let mut start = 0;
+        for end in reentry_indices.into_iter().chain([packet.samples.len()]) {
+            if start < end {
+                consume_packet_with_sample_limit(
+                    state,
+                    PointerPacket {
+                        samples: packet.samples[start..end].to_vec(),
+                    },
+                    sample_limit,
+                )?;
+            }
+            start = end;
+        }
+        return Ok(());
+    }
     let stroke_id = state
         .active_stroke
         .as_ref()
@@ -450,12 +498,14 @@ pub(super) fn consume_packet_with_sample_limit(
         .ok_or_else(|| EngineError::InvalidCommand("stroke is not active".into()))?;
     let mut confirmed = Vec::new();
     let mut predicted = Vec::new();
-    let max_x = state.width_px.saturating_sub(1) as f32;
-    let max_y = state.height_px.saturating_sub(1) as f32;
     let mut raw_previous = state
         .active_stroke
         .as_ref()
         .and_then(|active| active.last_input_sample);
+    let mut outside_after_exit = state
+        .active_stroke
+        .as_ref()
+        .is_some_and(|active| active.stopped_at_page_edge);
     for sample in packet.samples {
         if sample.flags & (flags::HOVER | flags::PALM_REJECTED) != 0 {
             continue;
@@ -474,21 +524,29 @@ pub(super) fn consume_packet_with_sample_limit(
                 predicted.push(bounded);
             }
         } else {
-            let stopped_at_page_edge = state
-                .active_stroke
-                .as_ref()
-                .is_some_and(|active| active.stopped_at_page_edge);
-            if !stopped_at_page_edge {
-                confirmed.extend(clip_pointer_segment(raw_previous, sample, max_x, max_y));
-                if raw_previous.is_some_and(|previous| {
-                    sample_inside_document(previous, max_x, max_y)
-                        && !sample_inside_document(sample, max_x, max_y)
-                }) {
-                    if let Some(active) = state.active_stroke.as_mut() {
-                        active.stopped_at_page_edge = true;
-                    }
-                    predicted.clear();
+            let sample_inside = sample_inside_document(sample, max_x, max_y);
+            if outside_after_exit && sample_inside {
+                // Start a fresh brush path at the re-entry boundary. The
+                // stroke remains one undo transaction, but no dab interpolation
+                // bridges the part of the pointer path outside the page.
+                if let Some(active) = state.active_stroke.as_mut() {
+                    active.stopped_at_page_edge = false;
+                    active.last_confirmed_sample = None;
+                    active.legacy_resample_anchor = None;
+                    active.compiled_brush_state = ink_brush::CompiledBrushState::default();
+                    active.compiled_dab_last_position = None;
                 }
+                outside_after_exit = false;
+            }
+            confirmed.extend(clip_pointer_segment(raw_previous, sample, max_x, max_y));
+            if raw_previous.is_some_and(|previous| {
+                sample_inside_document(previous, max_x, max_y) && !sample_inside
+            }) {
+                if let Some(active) = state.active_stroke.as_mut() {
+                    active.stopped_at_page_edge = true;
+                }
+                outside_after_exit = true;
+                predicted.clear();
             }
             raw_previous = Some(sample);
         }

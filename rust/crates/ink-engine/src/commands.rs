@@ -473,6 +473,9 @@ fn validate_lock_access(state: &EngineState, command: &EditorCommand) -> Result<
         EditorCommand::SetPanelMaskGeometry { mask, .. }
         | EditorCommand::SetMaskEnabled { mask, .. }
         | EditorCommand::SetMaskInverted { mask, .. } => ensure_unlocked(state, *mask),
+        EditorCommand::SetPanelFrames { layer, .. } | EditorCommand::ClearLayer { layer } => {
+            ensure_unlocked(state, *layer)
+        }
         EditorCommand::ApplyLayerMask { mask } => validate_mask_apply_target(state, *mask),
         EditorCommand::SetLayerOpacity { layer, .. }
         | EditorCommand::SetLayerBlendMode { layer, .. }
@@ -621,6 +624,49 @@ fn validate_reorder_locks(state: &EngineState, layers: &[LayerId]) -> Result<(),
     Ok(())
 }
 
+fn rasterize_panel_segment(
+    tiles: &mut TileStore,
+    from: (f32, f32),
+    to: (f32, f32),
+    border_px: f32,
+    width_px: u32,
+    height_px: u32,
+    dirty: &mut Vec<ink_raster::TileCoord>,
+) {
+    let distance = (to.0 - from.0).hypot(to.1 - from.1);
+    let steps = distance.ceil().max(1.0) as usize;
+    let radius = border_px / 2.0 + 0.5;
+    let radius_squared = radius * radius;
+    let color = Rgba8 {
+        r: 24,
+        g: 24,
+        b: 28,
+        a: 255,
+    };
+    for step in 0..=steps {
+        let amount = step as f32 / steps as f32;
+        let center_x = from.0 + (to.0 - from.0) * amount;
+        let center_y = from.1 + (to.1 - from.1) * amount;
+        let min_x = (center_x - radius).floor().max(0.0) as u32;
+        let max_x = (center_x + radius)
+            .ceil()
+            .min(width_px.saturating_sub(1) as f32) as u32;
+        let min_y = (center_y - radius).floor().max(0.0) as u32;
+        let max_y = (center_y + radius)
+            .ceil()
+            .min(height_px.saturating_sub(1) as f32) as u32;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let dx = x as f32 + 0.5 - center_x;
+                let dy = y as f32 + 0.5 - center_y;
+                if dx * dx + dy * dy <= radius_squared {
+                    dirty.push(tiles.set_pixel(x, y, color));
+                }
+            }
+        }
+    }
+}
+
 // Keep the established command dispatcher together: splitting it now would
 // widen the mutation refactor beyond the lock-validation change.
 #[allow(clippy::too_many_lines)]
@@ -755,6 +801,141 @@ pub(super) fn dispatch_state(
                     .copied()
                     .map(|coordinate| TileDescriptor {
                         layer: *mask,
+                        coordinate,
+                    })
+                    .collect(),
+            });
+            state.events.push(EngineEvent::CompositeTilesDirty {
+                revision: state.revision,
+                tiles: dirty,
+            });
+        }
+        EditorCommand::SetPanelFrames {
+            layer,
+            frames,
+            border_px,
+        } => {
+            if frames.len() > 256
+                || !border_px.is_finite()
+                || !(0.0..=128.0).contains(border_px)
+                || frames.iter().any(|points| {
+                    !(3..=64).contains(&points.len())
+                        || points.iter().any(|(x, y)| {
+                            !x.is_finite()
+                                || !y.is_finite()
+                                || *x < 0.0
+                                || *y < 0.0
+                                || *x > state.width_px as f32
+                                || *y > state.height_px as f32
+                        })
+                })
+            {
+                return Err(EngineError::InvalidCommand(
+                    "panel frames contain invalid polygon or border width".into(),
+                ));
+            }
+            let thickness = border_px.ceil();
+            let work = if thickness == 0.0 {
+                0.0
+            } else {
+                frames.iter().fold(0.0_f64, |sum, points| {
+                    sum + points
+                        .iter()
+                        .copied()
+                        .zip(points.iter().copied().cycle().skip(1))
+                        .take(points.len())
+                        .map(|((from_x, from_y), (to_x, to_y))| {
+                            f64::from((to_x - from_x).hypot(to_y - from_y).ceil())
+                                * f64::from((thickness + 1.0).powi(2))
+                        })
+                        .sum::<f64>()
+                })
+            };
+            if work > MAX_FILL_PIXELS as f64 {
+                return Err(EngineError::InvalidCommand(
+                    "panel frame rasterization exceeds the safety limit".into(),
+                ));
+            }
+            let layer_state = state
+                .layers
+                .get_mut(layer)
+                .ok_or(EngineError::InvalidLayer)?;
+            if layer_state.layer.kind != LayerKind::Raster {
+                return Err(EngineError::InvalidCommand(
+                    "panel frames require a raster layer".into(),
+                ));
+            }
+            let mut dirty = layer_state.tiles.allocated_coordinates();
+            layer_state.tiles.clear();
+            if *border_px > 0.0 {
+                for points in frames {
+                    for (from, to) in points
+                        .iter()
+                        .copied()
+                        .zip(points.iter().copied().cycle().skip(1))
+                        .take(points.len())
+                    {
+                        rasterize_panel_segment(
+                            &mut layer_state.tiles,
+                            from,
+                            to,
+                            *border_px,
+                            state.width_px,
+                            state.height_px,
+                            &mut dirty,
+                        );
+                    }
+                }
+            }
+            dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
+            dirty.dedup();
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+            state.events.push(EngineEvent::TilesDirty {
+                revision: state.revision,
+                tiles: dirty
+                    .iter()
+                    .copied()
+                    .map(|coordinate| TileDescriptor {
+                        layer: *layer,
+                        coordinate,
+                    })
+                    .collect(),
+            });
+            state.events.push(EngineEvent::CompositeTilesDirty {
+                revision: state.revision,
+                tiles: dirty,
+            });
+        }
+        EditorCommand::ClearLayer { layer } => {
+            let layer_state = state
+                .layers
+                .get_mut(layer)
+                .ok_or(EngineError::InvalidLayer)?;
+            if !matches!(
+                layer_state.layer.kind,
+                LayerKind::Raster | LayerKind::VectorInk
+            ) {
+                return Err(EngineError::InvalidCommand(
+                    "only raster and vector paint layers can be cleared".into(),
+                ));
+            }
+            let dirty = layer_state.tiles.allocated_coordinates();
+            layer_state.tiles.clear();
+            layer_state.vectors.clear();
+            advance_revision(state)?;
+            state.events.push(EngineEvent::LayersChanged {
+                revision: state.revision,
+            });
+            state.events.push(EngineEvent::TilesDirty {
+                revision: state.revision,
+                tiles: dirty
+                    .iter()
+                    .copied()
+                    .map(|coordinate| TileDescriptor {
+                        layer: *layer,
                         coordinate,
                     })
                     .collect(),

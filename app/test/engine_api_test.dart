@@ -4,6 +4,25 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/bridge/engine_api.dart';
 
 void main() {
+  test('recovery manifest type detection recognizes Studio projects', () {
+    expect(
+      FrbEngineApi.isStudioProjectManifest(<String, Object?>{
+        'format_version': 2,
+        'project_id': 'comic-project',
+        'page_count': 3,
+      }),
+      isTrue,
+    );
+    expect(
+      FrbEngineApi.isStudioProjectManifest(<String, Object?>{
+        'format_version': 6,
+        'document_id': 'illustration-document',
+      }),
+      isFalse,
+    );
+    expect(FrbEngineApi.isStudioProjectManifest(null), isFalse);
+  });
+
   test(
     'in-memory control plane exposes save and PNG export operations',
     () async {

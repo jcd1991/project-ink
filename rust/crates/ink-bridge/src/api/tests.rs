@@ -1,6 +1,43 @@
 use super::*;
 use ink_model::{ColorSpace, LayerKind, Rgba8};
 
+fn assert_f32_near(actual: f32, expected: f32) {
+    assert!((actual - expected).abs() < f32::EPSILON);
+}
+
+#[test]
+fn panel_frame_layer_round_trips_clear_and_undo_through_bridge() {
+    let mut handle = create_document(
+        0x5046_5241,
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let frame_layer = add_layer(&mut handle, 0).expect("frame raster layer");
+    set_panel_frames(
+        &mut handle,
+        frame_layer,
+        vec![8.0, 8.0, 40.0, 8.0, 40.0, 40.0, 8.0, 40.0],
+        vec![4],
+        2.0,
+    )
+    .expect("apply polygon frame");
+
+    let painted = read_tile(&handle, frame_layer, 0, 0).expect("frame pixels");
+    assert!(painted[(20 * 256 + 8) * 4 + 3] > 0);
+    clear_layer(&mut handle, frame_layer).expect("clear only the frame layer");
+    let cleared = read_tile(&handle, frame_layer, 0, 0).expect("cleared frame");
+    assert_eq!(cleared[(20 * 256 + 8) * 4 + 3], 0);
+    undo(&mut handle).expect("undo clear");
+    let restored = read_tile(&handle, frame_layer, 0, 0).expect("undo restores frame");
+    assert!(restored[(20 * 256 + 8) * 4 + 3] > 0);
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::float_cmp)]
@@ -24,7 +61,7 @@ fn tile_drain_keeps_stroke_acknowledgements_with_their_tiles() {
     packet.extend([0_u8; 48]);
     packet[8..10].copy_from_slice(&1_u16.to_le_bytes()); // actual sample
     packet[10] = 1; // stylus
-    packet[11] = 0; // down
+    packet[11] = 2; // Up commits the sample and closes the stroke.
     packet[12..16].copy_from_slice(&24.0_f32.to_le_bytes());
     packet[16..20].copy_from_slice(&24.0_f32.to_le_bytes());
     packet[20..24].copy_from_slice(&1.0_f32.to_le_bytes());
@@ -1596,6 +1633,7 @@ fn high_namespace_panel_layer_ids_round_trip_without_rewriting_metadata() {
                 },
                 polygon: Vec::new(),
                 gutter_px: 12.0,
+                border_px: 1.0,
                 mask_layer_id: None,
             },
         )
@@ -2256,6 +2294,31 @@ fn reopened_document_can_save_again_to_its_existing_package() {
 }
 
 #[test]
+fn document_handle_lock_is_released_before_checkpoint_persistence() {
+    let handle = create_document(
+        903,
+        DocumentSpec {
+            width_px: 256,
+            height_px: 256,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let concurrently_accessible = handle.clone();
+
+    with_document_save_snapshot(&handle, |_| {
+        assert!(
+            concurrently_accessible.state.try_lock().is_ok(),
+            "document handle must be available while the snapshot is persisted"
+        );
+        Ok(())
+    })
+    .expect("prepare and persist snapshot");
+}
+
+#[test]
 fn staged_brush_import_revalidates_and_can_be_discarded() {
     let path = std::env::temp_dir().join(format!(
         "project-ink-bridge-stage-{}.inkbrush",
@@ -2286,6 +2349,257 @@ fn staged_brush_import_revalidates_and_can_be_discarded() {
     discard_staged_brush_import(&mut handle, staged_again.operation_id);
     assert!(convert_staged_brush_import(&mut handle, staged_again.operation_id).is_err());
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn illustration_panel_project_shares_document_and_orders_undo_with_canvas_edits() {
+    let mut document = create_document(
+        0x9911,
+        DocumentSpec {
+            width_px: 800,
+            height_px: 1200,
+            dpi: 300.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let original_layers = layer_summaries(&document).expect("initial layers").len();
+    let mut project =
+        create_studio_project_for_document(&document, 0x9912, 0x9913, "Illustration panels".into())
+            .expect("shared one-page project");
+
+    studio_apply_panel_layout(
+        &mut project,
+        0,
+        vec![0x9920, 0x9921, 0x9922, 0x9923],
+        24.0,
+        3.0,
+    )
+    .expect("layout");
+    assert!(project_undo_is_latest(&project).expect("panel is latest"));
+    assert_eq!(
+        layer_summaries(&document).expect("same document").len(),
+        original_layers + 4 * 7
+    );
+
+    add_layer(&mut document, 0).expect("drawing edit after panel change");
+    assert!(!project_undo_is_latest(&project).expect("canvas edit is latest"));
+    undo(&mut document).expect("undo intervening canvas edit");
+    assert!(project_undo_is_latest(&project).expect("panel is latest again"));
+    undo_project(&mut project).expect("undo panel layout");
+    assert_eq!(
+        project_snapshot(&project).expect("snapshot").pages[0].panel_count,
+        0
+    );
+    assert_eq!(
+        layer_summaries(&document)
+            .expect("shared handle restored")
+            .len(),
+        original_layers
+    );
+    assert!(project_redo_is_latest(&project).expect("panel layout can be redone"));
+    redo_project(&mut project).expect("redo panel layout");
+    assert_eq!(
+        project_snapshot(&project).expect("snapshot").pages[0].panel_count,
+        4
+    );
+}
+
+#[test]
+fn studio_remove_panel_updates_applied_frames_and_undoes_together() {
+    let mut document = create_document(
+        0x9941,
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let frame_layer = add_layer(&mut document, 0).expect("frame layer");
+    update_layer_presentation(
+        &mut document,
+        frame_layer,
+        "Panel Frames".into(),
+        0,
+        1,
+        None,
+    )
+    .expect("name frame layer");
+    let mut project =
+        create_studio_project_for_document(&document, 0x9942, 0x9943, "Panel test".into())
+            .expect("shared page project");
+    let applied = studio_apply_panel_layout(&mut project, 0, vec![0x9950, 0x9951], 4.0, 2.0)
+        .expect("apply panel layout");
+    let panels = &applied.pages[0].panels;
+    let mut points = Vec::new();
+    for panel in panels {
+        points.extend([
+            panel.x,
+            panel.y,
+            panel.x + panel.width,
+            panel.y,
+            panel.x + panel.width,
+            panel.y + panel.height,
+            panel.x,
+            panel.y + panel.height,
+        ]);
+    }
+    set_panel_frames(&mut document, frame_layer, points, vec![4, 4], 2.0)
+        .expect("apply raster frame layer");
+
+    let first = &panels[0];
+    let second = &panels[1];
+    let first_right_x = (first.x + first.width).round() as i32;
+    let second_left_x = second.x.round() as i32;
+    let probe_y = (first.y + first.height / 2.0).round() as i32;
+    let line_visible_near = |tile: &[u8], x: i32, y: i32| {
+        (-1..=1).any(|dx| {
+            (-2..=2).any(|dy| {
+                let px = x + dx;
+                let py = y + dy;
+                px >= 0
+                    && py >= 0
+                    && px < 64
+                    && py < 64
+                    && tile[(py as usize * 256 + px as usize) * 4 + 3] > 0
+            })
+        })
+    };
+    let before = read_tile(&document, frame_layer, 0, 0).expect("initial frame pixels");
+    assert!(line_visible_near(&before, first_right_x, probe_y));
+    assert!(line_visible_near(&before, second_left_x, probe_y));
+
+    let removed = studio_remove_panel(&mut project, 0, applied.pages[0].panels[0].id)
+        .expect("remove first panel");
+    assert_eq!(removed.pages[0].panel_count, 1);
+    assert!(project_undo_is_latest(&project).expect("one structural edit"));
+    let after = read_tile(&document, frame_layer, 0, 0).expect("updated frame pixels");
+    assert!(!line_visible_near(&after, first_right_x, probe_y));
+    assert!(line_visible_near(&after, second_left_x, probe_y));
+
+    undo_project(&mut project).expect("undo panel removal and frame update");
+    assert_eq!(
+        project_snapshot(&project).expect("restored").pages[0].panel_count,
+        2
+    );
+    let restored = read_tile(&document, frame_layer, 0, 0).expect("restored frame pixels");
+    assert!(line_visible_near(&restored, first_right_x, probe_y));
+    assert!(project_redo_is_latest(&project).expect("removal can be redone"));
+    redo_project(&mut project).expect("redo panel removal and frame update");
+    assert_eq!(
+        project_snapshot(&project).expect("redone").pages[0].panel_count,
+        1
+    );
+    let redone = read_tile(&document, frame_layer, 0, 0).expect("redone frame pixels");
+    assert!(!line_visible_near(&redone, first_right_x, probe_y));
+}
+
+#[test]
+fn panel_divider_and_style_updates_are_validated_project_history() {
+    let document = create_document(
+        0x9931,
+        DocumentSpec {
+            width_px: 1000,
+            height_px: 1200,
+            dpi: 300.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let mut project =
+        create_studio_project_for_document(&document, 0x9932, 0x9933, "Illustration panels".into())
+            .expect("shared one-page project");
+    studio_apply_panel_layout(&mut project, 0, vec![0x9940, 0x9941], 20.0, 2.0).expect("layout");
+    studio_resize_panel_divider(&mut project, 0, 0x9940, 0x9941, 0, 600.0)
+        .expect("move shared divider");
+    studio_set_panel_style(&mut project, 0, 32.0, 4.0).expect("panel style");
+    let snapshot = project_snapshot(&project).expect("snapshot");
+    let panels = &snapshot.pages[0].panels;
+    assert_f32_near(panels[0].width, 584.0);
+    assert_f32_near(panels[1].x, 616.0);
+    assert_f32_near(panels[0].gutter_px, 32.0);
+    assert_f32_near(panels[0].border_px, 4.0);
+    assert!(studio_resize_panel_divider(&mut project, 0, 0x9940, 0x9941, 0, 5.0).is_err());
+    undo_project(&mut project).expect("undo style and gutter edit");
+    let restored = project_snapshot(&project).expect("restored snapshot");
+    assert_f32_near(restored.pages[0].panels[0].width, 590.0);
+    assert_f32_near(restored.pages[0].panels[1].x, 610.0);
+    assert_f32_near(restored.pages[0].panels[0].gutter_px, 20.0);
+    redo_project(&mut project).expect("redo style and gutter edit");
+    assert_f32_near(
+        project_snapshot(&project).expect("redone snapshot").pages[0].panels[0].width,
+        584.0,
+    );
+    assert_eq!(
+        document_info(&document)
+            .expect("document remains open")
+            .width_px,
+        1000
+    );
+}
+
+#[test]
+fn illustration_panels_save_and_reopen_with_existing_pixels_and_style() {
+    let mut document = create_document(
+        0x9951,
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("illustration document");
+    let primary = document_info(&document)
+        .expect("document info")
+        .primary_raster_layer;
+    begin_brush_stroke_on_layer(&mut document, 1, primary).expect("begin artwork stroke");
+    let mut packet = vec![1, 0, 1, 0];
+    packet.extend([0_u8; 48]);
+    packet[12..16].copy_from_slice(&24.0_f32.to_le_bytes());
+    packet[16..20].copy_from_slice(&24.0_f32.to_le_bytes());
+    packet[20..24].copy_from_slice(&1.0_f32.to_le_bytes());
+    push_pointer_packet(&mut document, &packet).expect("draw artwork");
+    end_stroke(&mut document).expect("commit artwork");
+    let original_pixels = read_tile(&document, primary, 0, 0).expect("artwork tile");
+
+    let mut project =
+        create_studio_project_for_document(&document, 0x9952, 0x9953, "Illustration panels".into())
+            .expect("adopt original illustration");
+    studio_apply_panel_layout(&mut project, 0, vec![0x9960, 0x9961], 8.0, 3.0)
+        .expect("create editable panels");
+    studio_set_panel_style(&mut project, 0, 12.0, 5.0).expect("adjust panel style");
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "project-ink-illustration-panels-{}-{nonce}.inkproj",
+        std::process::id()
+    ));
+    save_project_as(&project, path.to_string_lossy().into_owned()).expect("save illustration");
+    close_studio_project(&mut project);
+
+    let mut reopened = open_studio_project(path.to_string_lossy().into_owned())
+        .expect("reopen illustration with panels");
+    let snapshot = project_snapshot(&reopened).expect("reopened project snapshot");
+    assert_eq!(snapshot.pages[0].panel_count, 2);
+    assert_f32_near(snapshot.pages[0].panels[0].gutter_px, 12.0);
+    assert_f32_near(snapshot.pages[0].panels[0].border_px, 5.0);
+    let page = project_active_document(&reopened).expect("reopened shared page");
+    assert_eq!(
+        read_tile(&page, primary, 0, 0).expect("reopened art tile"),
+        original_pixels
+    );
+    close_studio_project(&mut reopened);
+    std::fs::remove_dir_all(path).expect("remove temporary package");
 }
 
 #[cfg(unix)]

@@ -94,6 +94,7 @@ abstract interface class EngineApi {
   Future<int> addLayer({required String kind});
   Future<int> addLayerToParent({required String kind, required int parentId});
   Future<void> deleteLayer({required int layerId});
+  Future<void> clearLayer({required int layerId});
   Future<void> deleteLayers({required List<int> layerIds});
 
   /// Return an engine-authored reason when selected layer roots cannot be
@@ -148,6 +149,12 @@ abstract interface class EngineApi {
   Future<void> setPanelMaskGeometry({
     required int maskLayerId,
     required List<double> points,
+  });
+  Future<void> setPanelFrames({
+    required int layerId,
+    required List<double> points,
+    required List<int> pointCounts,
+    required double borderPx,
   });
 
   /// Merge [sourceLayerId] into [targetLayerId] as one undoable operation.
