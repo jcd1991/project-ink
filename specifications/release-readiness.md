@@ -17,7 +17,7 @@ release-supported.
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
   `cargo fmt --all -- --check` pass.
 - The current Android arm64 profile build produced
-  `app/build/app/outputs/flutter-apk/app-profile.apk` (54.9 MB). Gradle reports
+  `app/build/app/outputs/flutter-apk/app-profile.apk` (68.4 MB). Gradle reports
   that the app selects NDK 27.1 while several plugins request NDK 28.2; this
   build succeeded with that warning.
 - Current macOS and iOS builds were not run: only 1.7 GiB was free, below the

@@ -4,7 +4,7 @@ Status: The cross-platform mode and responsive-layout standardization was
 implemented on 2026-10-07. Current worktree verification passes `flutter
 analyze`, all 659 Flutter tests, the Rust workspace tests, and workspace
 Clippy. The current Android arm64 profile build also passes and produces
-`app/build/app/outputs/flutter-apk/app-profile.apk` (54.9 MB); Gradle warns that
+`app/build/app/outputs/flutter-apk/app-profile.apk` (68.4 MB); Gradle warns that
 the app selects NDK 27.1 while several plugins request NDK 28.2. An earlier
 macOS debug build passed on 2026-10-07, but the current worktree was not rebuilt
 for macOS or iOS: only 1.7 GiB was free, below the macOS runner's 6 GiB build
