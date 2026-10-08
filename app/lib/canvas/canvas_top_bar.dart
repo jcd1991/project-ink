@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app/editor_action.dart';
 import '../app/workspace_preferences.dart';
@@ -504,63 +505,74 @@ class CanvasTopBar extends StatelessWidget {
   Widget _buildCompactTopBar(BuildContext context) {
     final status =
         '$documentName  •  $activeToolLabel  •  $activeBrushLabel  •  $saveStatusLabel';
-    return SafeArea(
-      bottom: false,
-      child: Container(
-        height: 52,
-        decoration: BoxDecoration(
-          color: inkColors(context).panel,
-          border: Border(
-            bottom: BorderSide(color: inkColors(context).panelBorder),
-          ),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Tooltip(
-                message: status,
-                child: Text(
-                  status,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelLarge,
+    final colors = inkColors(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+        statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
+      ),
+      child: ColoredBox(
+        key: const ValueKey('canvas-compact-top-bar-background'),
+        color: colors.panel,
+        child: SafeArea(
+          bottom: false,
+          child: Container(
+            height: 52,
+            decoration: BoxDecoration(
+              color: colors.panel,
+              border: Border(bottom: BorderSide(color: colors.panelBorder)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Tooltip(
+                    message: status,
+                    child: Text(
+                      status,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                  ),
                 ),
-              ),
+                if (documentActionsEnabled)
+                  InkCommandButton(
+                    icon: Icons.save_outlined,
+                    label: 'Save project',
+                    identifier: 'save-project',
+                    onPressed:
+                        _isDocumentActionDisabled(EditorActionId.saveProject)
+                            ? null
+                            : onSave,
+                    hitSize: 48,
+                  ),
+                InkCommandButton(
+                  icon: Icons.undo,
+                  label: 'Undo',
+                  identifier: 'undo',
+                  onPressed: onUndo,
+                  hitSize: 48,
+                ),
+                InkCommandButton(
+                  icon: Icons.redo,
+                  label: 'Redo',
+                  identifier: 'redo',
+                  onPressed: onRedo,
+                  hitSize: 48,
+                ),
+                InkCommandButton(
+                  icon: Icons.fullscreen,
+                  label: 'Canvas Focus',
+                  onPressed: onToggleFocus,
+                  hitSize: 48,
+                ),
+                _editorModeMenu(context, compact: true),
+                _tabletMoreMenu(context),
+              ],
             ),
-            if (documentActionsEnabled)
-              InkCommandButton(
-                icon: Icons.save_outlined,
-                label: 'Save project',
-                identifier: 'save-project',
-                onPressed:
-                    _isDocumentActionDisabled(EditorActionId.saveProject)
-                        ? null
-                        : onSave,
-                hitSize: 48,
-              ),
-            InkCommandButton(
-              icon: Icons.undo,
-              label: 'Undo',
-              identifier: 'undo',
-              onPressed: onUndo,
-              hitSize: 48,
-            ),
-            InkCommandButton(
-              icon: Icons.redo,
-              label: 'Redo',
-              identifier: 'redo',
-              onPressed: onRedo,
-              hitSize: 48,
-            ),
-            InkCommandButton(
-              icon: Icons.fullscreen,
-              label: 'Canvas Focus',
-              onPressed: onToggleFocus,
-              hitSize: 48,
-            ),
-            _editorModeMenu(context, compact: true),
-            _tabletMoreMenu(context),
-          ],
+          ),
         ),
       ),
     );

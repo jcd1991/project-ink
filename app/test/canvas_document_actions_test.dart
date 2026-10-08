@@ -568,6 +568,11 @@ void main() {
   testWidgets('new document validates and forwards canvas settings', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(1440, 2400);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
     final engine = InMemoryEngineApi();
     (int, int, double)? created;
     await tester.pumpWidget(
@@ -587,18 +592,34 @@ void main() {
     );
     await tester.pump();
 
-    await _invokeCommand(tester, 'New document');
-    expect(find.text('Create a transparent sRGB canvas.'), findsNothing);
+    await _invokeCommand(tester, 'New canvas');
     expect(
-      find.textContaining('Create a transparent sRGB canvas'),
+      find.textContaining('The canvas is transparent sRGB'),
       findsOneWidget,
     );
 
     final fields = find.byType(TextFormField);
+    expect(tester.widget<TextFormField>(fields.at(0)).controller!.text, '1440');
+    expect(tester.widget<TextFormField>(fields.at(1)).controller!.text, '2400');
+    await tester.tap(find.text('Square'));
+    await tester.pump();
+    expect(tester.widget<TextFormField>(fields.at(0)).controller!.text, '2048');
+    expect(tester.widget<TextFormField>(fields.at(1)).controller!.text, '2048');
+    await tester.tap(find.text('A4 print'));
+    await tester.pump();
+    expect(tester.widget<TextFormField>(fields.at(0)).controller!.text, '2480');
+    expect(tester.widget<TextFormField>(fields.at(1)).controller!.text, '3508');
+    expect(
+      tester.widget<TextFormField>(fields.at(2)).controller!.text,
+      '300.0',
+    );
+    await tester.tap(find.text('Screen size'));
+    await tester.pump();
     await tester.enterText(fields.at(0), '640');
     await tester.enterText(fields.at(1), '480');
     await tester.enterText(fields.at(2), '144');
-    await tester.tap(find.text('Create document'));
+    expect(find.text('Custom'), findsOneWidget);
+    await tester.tap(find.text('Create canvas'));
     await tester.pumpAndSettle();
 
     expect(created, (640, 480, 144.0));
@@ -634,8 +655,8 @@ void main() {
     await tester.pump();
 
     Future<void> requestNew() async {
-      await _invokeCommand(tester, 'New document');
-      await tester.tap(find.text('Create document'));
+      await _invokeCommand(tester, 'New canvas');
+      await tester.tap(find.text('Create canvas'));
       await tester.pumpAndSettle();
     }
 
@@ -757,9 +778,9 @@ void main() {
     );
     await tester.pump();
 
-    await _invokeCommand(tester, 'New document');
+    await _invokeCommand(tester, 'New canvas');
     await tester.enterText(find.byType(TextFormField).at(0), '0');
-    await tester.tap(find.text('Create document'));
+    await tester.tap(find.text('Create canvas'));
     await tester.pump();
 
     expect(find.text('Enter a value from 1 to 32768 pixels'), findsOneWidget);

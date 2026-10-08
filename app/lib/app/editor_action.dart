@@ -38,7 +38,7 @@ enum EditorActionId {
 
 extension EditorActionLabels on EditorActionId {
   String get label => switch (this) {
-    EditorActionId.newDocument => 'New document',
+    EditorActionId.newDocument => 'New canvas',
     EditorActionId.openProject => 'Open project',
     EditorActionId.importPsd => 'Import PSD',
     EditorActionId.saveProject => 'Save project',

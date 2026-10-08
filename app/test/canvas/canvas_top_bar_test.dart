@@ -6,6 +6,39 @@ import 'package:project_ink/app/workspace_preferences.dart';
 import 'package:project_ink/canvas/canvas_top_bar.dart';
 
 void main() {
+  testWidgets('compact top bar fills the system status bar safe area', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MediaQuery(
+          data: const MediaQueryData(
+            size: Size(320, 640),
+            padding: EdgeInsets.only(top: 28, bottom: 24),
+            viewPadding: EdgeInsets.only(top: 28, bottom: 24),
+          ),
+          child: Scaffold(body: _topBar()),
+        ),
+      ),
+    );
+
+    final barBackground = find.byKey(
+      const ValueKey('canvas-compact-top-bar-background'),
+    );
+    expect(tester.getTopLeft(barBackground).dy, 0);
+    expect(tester.getSize(barBackground).height, 80);
+    expect(
+      tester.getTopLeft(find.byTooltip('Undo')).dy,
+      greaterThanOrEqualTo(28),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('tablet top bar keeps essentials visible at narrow width', (
     tester,
   ) async {
