@@ -623,7 +623,7 @@ class MainActivity : FlutterActivity() {
             InkPencilCommandEventStream.publish("toggleEraser")
         }
         stylusButtonDown = buttonDown
-        val packet = pointerAdapter.packet(event)
+        val packet = pointerAdapter.packet(event, resources.displayMetrics.density)
         if (packet != null) {
             if (InkPointerEventStream.publish(packet)) return true
         }

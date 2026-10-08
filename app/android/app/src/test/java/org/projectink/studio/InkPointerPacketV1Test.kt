@@ -19,6 +19,14 @@ class InkPointerPacketV1Test {
     }
 
     @Test
+    fun convertsAndroidPhysicalCoordinatesToFlutterLogicalCoordinates() {
+        assertEquals(128f, InkPointerSampleValidation.logicalCoordinate(240f, 1.875f)!!, 0.001f)
+        assertEquals(-64f, InkPointerSampleValidation.logicalCoordinate(-120f, 1.875f)!!, 0.001f)
+        assertEquals(null, InkPointerSampleValidation.logicalCoordinate(10f, 0f))
+        assertEquals(null, InkPointerSampleValidation.logicalCoordinate(Float.NaN, 1f))
+    }
+
+    @Test
     fun boundsSamplesAndRetainsConfirmedSamplesFirst() {
         val samples = (0 until 300).map { index ->
             val flags = when {

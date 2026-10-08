@@ -7,6 +7,12 @@ import kotlin.math.abs
 internal object InkPointerSampleValidation {
     const val MAX_COORDINATE_ABS = 65_536f
 
+    fun logicalCoordinate(physicalPixels: Float, density: Float): Float? {
+        if (!density.isFinite() || density <= 0f) return null
+        val logical = physicalPixels / density
+        return logical.takeIf { it.isFinite() && abs(it) <= MAX_COORDINATE_ABS }
+    }
+
     fun valid(
         x: Float,
         y: Float,
@@ -26,7 +32,7 @@ class InkPointerAdapter {
         containsStylus(event) &&
             (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
 
-    fun packet(event: MotionEvent): ByteArray? {
+    fun packet(event: MotionEvent, density: Float): ByteArray? {
         if (!containsStylus(event)) return null
         val samples = mutableListOf<InkPointerSampleV1>()
         val phase = phase(event.actionMasked)
@@ -36,13 +42,13 @@ class InkPointerAdapter {
             for (history in 0 until event.historySize) {
                 for (index in 0 until event.pointerCount) {
                     if (!isStylus(event.getToolType(index))) continue
-                    samples += sample(event, index, phase, 1 shl 1, history) ?: return null
+                    samples += sample(event, index, phase, 1 shl 1, history, density) ?: return null
                 }
             }
         }
         for (index in 0 until event.pointerCount) {
             if (!isStylus(event.getToolType(index))) continue
-            samples += sample(event, index, phase, 1, null) ?: return null
+            samples += sample(event, index, phase, 1, null, density) ?: return null
         }
         return InkPointerPacketV1.encode(samples)
     }
@@ -68,12 +74,15 @@ class InkPointerAdapter {
         phase: Byte,
         historyFlag: Int,
         history: Int?,
+        density: Float,
     ): InkPointerSampleV1? {
         val historicalIndex = history
         val historical = historicalIndex != null
         val historyValue = historicalIndex ?: -1
-        val x = if (historical) event.getHistoricalX(index, historyValue) else event.getX(index)
-        val y = if (historical) event.getHistoricalY(index, historyValue) else event.getY(index)
+        val physicalX = if (historical) event.getHistoricalX(index, historyValue) else event.getX(index)
+        val physicalY = if (historical) event.getHistoricalY(index, historyValue) else event.getY(index)
+        val x = InkPointerSampleValidation.logicalCoordinate(physicalX, density) ?: return null
+        val y = InkPointerSampleValidation.logicalCoordinate(physicalY, density) ?: return null
         val pressure = if (historical) event.getHistoricalPressure(index, historyValue) else event.getPressure(index)
         val tilt = if (historical) {
             event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, index, historyValue)

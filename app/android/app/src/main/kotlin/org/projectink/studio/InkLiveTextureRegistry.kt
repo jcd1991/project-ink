@@ -28,8 +28,14 @@ internal class InkLiveTextureRegistry(
     private val renderThread = HandlerThread("project-ink-live-texture").apply { start() }
     private val renderHandler = Handler(renderThread.looper)
     private val entries = ConcurrentHashMap<Long, SurfaceEntry>()
+    @Volatile
+    private var closed = false
 
     fun handle(call: MethodCall, result: MethodChannel.Result) {
+        if (closed) {
+            result.error("registry_closed", "Live texture registry is closed.", null)
+            return
+        }
         val arguments = call.arguments as? Map<*, *>
         if (arguments == null) {
             result.error("invalid_arguments", "Expected a map.", null)
@@ -117,8 +123,8 @@ internal class InkLiveTextureRegistry(
         }
         val producer = textures.createSurfaceProducer()
         producer.setSize(width, height)
-        val entry = SurfaceEntry(producer, width, height)
         val textureId = producer.id()
+        val entry = SurfaceEntry(producer, textureId, width, height)
         producer.setCallback(object : TextureRegistry.SurfaceProducer.Callback {
             override fun onSurfaceAvailable() {
                 requestRedraw(entry)
@@ -162,14 +168,23 @@ internal class InkLiveTextureRegistry(
             return
         }
         renderHandler.post {
-            entry.producer.release()
-            mainHandler.post { result.success(null) }
+            mainHandler.post {
+                try {
+                    // Flutter's TextureRegistry must be mutated on the platform
+                    // thread, even though queued canvas work is serialized on
+                    // the render thread.
+                    entry.producer.release()
+                    result.success(null)
+                } catch (error: Exception) {
+                    result.error("live_texture_failed", error.message ?: "Texture release failed.", null)
+                }
+            }
         }
     }
 
     private fun requestRedraw(entry: SurfaceEntry) {
         renderHandler.post {
-            if (entries[entry.producer.id()] === entry) {
+            if (entries[entry.textureId] === entry) {
                 try {
                     redraw(entry)
                 } catch (_: Exception) {
@@ -210,20 +225,32 @@ internal class InkLiveTextureRegistry(
         } finally {
             surface.unlockCanvasAndPost(canvas)
         }
-        entry.producer.scheduleFrame()
+        // SurfaceProducer.scheduleFrame reaches FlutterJNI, whose API requires
+        // the Android main thread. Drawing stays on the render thread, then we
+        // publish the completed frame on the platform thread.
+        mainHandler.post {
+            if (!closed && entries[entry.textureId] === entry) {
+                entry.producer.scheduleFrame()
+            }
+        }
     }
 
     override fun close() {
+        if (closed) return
+        closed = true
         val closingEntries = entries.values.toList()
         entries.clear()
         renderHandler.post {
-            closingEntries.forEach { it.producer.release() }
-            renderThread.quitSafely()
+            mainHandler.post {
+                closingEntries.forEach { it.producer.release() }
+                renderThread.quitSafely()
+            }
         }
     }
 
     private data class SurfaceEntry(
         val producer: TextureRegistry.SurfaceProducer,
+        val textureId: Long,
         val width: Int,
         val height: Int,
         val lock: Any = Any(),
