@@ -1,18 +1,45 @@
 # Focused workspace UI: Simple and Studio
 
-Status: tablet Simple/Studio control and palette pass implemented and visually
-reviewed in the local tree, 2026-10-04. The Flutter suite, analyzer, and macOS
-debug build pass. Rendered phone, tablet, and desktop layouts were inspected at
-normal and enlarged text sizes; physical-device, stylus, and native
-screen-reader acceptance remain open.
+Status: The cross-platform mode and responsive-layout standardization was
+implemented on 2026-10-07. Current worktree verification passes `flutter
+analyze`, all 659 Flutter tests, the Rust workspace tests, and workspace
+Clippy. The current Android arm64 profile build also passes and produces
+`app/build/app/outputs/flutter-apk/app-profile.apk` (54.9 MB); Gradle warns that
+the app selects NDK 27.1 while several plugins request NDK 28.2. An earlier
+macOS debug build passed on 2026-10-07, but the current worktree was not rebuilt
+for macOS or iOS: only 1.7 GiB was free, below the macOS runner's 6 GiB build
+preflight. The APK was installed and touch-checked on a Samsung phone for mode
+switching, Color/Layers access, and the Studio Tool Properties and Materials
+sheets. During that device session, the previously visible sketch was no
+longer shown; the active History sheet reported “No edits yet,” and an app
+restart did not restore the sketch. No save was issued, so the device document
+state remains unresolved. This does not record macOS interactive or
+stylus-performance acceptance.
 
 ## Goal and design decisions
 
 Keep Simple focused on drawing essentials and Studio focused on advanced
-editing. Preserve the same location and meaning for the controls artists need
-while drawing in either mode: active color, brush size, brush opacity, undo,
-redo, and brush selection. Studio may add palettes and workspace controls, but
-switching modes must not hide the active color or basic brush adjustments.
+editing on every platform. Simple/Studio is an editor preference, not a device
+class. Preserve the location and meaning of the drawing controls while changing
+modes: active color, brush size, brush opacity, undo, redo, and brush selection.
+Studio may add palettes and workspace controls, but switching modes must not
+hide the active color or basic brush adjustments.
+
+Keep three choices separate: editor mode (Simple/Studio), responsive canvas
+layout (phone, touch workspace, or desktop), and workspace layout preset
+(Illustration, Comic, Minimal, or custom). Canvas Focus remains a temporary
+presentation state. A narrow viewport changes control placement; it does not
+silently change the selected editor mode or workspace preset. Simple/Studio
+controls phone, tablet, and narrow-web touch layouts. Wide desktop keeps its
+professional shell and docks independently of the touch editor preference.
+
+At phone widths, both modes use the same compact bottom drawing controls and
+top-bar mode selector. Studio exposes its additional destinations through the
+More menu and phone sheets; it does not place tablet rails over the drawing
+area. At tablet and narrow-web widths, the shared drawing controls stay on the
+same handedness-aware edge in both modes, with Studio palette navigation on
+the opposite edge. Wide desktop keeps the established desktop docks and
+command bar regardless of the saved touch editor preference.
 
 Use one visible Color entry point on tablet. It displays the active main color
 and opens one color surface containing main color, sub color, transparent
@@ -32,9 +59,9 @@ room; when height or text scaling makes them cramped, use labeled value buttons
 that open one precise slider. Keep brush presets and advanced brush editing in
 the Brush Library.
 
-Use these tablet control groups as the starting point. Keep the Studio
-workspace preset inside a labeled Workspace section in More, separate from the
-Simple/Studio mode selector:
+Use the same mode and workspace concepts on phone, tablet, and narrow web
+layouts. Keep the selected workspace layout inside a labeled Workspace layout
+section in More, separate from the Simple/Studio editor-mode selector:
 
 ```text
 Simple top bar: [Document/status] [Save] [Undo] [Redo] [Focus] [Simple | Studio] [More]
@@ -42,12 +69,14 @@ Studio top bar: [Document/status] [Save] [Undo] [Redo] [Focus] [Simple | Studio]
 Drawing controls: [Tool] [Brush] [Eraser] [Color chip] [Size] [Opacity]
 Studio palettes: [Tools] [Brushes] [Properties] [Color] [Layers] [Materials]
                 [Comics] [History] [Quick Access]
+Wide desktop: [Document/status] [Workspace layout] [Menus/commands] [Docks]
 ```
 
-The drawing controls may adapt from a vertical edge rail to a compact sheet or
-pop-up when the viewport is narrow. Preserve the left/right handedness setting.
-The top bar must keep essential actions visible without horizontal scrolling on
-tablet and phone widths. Labels, selected state, and accessible names must agree.
+The drawing controls may adapt from a vertical edge rail to a compact bottom
+strip or sheet when the viewport is narrow. Preserve the left/right handedness
+setting where controls are on an edge. The top bar must keep essential actions
+visible without horizontal scrolling on phone and tablet widths. Labels,
+selected state, and accessible names must agree.
 
 Canvas Focus is a temporary presentation state in either mode. It preserves
 the viewport and document state, hides editor chrome, and provides visible Exit
@@ -85,7 +114,7 @@ The primary touch actions use 48 logical-pixel targets and role/value semantics.
 That target size is a deliberate mobile-accessibility choice; it is not a
 claim of WCAG conformance. Use [WCAG 2.2 Target Size (Minimum)](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html), [Target Size (Enhanced)](https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced.html), and Flutter's [Semantics API](https://api.flutter.dev/flutter/widgets/Semantics-class.html) as review references. Native VoiceOver/TalkBack behavior remains a device acceptance item.
 
-## Verified starting point and gaps
+## Verified starting point before cross-platform standardization
 
 Inspection of `canvas_screen.dart`, `canvas_top_bar.dart`,
 `canvas_compact_controls.dart`, `canvas_editor_auxiliary_overlays.dart`,
@@ -136,9 +165,9 @@ command bar must also avoid duplicate visible actions.
 
 ## Simple mode
 
-Simple remains the default tablet mode on a fresh setup. Keep the mode selector
-visible and labeled. Shared theme and handedness preferences apply immediately
-in both modes. Use 48 logical-pixel
+Simple remains the default editor mode on a fresh setup. Keep the mode selector
+visible and labeled on phone, tablet, and narrow web layouts. Shared theme and
+handedness preferences apply immediately in both modes. Use 48 logical-pixel
 minimum touch targets.
 
 Top bar: Document/status, Save, Undo, Redo, Canvas Focus, mode selector, and
@@ -170,7 +199,7 @@ reference](https://help.clip-studio.com/en-us/manual_en/180_layers/Using_layers.
 
 ## Studio mode
 
-Studio provides advanced palettes while preserving the shared tablet drawing
+Studio provides advanced palettes while preserving the shared drawing
 controls. Its top bar contains document/status, Save, Undo/Redo, Canvas Focus,
 the labeled mode selector, and More. Put workspace presets in a labeled
 Workspace section in More, separate from the mode choice. Keep active tool and
@@ -206,10 +235,10 @@ user-requested dock resize changes the viewport. Pop-ups overlay without moving
 artwork. Do not overwrite saved desktop workspace arrangements when a smaller
 window uses a compact fallback.
 
-Keep workspace preset, Simple/Studio mode, and Canvas Focus as separate
-controls. A layout reset names the selected preset and what it resets. It leaves
-document state, shared theme, gesture preferences, and the other mode's
-presentation state intact.
+Keep workspace layout preset, Simple/Studio editor mode, responsive canvas
+layout, and Canvas Focus as separate choices. A layout reset names the selected
+preset and what it resets. It leaves document state, shared theme, gesture
+preferences, editor mode, and the other mode's presentation state intact.
 
 ## Canvas Focus and interaction contract
 
@@ -307,11 +336,11 @@ cannot be made usable with the current sheet/panel model.
 ## Acceptance criteria
 
 - Switching Simple → Studio → Simple restores each mode's open palette for the
-  current editor session; page, layer, tool, brush draft, artwork, and Rust
-  history remain intact. A cold launch restores the mode preference and opens
-  visible controls. Palette memory stays session-only; Studio opens Layers on a
-  cold launch.
-- Exactly one persistent tablet Color entry point is visible per mode. It
+  current editor session on every platform; page, layer, tool, brush draft,
+  artwork, and Rust history remain intact. A cold launch restores the saved
+  editor mode and opens visible controls. Palette memory stays session-only;
+  Studio opens Layers on a cold touch-workspace launch.
+- Exactly one persistent phone/tablet Color entry point is visible per mode. It
   clearly shows the active main color. Main/sub selection, picker dismissal,
   swap/reset, and transparent drawing preserve the selected role and brush.
 - Size and opacity are reachable without opening Brush Library in both modes.

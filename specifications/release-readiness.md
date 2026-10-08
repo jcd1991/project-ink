@@ -9,6 +9,26 @@ not describe a platform as supported until its install, document, input,
 offline, and recovery gates below pass. At present, none is
 release-supported.
 
+## Current working-tree verification (2026-10-07)
+
+- `flutter analyze` and all 659 Flutter tests pass. The tests include refreshed
+  layout goldens for the Simple/Studio control changes.
+- `cargo test --workspace --all-targets --all-features`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
+  `cargo fmt --all -- --check` pass.
+- The current Android arm64 profile build produced
+  `app/build/app/outputs/flutter-apk/app-profile.apk` (54.9 MB). Gradle reports
+  that the app selects NDK 27.1 while several plugins request NDK 28.2; this
+  build succeeded with that warning.
+- Current macOS and iOS builds were not run: only 1.7 GiB was free, below the
+  macOS alpha runner's 6 GiB build preflight. The earlier macOS debug build
+  recorded in `focused-workspace-ui.md` is prior-build evidence, not a fresh
+  build of this worktree.
+- The 2026-10-07 Samsung phone session reported a visible sketch missing,
+  History showing “No edits yet,” and restart failing to restore the sketch.
+  No save was issued and the document state is unresolved. Do not close the
+  document-recovery alpha gate based on that session.
+
 ## Gate 1: protect documents
 
 - [x] Implement macOS window close and app quit dispatch through the shared

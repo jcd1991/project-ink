@@ -17,3 +17,21 @@ dirty-region updates miss the stated latency gates.
 > requirement. Phases 1–4 may validate the adapters with automated tests and
 > simulator/emulator startup checks, but must not claim physical latency,
 > memory, or tablet acceptance from those checks.
+
+## Shared Illustration Panel tool
+
+The panel workflow is shared by Simple and Studio; there is no platform-only
+panel model or separate phone implementation. Include the following in each
+platform's UI pass:
+
+| Platform | Input check | Persistence/history check |
+| --- | --- | --- |
+| iOS/iPadOS | One-finger split and divider drag; confirm Pencil/touch coordinates align | Gutter/border, Undo/Redo, save/reopen with existing pixels intact |
+| macOS | Mouse and tablet drag preview/split; divider drag | Same save/reopen and structural Undo/Redo |
+| Android | Touch and Galaxy S Pen split/drag | Same save/reopen and structural Undo/Redo |
+
+Run the interaction in both Simple and Studio. Verify the 2-, 3-, and 4-panel
+presets on a blank panel map, then split an existing panel; adjust both gutter
+and border; draw over the resulting guides; and ensure the guide remains
+visible after switching back to a drawing tool. A host compile or automated
+model test is not evidence of device input alignment or installed UI behavior.

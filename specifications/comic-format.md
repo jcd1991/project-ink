@@ -76,6 +76,54 @@ color; it is serialized with the page, emitted in SVG, and included in the
 Rust raster preview. These lines are not a replacement for the main document
 engine's full raster/vector layer stack.
 
+## Shared Illustration Panel tool
+
+The Illustration workspace exposes one **Panel divider** tool through the
+same tool palette in Simple and Studio layouts. The tool edits the existing
+illustration's Rust-owned `ComicProject` panel graph and layer masks. Finishing
+a preset, split, divider drag, or style edit applies the outlines to a separate
+ordinary raster layer named **Panel Frames**; the shared document keeps them
+editable with the normal brush eraser and layer controls. The one-page
+illustration project shares the active `DocumentHandle`, so existing artwork
+remains in place and normal canvas edits continue against the same document.
+
+On a blank panel map, **2 panels** creates two columns, **3 panels** creates
+three stacked rows, and **4 panels** creates a 2×2 grid. A one-finger drag
+across a frame creates a split perpendicular to the drag direction. Dragging
+the center of an existing gutter moves that divider while keeping the gutter
+centered. The Gutter control changes the spacing between aligned rectangular
+panels while preserving each divider center and the outside frame bounds; the
+Border control changes the outline width. Both controls update masks and panel
+metadata in one structural history operation, then refresh the applied Panel
+Frames layer. Presets are only offered before panels exist, so applying one
+cannot discard an existing layout. Cyan/green editing guides are temporary:
+they show only while the Panel divider tool is active. Leaving the tool hides
+the preview; applied borders remain as ordinary layer pixels. Clearing the
+Panel Frames layer or erasing its pixels does not remove the structural panel
+map. Remove a frame from the Comic **Panel** inspector's **Remove panel**
+action; this updates the structural map and any applied Panel Frames layer as
+one undoable edit. Existing artwork layers remain in the page document, and
+dialogue linked to the removed panel becomes page-level dialogue. A later panel
+geometry/style edit reapplies the current full outline set.
+
+The interaction follows the focused mobile and desktop touch points documented
+by [ibisPaint's Frame Divider tutorial](https://ibispaint.com/lecture/index.jsp?lang=en&no=38):
+one-finger frame division, spacing controls, adjustable border thickness, and
+direct frame editing. It also follows [Clip Studio Paint's Frames and Panels
+guide](https://help.clip-studio.com/en-us/manual_en/540_comic/Frames_and_Panels.htm):
+drag-to-divide with a preview, horizontal/vertical gutter settings, editable
+frame boundaries, and equal-division presets. Project Ink keeps these controls
+inside the shared Illustration tool set rather than introducing a separate
+phone-only workspace.
+
+Acceptance applies to the shared Simple and Studio canvas on iOS/iPadOS,
+macOS, and Android: open an illustration that already has artwork; create a
+2-, 3-, or 4-panel layout; draw over it; split and drag a divider; change gutter
+and border; undo/redo each committed panel operation; save and reopen; and
+confirm both the artwork and editable panels remain. Device-specific stylus
+coordinates and touch delivery still require the physical-device acceptance
+path; host builds and automated tests establish compile and model behavior only.
+
 Page layout metadata is editable through validated Rust commands. DPI, bleed,
 trim, and safety values are checked before mutation; an invalid safety inset
 cannot consume the page, and a rejected edit leaves panels, balloons, and ink
@@ -94,6 +142,15 @@ project saves. The canvas receives an Arc-backed capability to the active page
 document, so drawing, layers, tiles, and persistence share the same Rust state.
 A bounded host callback remains only for compatibility panel-mask geometry
 updates; it is not a second document authority.
+
+Opening the Comic workspace does not create or attach example artwork. With no
+project open, the workspace stays empty and offers explicit **New print comic**
+and **New webtoon** actions. A new print comic starts as a blank page with no
+panels or artwork; the artist adds frames and content deliberately. This
+matches Clip Studio Paint's documented flow: create a new Comic canvas, then
+create frame borders or divide them with the frame tools. Startup recovery
+inspects the package manifest and routes multi-page Studio packages through
+`openStudioProject`; an unreadable recovery is not replaced by a blank document.
 
 ## Dialogue and effects
 

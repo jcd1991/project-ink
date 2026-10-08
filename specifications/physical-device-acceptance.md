@@ -114,6 +114,23 @@ the same save/reopen scenario with a Wacom, Huion, or XP-Pen tablet where
 available. A desktop trace or process monitor does not replace the hosted
 Windows/Linux build lanes.
 
+## Shared Illustration Panel tool
+
+Run this interaction pass on iOS/iPadOS, macOS, and Android, in both Simple and
+Studio layouts. Start from a saved illustration containing visible strokes.
+Apply each 2-, 3-, and 4-panel preset on a blank panel map; use one-finger drag
+to split a frame; drag an existing gutter; then change Gutter and Border.
+Switch to a drawing tool and confirm guides remain visible while new strokes
+stay on their raster layer. Undo and redo each panel operation, save, close,
+and reopen. Confirm the original and new strokes are intact and panel geometry,
+gutter, and border values return exactly. Repeat the pointer gestures with
+touch and stylus where supported, checking that divider handles stay within
+comfortable reach and input follows the visible contact point.
+
+Record the OS/device, layout mode, input type, save path, and any pointer offset
+or geometry/history mismatch. A successful build or simulator/emulator launch
+checks platform compilation only; it does not complete this interaction pass.
+
 ### Sidecar limitation
 
 An iPad used through macOS Sidecar is useful as a smoke test for the macOS

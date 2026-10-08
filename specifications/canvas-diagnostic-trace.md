@@ -14,13 +14,22 @@ the app process and a `canvas.session_started` row records the active canvas
 context. A `log.segment_rotated` row marks segment changes and reports any rows
 dropped while the file was being rotated.
 
-- `input.native_packet` captures the exact incoming UIKit Pencil packet, then
-  the packet after native queue compaction. `input.engine_packet` captures the
-  coordinates and flags actually passed to Rust after viewport transform,
+- `input.native_packet` captures native stylus packets from UIKit Pencil or
+  Android MotionEvent input, then the packet after native queue compaction.
+  Its `stage` is `native_pointer_event_channel` on both platforms and the
+  accepted preview device is labeled `stylus`. `input.engine_packet` captures
+  the coordinates and flags actually passed to Rust after viewport transform,
   canvas clipping, and eraser handling. Flutter touch/stylus packets are
   recorded at the engine boundary as well. Packets are base64-encoded and use
   pointer-packet v1: a four-byte little-endian header followed by 48-byte
   samples, as defined in `pointer-packet.md`.
+- `input.flutter_touch_boundary` records touch down/up/cancel contacts and
+  their active-pointer state. `input.touch_gesture_classified` records a
+  completed command gesture, its configured binding, and the mapped action;
+  `input.touch_gesture_rejected` records a completed multi-touch sequence that
+  did not match the command gesture grammar, including duration and movement
+  status. These rows help distinguish input recognition from command-owner
+  behavior.
 - `canvas.gpu_dab_batch` stores Rust-generated live-dab output packets (format
   v3, 56-byte records, as defined in `live-render.md`). GPU surface setup,
   frame-available notifications, acknowledgements, cancellations, overflow,

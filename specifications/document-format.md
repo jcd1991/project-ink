@@ -14,6 +14,13 @@ schema as a standalone document. The bridge exposes one
 Standalone v1/v2/v3/v4/v5 documents remain readable; saves write v6. Readers reject
 newer format versions instead of dropping fields they do not understand.
 
+App startup recovery selects the loader from the root manifest: standalone
+documents use the document loader, while Studio packages use the complete
+Studio loader and restore the comic controller from the same project handle.
+If a recovery package is unsupported or invalid, startup stops with the source
+left untouched rather than opening a blank document that could later overwrite
+the only recovery copy.
+
 `history.json.zst` may include the optional `history_truncated: true` flag.
 Writers set it when they omit older undo/redo snapshots to keep the complete
 document within the shared memory budget. Older readers ignore this additive
@@ -33,6 +40,8 @@ binary commands. The engine can decode and replay the journal against a fresh
 state to validate command/layer/history compatibility. Replay does not
 reconstruct raster pixels: high-frequency pointer packets are intentionally
 not journaled, so checkpoint tiles remain the source of pixel truth.
+Explicit raster commands such as panel-frame application are journaled and do
+replay their bounded pixel edits; this does not change the pointer-packet rule.
 `history.json.zst` stores bounded reversible layer/tile snapshots so undo and
 redo remain available after reopening a project.
 
@@ -104,6 +113,15 @@ and create one undo entry. The engine rejects non-mask or locked targets.
 Command-journal tag `49` applies an attached mask to its raster owner, baking
 effective coverage into the owner's pixels and removing the mask in one undoable
 transaction. Unsupported owners and locked targets are rejected without change.
+Command-journal tag `50` replaces a raster layer with up to 256 applied panel
+frame outlines. Each frame stores a bounded document-space polygon with 3–64
+vertices and the requested border width; raster work is capped before mutation.
+The operation is one undo entry, so the panel geometry remains independent from
+the editable border pixels.
+Command-journal tag `51` clears all raster or vector paint from one layer as a
+single undoable operation. It keeps the layer and any comic panel metadata in
+place, allowing standard brush erasing or Clear layer to remove applied panel
+borders without deleting the editable panel layout.
 
 Layer kind value `6` is a nondestructive `Adjustment` node. The nullable SQLite
 `layers.adjustment` column stores a bounded JSON `LayerAdjustment` payload;

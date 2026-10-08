@@ -26,6 +26,11 @@ platform-specific degrees/radians before encoding. Rust clamps normalized
 values again during brush evaluation because packets can arrive from an
 untrusted FFI caller.
 
+`canvas_x` and `canvas_y` are logical Flutter screen coordinates in logical
+pixels, before the active Flutter viewport transform. Android adapters convert
+`MotionEvent` physical pixels by the display density; UIKit adapters already
+receive coordinates in points, which map to Flutter logical pixels.
+
 The Rust decoder rejects truncated, trailing, unknown-version, or over-limit
 packets, and rejects samples with an unknown lifecycle phase. It does not
 silently reinterpret malformed phases as cancellation.
@@ -70,10 +75,11 @@ Canvas input keeps finite, bounded raw document coordinates through the bridge.
 The Rust worker clips each confirmed pointer segment to the document rectangle;
 it must not clamp every outside sample to the edge, which would turn captured
 off-page motion into a long border stroke. If a stroke exits the page after
-entering it, the accepted portion ends at the page boundary and subsequent
-captured samples are ignored until pointer-up/cancel. This deliberately avoids
-connecting a later re-entry across an off-page gap. A new stroke can begin
-immediately after release.
+entering it, the accepted portion ends at the page boundary. Captured motion
+outside the page is ignored; the first confirmed sample on re-entry resumes
+the same stroke as a separate path segment. Brush interpolation must reset at
+that boundary so no line or dab chain bridges the off-page gap. Pointer-up or
+cancel still closes the single stroke transaction, preserving one undo step.
 
 The Rust bridge validates and enqueues packets for the dedicated render worker;
 the enqueue call does not rasterize synchronously. Commands, tile reads, event
