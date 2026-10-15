@@ -10,6 +10,8 @@ import 'package:project_ink/canvas/canvas_screen.dart';
 import 'package:project_ink/comics/comic_workspace.dart';
 import 'package:project_ink/documents/autosave_coordinator.dart';
 import 'package:project_ink/documents/document_picker.dart';
+import 'package:project_ink/documents/platform_document_picker.dart';
+import 'package:project_ink/documents/provider_project_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _TitleFlowPicker implements DocumentPicker {
@@ -279,7 +281,7 @@ void main() {
     expect(state.dirty, isFalse);
     expect(state.hasUnsavedChanges, isTrue);
     expect(state.hasSavedCheckpoint, isTrue);
-    expect(find.text('Unsaved changes'), findsOneWidget);
+    expect(find.textContaining('Recovery saved'), findsOneWidget);
     expect(engine.savedPaths.last, '/tmp/phase385-recovery.inkproj');
     expect(engine.savedPaths, contains('/tmp/Phase385Title.inkproj'));
   });
@@ -300,13 +302,52 @@ void main() {
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyN);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
-    expect(find.text('New document'), findsOneWidget);
+    expect(find.text('New canvas'), findsOneWidget);
 
-    await tester.tap(find.text('Create document'));
+    await tester.tap(find.text('Create canvas'));
     await tester.pumpAndSettle();
 
     final newCanvas = tester.widget<CanvasScreen>(find.byType(CanvasScreen));
     expect(newCanvas.engine, isNot(same(initialEngine)));
+  });
+
+  testWidgets('New canvas releases the previous provider save destination', (
+    tester,
+  ) async {
+    final picker = PlatformDocumentPicker(
+      targetPlatform: TargetPlatform.android,
+      providerPicker: ProviderProjectPicker(
+        openProjectCallback: () async => '/tmp/provider-old.inkproj',
+      ),
+    );
+    await tester.pumpWidget(
+      ProjectInkApp(
+        engineOverride: InMemoryEngineApi(),
+        documentPicker: picker,
+        openDocumentEngine: (_) async => InMemoryEngineApi(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyO, character: 'o');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyO);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(picker.hasActiveProviderProject, isTrue);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyN, character: 'n');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyN);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Create canvas'));
+    await tester.pumpAndSettle();
+    expect(picker.hasActiveProviderProject, isFalse);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyS, character: 's');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyS);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.text('Project name'), findsOneWidget);
   });
 
   testWidgets('opening another valid document replaces the active session', (
@@ -604,7 +645,7 @@ void main() {
     expect(checkpointed.lastError, isNull);
     expect(checkpointed.hasSavedCheckpoint, isTrue);
     expect(checkpointed.hasUnsavedChanges, isTrue);
-    expect(find.text('Unsaved changes'), findsOneWidget);
+    expect(find.textContaining('Recovery saved'), findsOneWidget);
     expect(states.last.hasSavedCheckpoint, isTrue);
   });
 
@@ -648,7 +689,8 @@ void main() {
       null,
     );
     await tester.pump();
-    expect(find.text('Unsaved changes'), findsNWidgets(2));
+    expect(find.textContaining('Changes pending'), findsOneWidget);
+    expect(find.text('Unsaved changes'), findsOneWidget);
     await tester.tap(find.text('Discard').last);
     await tester.pumpAndSettle();
     await closeRequest;

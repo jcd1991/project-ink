@@ -54,13 +54,17 @@ class ProviderProjectPicker {
 
   Future<ProviderPngExportSelection?> preparePngExport({
     required String suggestedName,
+    String? localProjectPath,
   }) async {
     final result =
         _preparePngExportCallback != null
             ? await _preparePngExportCallback(suggestedName)
             : await _channel.invokeMethod<Object?>(
               'preparePngExport',
-              <String, Object?>{'suggestedName': suggestedName},
+              <String, Object?>{
+                'suggestedName': suggestedName,
+                'localProjectPath': localProjectPath,
+              },
             );
     if (result == null) return null;
     if (result is String) {

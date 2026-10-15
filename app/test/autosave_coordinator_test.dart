@@ -31,6 +31,11 @@ void main() {
     expect(autosave.isDirty, isFalse);
     expect(autosave.hasUnsavedChanges, isTrue);
     expect(autosave.state.hasSavedCheckpoint, isTrue);
+    expect(
+      autosave.state.presentationStatus,
+      AutosavePresentationStatus.recoverySaved,
+    );
+    expect(autosaveStatusLabel(autosave.state), 'Recovery saved');
     await autosave.dispose(flush: false);
   });
 
@@ -52,6 +57,11 @@ void main() {
         isTrue,
       );
       expect(autosave.state.hasUnsavedChanges, isFalse);
+      expect(
+        autosave.state.presentationStatus,
+        AutosavePresentationStatus.projectSaved,
+      );
+      expect(autosaveStatusLabel(autosave.state), 'Project saved');
 
       autosave.markDirty();
       final staleRevision = engine.revision;
@@ -61,6 +71,10 @@ void main() {
         isFalse,
       );
       expect(autosave.state.hasUnsavedChanges, isTrue);
+      expect(
+        autosave.state.presentationStatus,
+        AutosavePresentationStatus.changesPending,
+      );
 
       await autosave.dispose(flush: false);
     },
@@ -132,6 +146,11 @@ void main() {
     expect(autosave.isDirty, isTrue);
     expect(autosave.lastError, isA<StateError>());
     expect(autosave.state.hasSavedCheckpoint, isFalse);
+    expect(
+      autosave.state.presentationStatus,
+      AutosavePresentationStatus.recoveryFailed,
+    );
+    expect(autosaveStatusLabel(autosave.state), 'Recovery save failed');
     engine.fail = false;
     await autosave.flush();
     expect(autosave.isDirty, isFalse);

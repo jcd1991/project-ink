@@ -11,6 +11,7 @@ import '../comics/comic_workspace.dart';
 import '../documents/autosave_coordinator.dart';
 import '../documents/document_picker.dart';
 import '../documents/recovery_checkpoint_store.dart';
+import '../documents/recent_projects.dart';
 import '../design_system/ink_theme.dart';
 import 'workspace_preferences.dart';
 
@@ -110,6 +111,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
   WorkspacePreferences _workspacePreferences = const WorkspacePreferences();
   final WorkspacePreferencesStore _workspacePreferenceStore =
       const WorkspacePreferencesStore();
+  final RecentProjectsStore _recentProjectsStore = RecentProjectsStore();
   static const _memorySampler = Phase1MemorySampler();
   static const _memorySampleInterval = Duration(seconds: 1);
   DateTime? _lastMemorySampleAt;
@@ -248,6 +250,23 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
   }
 
   Future<void> _openDocument(String path) async {
+    await _openCandidate(
+      path,
+      () async =>
+          await (widget.openDocumentEngine?.call(path) ??
+              FrbEngineApi.open(path)),
+    );
+  }
+
+  Future<void> _openEditablePsd(String path) async {
+    final active = await _engine;
+    await _openCandidate(null, () => active.openEditablePsdCandidate(path));
+  }
+
+  Future<void> _openCandidate(
+    String? sourcePath,
+    Future<EngineApi> Function() createCandidate,
+  ) async {
     final previous = _autosave;
     // A save in flight has already cleared the dirty flag. Always drain the
     // coordinator before replacing/closing its engine, including that state.
@@ -256,9 +275,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     // Construct the new Rust handle before replacing the current one. A
     // rejected or unreadable project therefore leaves the current canvas
     // untouched.
-    final next =
-        await (widget.openDocumentEngine?.call(path) ??
-            FrbEngineApi.open(path));
+    final next = await createCandidate();
     if (!mounted) {
       await next.close();
       return;
@@ -287,10 +304,14 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     }
     setState(() {
       _activeAutosavePath = widget.autosavePath;
-      _activeDocumentPath = path;
+      _activeDocumentPath = sourcePath;
       _autosaveInitiallyUnsavedChanges = false;
       _engine = Future<EngineApi>.value(next);
     });
+    if (widget.documentPicker case final DocumentPickerSession picker) {
+      picker.bindProject(sourcePath);
+    }
+    if (sourcePath != null) await _recordRecentProject(sourcePath);
   }
 
   Future<void> _newDocument({
@@ -336,6 +357,9 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
       _autosaveInitiallyUnsavedChanges = false;
       _engine = Future<EngineApi>.value(next);
     });
+    if (widget.documentPicker case final DocumentPickerSession picker) {
+      picker.bindProject(null);
+    }
   }
 
   Future<void> _documentSaved(String path) async {
@@ -345,6 +369,10 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     await previous?.flush();
     final changesAfterSave = previous?.hasUnsavedChanges ?? false;
     _activeDocumentPath = path;
+    if (widget.documentPicker case final DocumentPickerSession picker) {
+      picker.bindProject(path);
+    }
+    await _recordRecentProject(path);
     _autosaveInitiallyUnsavedChanges = changesAfterSave;
     if (!changesAfterSave) await _clearRecoveryCheckpoint();
     if (mounted) setState(() {});
@@ -369,6 +397,10 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     // The old coordinator was flushed before the capability rebind. It must
     // not issue another save against the now-rebound studio project.
     await previous?.dispose(flush: false);
+    if (widget.documentPicker case final DocumentPickerSession picker) {
+      picker.bindProject(path);
+    }
+    await _recordRecentProject(path);
     if (mounted) setState(() {});
   }
 
@@ -498,6 +530,20 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
     if (rssBytes != null) _lastRssBytes = rssBytes;
   }
 
+  Future<void> _recordRecentProject(String path) async {
+    if (widget.documentPicker case final ProviderDocumentState provider
+        when provider.hasActiveProviderProject) {
+      return;
+    }
+    try {
+      await _recentProjectsStore.add(path);
+    } catch (error) {
+      debugPrint(
+        'Project Ink recent-project index could not be updated: $error',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Project Ink',
@@ -537,6 +583,8 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
           onNewDocument: _newDocument,
           activeDocumentPath: _activeDocumentPath,
           onDocumentSaved: _documentSaved,
+          loadRecentProjects: _recentProjectsStore.list,
+          removeRecentProject: _recentProjectsStore.remove,
           onBeforeOpenStudioProject: _beforeOpenStudioProject,
           onStudioProjectOpened: _studioProjectOpened,
           onDiscardRecovery: _discardRecoveryForClose,
@@ -547,6 +595,7 @@ class _ProjectInkAppState extends State<ProjectInkApp> {
           workspacePreferences: _workspacePreferences,
           onWorkspacePreferencesChanged: _onWorkspacePreferencesChanged,
           onOpenDocument: widget.onOpenDocument ?? _openDocument,
+          onImportEditablePsd: _openEditablePsd,
           onPerformanceSnapshot:
               widget.onPerformanceSnapshot != null ||
                       _performanceRecorder != null

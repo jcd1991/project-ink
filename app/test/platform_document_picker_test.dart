@@ -187,6 +187,26 @@ void main() {
     },
   );
 
+  for (final platform in [TargetPlatform.android, TargetPlatform.macOS]) {
+    for (final folder in [
+      '/tmp/story.inkproj',
+      '/tmp/story.inkproj/tiles',
+      '/tmp/STORY.INKPROJ/child',
+      '/tmp/story.inkproj.bak/child',
+    ]) {
+      test('$platform rejects nested project saves in $folder', () async {
+        final picker = PlatformDocumentPicker(
+          selector: _FakeFileSelector(directory: folder),
+          targetPlatform: platform,
+        );
+        await expectLater(
+          picker.saveProject(),
+          throwsA(isA<FileSystemException>()),
+        );
+      });
+    }
+  }
+
   test(
     'provider picker returns the staged local path from native code',
     () async {
@@ -215,7 +235,10 @@ void main() {
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call.method);
           if (call.method == 'preparePngExport') {
-            expect(call.arguments, {'suggestedName': 'preview.png'});
+            expect(call.arguments, {
+              'suggestedName': 'preview.png',
+              'localProjectPath': '/app/ProviderImports/current.inkproj',
+            });
             return {
               'path': '/app/ProviderExports/preview.png',
               'canWriteBack': true,
@@ -235,6 +258,7 @@ void main() {
     const picker = ProviderProjectPicker(channel: channel);
     final selection = await picker.preparePngExport(
       suggestedName: 'preview.png',
+      localProjectPath: '/app/ProviderImports/current.inkproj',
     );
     expect(selection?.path, '/app/ProviderExports/preview.png');
     expect(selection?.canWriteBack, isTrue);
@@ -242,12 +266,122 @@ void main() {
     expect(calls, ['preparePngExport', 'commitPng']);
   });
 
+  test(
+    'provider Save As chooses a fresh destination until it is bound',
+    () async {
+      final picker = PlatformDocumentPicker(
+        selector: _FakeFileSelector(directory: '/tmp/new-project-parent'),
+        targetPlatform: TargetPlatform.android,
+        providerPicker: ProviderProjectPicker(
+          openProjectCallback: () async => '/tmp/staged-old.inkproj',
+        ),
+      );
+      final opened = await picker.openProject();
+      picker.bindProject(opened);
+      expect(picker.hasActiveProviderProject, isTrue);
+      expect(
+        await picker.saveProject(suggestedName: 'copy.inkproj'),
+        '/tmp/new-project-parent/copy.inkproj',
+      );
+      expect(picker.hasActiveProviderProject, isTrue);
+      picker.bindProject('/tmp/new-project-parent/copy.inkproj');
+      expect(picker.hasActiveProviderProject, isFalse);
+    },
+  );
+
+  test(
+    'cancelled or rejected Open preserves the current provider write-back',
+    () async {
+      const channel = MethodChannel('test/provider_binding');
+      final selections = <Object?>[
+        {'path': '/tmp/staged-old.inkproj', 'canWriteBack': true},
+        null,
+        {'path': '/tmp/rejected.inkproj', 'canWriteBack': true},
+      ];
+      final committed = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'openProject') return selections.removeAt(0);
+            expect(call.method, 'commitProject');
+            committed.add((call.arguments as Map)['localPath'] as String);
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      final picker = PlatformDocumentPicker(
+        targetPlatform: TargetPlatform.android,
+        providerPicker: const ProviderProjectPicker(channel: channel),
+      );
+      final opened = await picker.openProject();
+      picker.bindProject(opened);
+      expect(await picker.openProject(), isNull);
+      await picker.commitProject(opened!);
+      expect(await picker.openProject(), '/tmp/rejected.inkproj');
+      // A failed Rust open does not bind the rejected candidate.
+      await picker.commitProject(opened);
+      expect(committed, [opened, opened]);
+      picker.bindProject(null);
+      expect(picker.hasActiveProviderProject, isFalse);
+      await picker.commitProject(opened);
+      expect(committed, [opened, opened]);
+    },
+  );
+
+  test(
+    'New canvas export does not reuse the previous provider folder',
+    () async {
+      var providerExports = 0;
+      final picker = PlatformDocumentPicker(
+        selector: _FakeFileSelector(directory: '/tmp/new-canvas-export'),
+        targetPlatform: TargetPlatform.android,
+        providerPicker: ProviderProjectPicker(
+          openProjectCallback: () async => '/tmp/provider/old.inkproj',
+          preparePngExportCallback: (_) async {
+            providerExports++;
+            return null;
+          },
+        ),
+      );
+      picker.bindProject(await picker.openProject());
+      picker.bindProject(null);
+      expect(await picker.exportPng(), '/tmp/new-canvas-export/untitled.png');
+      expect(providerExports, 0);
+    },
+  );
+
+  test(
+    'rejected provider Open cannot redirect a local canvas export',
+    () async {
+      var providerExports = 0;
+      final picker = PlatformDocumentPicker(
+        selector: _FakeFileSelector(directory: '/tmp/local-export'),
+        targetPlatform: TargetPlatform.android,
+        providerPicker: ProviderProjectPicker(
+          openProjectCallback: () async => '/tmp/provider/rejected.inkproj',
+          preparePngExportCallback: (_) async {
+            providerExports++;
+            return null;
+          },
+        ),
+      );
+      picker.bindProject('/tmp/local.inkproj');
+      await picker.openProject();
+      // Rust rejects this selection, so the application does not bind it.
+      expect(picker.hasActiveProviderProject, isFalse);
+      expect(await picker.exportPng(), '/tmp/local-export/untitled.png');
+      expect(providerExports, 0);
+    },
+  );
+
   test('mobile provider PNG export stays on the local path contract', () async {
     String? committed;
     final picker = PlatformDocumentPicker(
       selector: _FakeFileSelector(directory: '/tmp'),
       targetPlatform: TargetPlatform.iOS,
       providerPicker: ProviderProjectPicker(
+        openProjectCallback: () async => '/tmp/provider/project.inkproj',
         preparePngExportCallback:
             (name) async => <String, Object?>{
               'path': '/tmp/provider/$name',
@@ -257,6 +391,8 @@ void main() {
       ),
     );
 
+    await picker.openProject();
+    picker.bindProject('/tmp/provider/project.inkproj');
     final path = await picker.exportPng(suggestedName: 'panel');
     expect(path, '/tmp/provider/panel.png');
     await picker.commitPng(path!);

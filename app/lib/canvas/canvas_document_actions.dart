@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 
 import '../app/editor_action.dart';
 import '../bridge/engine_api.dart';
 import '../comics/comic_workspace.dart';
 import '../documents/document_picker.dart';
+import '../documents/recent_projects.dart';
 import '../tools/brush_library.dart';
 import 'canvas_document_action_session.dart';
 import 'canvas_document_dialogs.dart';
@@ -137,10 +139,7 @@ class CanvasDocumentActions {
     final onOpen = session.onOpenDocument;
     if (picker == null || onOpen == null) return;
     await _runDocumentAction((generation) async {
-      final path = await _awaitDocumentPickerResult(
-        picker.openProject(),
-        generation,
-      );
+      final path = await _chooseOpenProjectPath(picker, generation);
       if (path != null && _isCurrentDocumentAction(generation)) {
         if (!await _confirmDocumentReplacement(generation)) return;
         await _runWithDocumentReplacementBarrier(() async {
@@ -166,6 +165,39 @@ class CanvasDocumentActions {
     });
   }
 
+  Future<String?> _chooseOpenProjectPath(
+    DocumentPicker picker,
+    int generation,
+  ) async {
+    final loadRecentProjects = session.loadRecentProjects;
+    if (loadRecentProjects == null) {
+      return _awaitDocumentPickerResult(picker.openProject(), generation);
+    }
+    List<RecentProjectEntry> recentProjects;
+    try {
+      recentProjects = await loadRecentProjects();
+    } catch (_) {
+      recentProjects = const <RecentProjectEntry>[];
+    }
+    if (!context.mounted || !_isCurrentDocumentAction(generation)) return null;
+    if (recentProjects.isEmpty) {
+      return _awaitDocumentPickerResult(picker.openProject(), generation);
+    }
+    final choice = await showDialog<_ProjectOpenChoice>(
+      context: context,
+      builder:
+          (dialogContext) => _OpenRecentProjectsDialog(
+            entries: recentProjects,
+            onRemove: session.removeRecentProject,
+          ),
+    );
+    if (choice == null || !_isCurrentDocumentAction(generation)) return null;
+    if (choice.browse) {
+      return _awaitDocumentPickerResult(picker.openProject(), generation);
+    }
+    return choice.path;
+  }
+
   Future<void> importPsd() async {
     final picker = session.documentPicker;
     final onOpen = session.onOpenDocument;
@@ -176,8 +208,38 @@ class CanvasDocumentActions {
         generation,
       );
       if (path != null && _isCurrentDocumentAction(generation)) {
+        final inspection = await session.engine.inspectPsdImport(path);
+        if (!context.mounted || !_isCurrentDocumentAction(generation)) return;
+        final choice = await showDialog<_PsdImportChoice>(
+          context: context,
+          builder:
+              (dialogContext) => _PsdImportConfirmationDialog(
+                inspection: inspection,
+                onCancel: () => Navigator.of(dialogContext).pop(),
+                onImportEditable:
+                    inspection.editableImportAvailable &&
+                            session.onImportEditablePsd != null
+                        ? () => Navigator.of(
+                          dialogContext,
+                        ).pop(_PsdImportChoice.editable)
+                        : null,
+                onImportFlattened:
+                    inspection.flattenedImportAvailable
+                        ? () => Navigator.of(
+                          dialogContext,
+                        ).pop(_PsdImportChoice.flattened)
+                        : null,
+              ),
+        );
+        if (choice == null || !_isCurrentDocumentAction(generation)) return;
         if (!await _confirmDocumentReplacement(generation)) return;
-        await _runWithDocumentReplacementBarrier(() => onOpen(path));
+        await _runWithDocumentReplacementBarrier(() async {
+          if (choice == _PsdImportChoice.editable) {
+            await session.onImportEditablePsd?.call(path);
+          } else {
+            await onOpen(path);
+          }
+        });
       }
     });
   }
@@ -185,25 +247,33 @@ class CanvasDocumentActions {
   Future<void> saveProject() async {
     final picker = session.documentPicker;
     if (picker == null) return;
-    await _runDocumentAction((generation) async {
-      await _saveProjectToSelectedDestination(
-        picker,
-        saveAs: false,
-        generation: generation,
-      );
-    });
+    await _runDocumentAction(
+      (generation) async {
+        await _saveProjectToSelectedDestination(
+          picker,
+          saveAs: false,
+          generation: generation,
+        );
+      },
+      errorMessage: 'Project save failed.',
+      retry: saveProject,
+    );
   }
 
   Future<void> saveProjectAs() async {
     final picker = session.documentPicker;
     if (picker == null) return;
-    await _runDocumentAction((generation) async {
-      await _saveProjectToSelectedDestination(
-        picker,
-        saveAs: true,
-        generation: generation,
-      );
-    });
+    await _runDocumentAction(
+      (generation) async {
+        await _saveProjectToSelectedDestination(
+          picker,
+          saveAs: true,
+          generation: generation,
+        );
+      },
+      errorMessage: 'Project save failed.',
+      retry: saveProjectAs,
+    );
   }
 
   Future<bool> _saveProjectToSelectedDestination(
@@ -213,7 +283,10 @@ class CanvasDocumentActions {
   }) async {
     var path = saveAs ? null : session.activeDocumentPath;
     if (path == null) {
-      final suggestedName = await _suggestedProjectName(picker);
+      final suggestedName = await _suggestedProjectName(
+        picker,
+        forceNamePrompt: saveAs,
+      );
       if (suggestedName == null) return false;
       path = await _awaitDocumentPickerResult(
         picker.saveProject(suggestedName: suggestedName),
@@ -357,12 +430,15 @@ class CanvasDocumentActions {
     return saved ? DocumentReplacementChoice.save : null;
   }
 
-  Future<String?> _suggestedProjectName(DocumentPicker picker) async {
+  Future<String?> _suggestedProjectName(
+    DocumentPicker picker, {
+    bool forceNamePrompt = false,
+  }) async {
     final providerState =
         picker is ProviderDocumentState
             ? (picker as ProviderDocumentState).hasActiveProviderProject
             : false;
-    if (providerState) return 'untitled.inkproj';
+    if (providerState && !forceNamePrompt) return 'untitled.inkproj';
 
     return showDialog<String>(
       context: context,
@@ -403,6 +479,7 @@ class CanvasDocumentActions {
                 ('ora', 'OpenRaster'),
                 ('svg', 'SVG'),
                 ('psd', 'Flattened PSD'),
+                ('psd_editable', 'Editable PSD'),
               ])
                 SimpleDialogOption(
                   onPressed: () => Navigator.of(context).pop(option.$1),
@@ -427,7 +504,12 @@ class CanvasDocumentActions {
       return;
     }
     final exportPicker = picker as DocumentExportPicker;
-    final extension = format == 'jpeg' ? 'jpg' : format;
+    final extension =
+        format == 'jpeg'
+            ? 'jpg'
+            : format == 'psd_editable'
+            ? 'psd'
+            : format;
     await _runDocumentAction((generation) async {
       final destination = await _awaitDocumentPickerResult(
         exportPicker.saveExport(
@@ -437,7 +519,14 @@ class CanvasDocumentActions {
         generation,
       );
       if (destination != null && _isCurrentDocumentAction(generation)) {
-        await session.engine.exportDocument(path: destination, format: format);
+        if (format == 'psd_editable') {
+          await session.engine.exportEditablePsd(destination);
+        } else {
+          await session.engine.exportDocument(
+            path: destination,
+            format: format,
+          );
+        }
       }
     });
   }
@@ -452,7 +541,91 @@ class CanvasDocumentActions {
         generation,
       );
       if (directory == null || !_isCurrentDocumentAction(generation)) return;
-      final count = await _comicWorkspace.batchExportPages(directory);
+      final warnings = await _comicWorkspace.renderWarnings();
+      if (!_isCurrentDocumentAction(generation)) return;
+      if (warnings == null) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not check comic lettering. Export was canceled.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      var allowRenderWarnings = false;
+      if (warnings.isNotEmpty) {
+        final dialogHostContext = context;
+        if (!dialogHostContext.mounted) return;
+        final warningListHeight =
+            MediaQuery.sizeOf(
+              dialogHostContext,
+            ).height.clamp(180.0, 360.0).toDouble();
+        final accepted = await showDialog<bool>(
+          context: dialogHostContext,
+          builder:
+              (dialogContext) => AlertDialog(
+                title: const Text('Export with lettering warnings?'),
+                content: SizedBox(
+                  width: 480,
+                  height: warningListHeight,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${warnings.length} warning(s): some dialogue may use a fallback font, omit unsupported characters, or be clipped.',
+                      ),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        child: ListView.builder(
+                          key: const ValueKey('comic-export-warning-list'),
+                          itemCount: warnings.length,
+                          itemBuilder:
+                              (context, index) => Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: Text('• ${warnings[index]}'),
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Cancel export'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Export with warnings'),
+                  ),
+                ],
+              ),
+        );
+        if (accepted != true || !_isCurrentDocumentAction(generation)) return;
+        final latestWarnings = await _comicWorkspace.renderWarnings();
+        if (!_isCurrentDocumentAction(generation) ||
+            latestWarnings == null ||
+            !listEquals(latestWarnings, warnings)) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Comic lettering changed. Review the updated export warnings and try again.',
+                ),
+              ),
+            );
+          }
+          return;
+        }
+        allowRenderWarnings = true;
+      }
+      final count = await _comicWorkspace.batchExportPages(
+        directory,
+        allowRenderWarnings: allowRenderWarnings,
+      );
       if (!context.mounted || count == null) return;
       final isWebtoon = _comicWorkspace.snapshot?.template == 2;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -576,6 +749,11 @@ class CanvasDocumentActions {
               )
               : !isTipImageRecreation && report.sourceFormat == 'KritaBundle'
               ? await session.engine.importKritaBundleVerified(
+                installSource,
+                installHash,
+              )
+              : !isTipImageRecreation && report.sourceFormat == 'PhotoshopAbr'
+              ? await session.engine.importPhotoshopAbrVerified(
                 installSource,
                 installHash,
               )
@@ -847,8 +1025,10 @@ class CanvasDocumentActions {
   }
 
   Future<void> _runDocumentAction(
-    Future<void> Function(int generation) action,
-  ) async {
+    Future<void> Function(int generation) action, {
+    String? errorMessage,
+    Future<void> Function()? retry,
+  }) async {
     if (_documentActionRunning || !mounted) return;
     final generation = ++_documentActionGeneration;
     setState(() => _documentActionRunning = true);
@@ -857,12 +1037,22 @@ class CanvasDocumentActions {
     } catch (error) {
       if (!context.mounted) return;
       final message =
-          error is DocumentOpenException
+          errorMessage ??
+          (error is DocumentOpenException
               ? error.message
-              : 'Document action failed: $error';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+              : 'Document action failed: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          action:
+              retry == null
+                  ? null
+                  : SnackBarAction(
+                    label: 'Retry',
+                    onPressed: () => unawaited(retry()),
+                  ),
+        ),
+      );
     } finally {
       if (_isCurrentDocumentAction(generation)) {
         setState(() => _documentActionRunning = false);
@@ -873,9 +1063,206 @@ class CanvasDocumentActions {
 
 enum DocumentReplacementChoice { clean, save, discard, cancel }
 
+enum _PsdImportChoice { editable, flattened }
+
+class _ProjectOpenChoice {
+  const _ProjectOpenChoice.open(this.path) : browse = false;
+  const _ProjectOpenChoice.browse() : path = null, browse = true;
+
+  final String? path;
+  final bool browse;
+}
+
+class _OpenRecentProjectsDialog extends StatefulWidget {
+  const _OpenRecentProjectsDialog({
+    required this.entries,
+    required this.onRemove,
+  });
+
+  final List<RecentProjectEntry> entries;
+  final Future<void> Function(String path)? onRemove;
+
+  @override
+  State<_OpenRecentProjectsDialog> createState() =>
+      _OpenRecentProjectsDialogState();
+}
+
+class _OpenRecentProjectsDialogState extends State<_OpenRecentProjectsDialog> {
+  late final List<RecentProjectEntry> _entries = List.of(widget.entries);
+
+  @override
+  Widget build(BuildContext context) {
+    final height = MediaQuery.sizeOf(context).height;
+    return AlertDialog(
+      title: const Text('Open project'),
+      content: SizedBox(
+        width: 520,
+        height: height < 560 ? height * 0.38 : 360,
+        child:
+            _entries.isEmpty
+                ? const Center(child: Text('No recent projects'))
+                : ListView.separated(
+                  itemCount: _entries.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final entry = _entries[index];
+                    final description =
+                        entry.available
+                            ? entry.path
+                            : 'Unavailable · ${entry.path}';
+                    final lastUsed = entry.lastUsed;
+                    return ListTile(
+                      leading: Icon(
+                        entry.available
+                            ? Icons.folder_outlined
+                            : Icons.folder_off_outlined,
+                      ),
+                      title: Text(
+                        entry.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        [
+                          description,
+                          if (lastUsed != null)
+                            'Last used ${MaterialLocalizations.of(context).formatShortDate(lastUsed)}',
+                        ].join('\n'),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      enabled: entry.available,
+                      onTap:
+                          entry.available
+                              ? () => Navigator.of(
+                                context,
+                              ).pop(_ProjectOpenChoice.open(entry.path))
+                              : null,
+                      trailing: IconButton(
+                        tooltip: 'Remove ${entry.name} from recents',
+                        onPressed: widget.onRemove == null
+                            ? null
+                            : () async {
+                          try {
+                            await widget.onRemove!.call(entry.path);
+                          } catch (_) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Recent projects could not be updated.',
+                                  ),
+                                ),
+                              );
+                            }
+                            return;
+                          }
+                          if (!mounted) return;
+                          setState(() => _entries.removeAt(index));
+                        },
+                        icon: const Icon(Icons.close),
+                      ),
+                    );
+                  },
+                ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.tonalIcon(
+          onPressed:
+              () =>
+                  Navigator.of(context).pop(const _ProjectOpenChoice.browse()),
+          icon: const Icon(Icons.folder_open_outlined),
+          label: const Text('Browse…'),
+        ),
+      ],
+    );
+  }
+}
+
 enum _BrushImportChoice {
   install,
   chooseTipImage,
   chooseStarter,
   createFromExtractedAssets,
+}
+
+class _PsdImportConfirmationDialog extends StatelessWidget {
+  const _PsdImportConfirmationDialog({
+    required this.inspection,
+    required this.onCancel,
+    required this.onImportEditable,
+    required this.onImportFlattened,
+  });
+
+  final PsdImportInspectionView inspection;
+  final VoidCallback onCancel;
+  final VoidCallback? onImportEditable;
+  final VoidCallback? onImportFlattened;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Import PSD'),
+    content: SizedBox(
+      width: 480,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${inspection.widthPx} × ${inspection.heightPx} px, ${inspection.depth}-bit, ${inspection.layerCount} logical layer node(s) (groups included).',
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Editable import creates a new unsaved Ink document from supported PSD layers. Flattened import creates one raster layer from the merged image. The source PSD is not changed.',
+            ),
+            if (inspection.conversionNotices.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Text('Import conversions'),
+              for (final item in inspection.conversionNotices)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('• $item'),
+                ),
+            ],
+            if (inspection.incompatibilities.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Text('Editable import limitations'),
+              for (final item in inspection.incompatibilities.take(12))
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('• $item'),
+                ),
+            ],
+            if (!inspection.flattenedImportAvailable) ...[
+              const SizedBox(height: 12),
+              const Text('Flattened import is unavailable for this file.'),
+              for (final item in inspection.flattenedImportIssues.take(12))
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('• $item'),
+                ),
+            ],
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(onPressed: onCancel, child: const Text('Cancel')),
+      if (onImportEditable != null)
+        FilledButton.tonal(
+          onPressed: onImportEditable,
+          child: const Text('Import editable layers'),
+        ),
+      if (onImportFlattened != null)
+        FilledButton(
+          onPressed: onImportFlattened,
+          child: const Text('Import flattened image'),
+        ),
+    ],
+  );
 }

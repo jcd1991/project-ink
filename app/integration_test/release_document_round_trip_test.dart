@@ -134,6 +134,9 @@ void main() {
           rotationJitter: brush.rotationJitter,
           smudge: brush.smudge,
           wetness: brush.wetness,
+          pulledString: brush.pulledString,
+          stabilizerDistancePx: brush.stabilizerDistancePx,
+          catchUpOnEnd: brush.catchUpOnEnd,
         );
         await engine.commitBrushDraft(draftId);
 

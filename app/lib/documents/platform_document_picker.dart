@@ -26,7 +26,8 @@ class PlatformDocumentPicker
         DocumentPngWriteback,
         DocumentExportPicker,
         ComicExportPicker,
-        ProviderDocumentState {
+        ProviderDocumentState,
+        DocumentPickerSession {
   PlatformDocumentPicker({
     FileSelectorPlatform? selector,
     TargetPlatform? targetPlatform,
@@ -39,10 +40,24 @@ class PlatformDocumentPicker
   final TargetPlatform _targetPlatform;
   final ProviderProjectPicker _providerPicker;
   ProviderProjectSelection? _activeProviderProject;
+  ProviderProjectSelection? _pendingProviderProject;
   ProviderPngExportSelection? _activeProviderPngExport;
 
   @override
   bool get hasActiveProviderProject => _activeProviderProject != null;
+
+  @override
+  void bindProject(String? localPath) {
+    if (localPath == null) {
+      _activeProviderProject = null;
+    } else if (_pendingProviderProject?.path == localPath) {
+      _activeProviderProject = _pendingProviderProject;
+    } else if (_activeProviderProject?.path != localPath) {
+      _activeProviderProject = null;
+    }
+    _pendingProviderProject = null;
+    _activeProviderPngExport = null;
+  }
 
   bool get _supportsNativeDirectorySelection =>
       _targetPlatform == TargetPlatform.android ||
@@ -58,13 +73,14 @@ class PlatformDocumentPicker
   @override
   Future<String?> openProject() async {
     _activeProviderPngExport = null;
+    _pendingProviderProject = null;
     if (_targetPlatform == TargetPlatform.android ||
         _targetPlatform == TargetPlatform.iOS) {
       try {
         // A null result from an installed provider picker means cancellation;
         // only a missing channel falls through to the local/native fallback.
         final selection = await _providerPicker.openProjectSelection();
-        _activeProviderProject = selection;
+        _pendingProviderProject = selection;
         return selection?.path;
       } on MissingPluginException {
         // Debug/widget hosts may not have the platform runner registered.
@@ -98,7 +114,6 @@ class PlatformDocumentPicker
               return null;
             }
           }
-          _activeProviderProject = null;
           return normalizedSelection;
         }
         // A parent directory is useful when it contains exactly one project.
@@ -106,7 +121,6 @@ class PlatformDocumentPicker
         // deterministic and never passes an invalid path to Rust.
         final projects = await _projectsIn(Directory(selected));
         if (projects.length == 1) {
-          _activeProviderProject = null;
           return projects.single;
         }
         if (projects.length > 1) {
@@ -121,7 +135,6 @@ class PlatformDocumentPicker
           final normalizedChoice =
               chosen == null ? null : path.normalize(chosen);
           if (normalizedChoice != null && projects.contains(normalizedChoice)) {
-            _activeProviderProject = null;
             return normalizedChoice;
           }
         }
@@ -131,7 +144,6 @@ class PlatformDocumentPicker
       }
     }
     final localProject = await _openLocalProject();
-    if (localProject != null) _activeProviderProject = null;
     return localProject;
   }
 
@@ -154,7 +166,10 @@ class PlatformDocumentPicker
 
   @override
   Future<void> commitProject(String localPath) async {
-    final selection = _activeProviderProject;
+    final selection =
+        _activeProviderProject?.path == localPath
+            ? _activeProviderProject
+            : _pendingProviderProject;
     if (selection == null ||
         selection.path != localPath ||
         !selection.canWriteBack) {
@@ -179,20 +194,34 @@ class PlatformDocumentPicker
   Future<String?> saveProject({
     String suggestedName = 'untitled.inkproj',
   }) async {
-    final activeProviderProject = _activeProviderProject;
-    if (activeProviderProject != null) return activeProviderProject.path;
     final name = _withExtension(suggestedName, '.inkproj');
     if (_supportsNativeDirectorySelection) {
+      String? parent;
       try {
-        final parent = await _selector.getDirectoryPathWithOptions(
+        parent = await _selector.getDirectoryPathWithOptions(
           const FileDialogOptions(confirmButtonText: 'Choose save location'),
         );
-        return parent == null ? null : _unusedPath(parent, name);
       } on Object catch (error, stack) {
         debugPrint(
           'Native project location picker unavailable: $error\n$stack',
         );
+        return _newLocalProjectPath(name);
       }
+      if (parent == null) return null;
+      // Atomic saves replace the whole package. A nested project could be
+      // removed when its containing project is next saved or its backup rotates.
+      final insideProject = path.split(path.normalize(parent)).any((component) {
+        final normalized = component.toLowerCase();
+        return normalized.endsWith('.inkproj') ||
+            normalized.endsWith('.inkproj.bak');
+      });
+      if (insideProject) {
+        throw FileSystemException(
+          'Choose a save folder outside existing .inkproj projects and backups.',
+          parent,
+        );
+      }
+      return _unusedPath(parent, name);
     }
     return _newLocalProjectPath(name);
   }
@@ -201,11 +230,13 @@ class PlatformDocumentPicker
   Future<String?> exportPng({String suggestedName = 'untitled.png'}) async {
     final name = _withExtension(suggestedName, '.png');
     _activeProviderPngExport = null;
-    if (_targetPlatform == TargetPlatform.android ||
-        _targetPlatform == TargetPlatform.iOS) {
+    if ((_targetPlatform == TargetPlatform.android ||
+            _targetPlatform == TargetPlatform.iOS) &&
+        _activeProviderProject != null) {
       try {
         final selection = await _providerPicker.preparePngExport(
           suggestedName: name,
+          localProjectPath: _activeProviderProject?.path,
         );
         if (selection != null && selection.canWriteBack) {
           _activeProviderPngExport = selection;

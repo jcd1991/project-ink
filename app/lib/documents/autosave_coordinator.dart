@@ -225,4 +225,42 @@ class AutosaveState {
   final bool saving;
   final Object? lastError;
   final bool hasSavedCheckpoint;
+
+  AutosavePresentationStatus get presentationStatus {
+    if (lastError != null) return AutosavePresentationStatus.recoveryFailed;
+    if (saving && dirty) {
+      return AutosavePresentationStatus.savingRecoveryWithPendingChanges;
+    }
+    if (saving) return AutosavePresentationStatus.savingRecovery;
+    if (dirty) return AutosavePresentationStatus.changesPending;
+    if (hasUnsavedChanges && hasSavedCheckpoint) {
+      return AutosavePresentationStatus.recoverySaved;
+    }
+    if (hasSavedCheckpoint && !hasUnsavedChanges) {
+      return AutosavePresentationStatus.projectSaved;
+    }
+    return AutosavePresentationStatus.changesPending;
+  }
+}
+
+enum AutosavePresentationStatus {
+  changesPending,
+  savingRecovery,
+  savingRecoveryWithPendingChanges,
+  recoverySaved,
+  recoveryFailed,
+  projectSaved,
+}
+
+String autosaveStatusLabel(AutosaveState? state) {
+  if (state == null) return 'Not saved';
+  return switch (state.presentationStatus) {
+    AutosavePresentationStatus.changesPending => 'Changes pending',
+    AutosavePresentationStatus.savingRecovery => 'Saving recovery…',
+    AutosavePresentationStatus.savingRecoveryWithPendingChanges =>
+      'Saving recovery…  •  Changes pending',
+    AutosavePresentationStatus.recoverySaved => 'Recovery saved',
+    AutosavePresentationStatus.recoveryFailed => 'Recovery save failed',
+    AutosavePresentationStatus.projectSaved => 'Project saved',
+  };
 }

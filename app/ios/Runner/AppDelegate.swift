@@ -62,7 +62,8 @@ import UIKit
         let suggestedName = arguments?["suggestedName"] as? String ?? "untitled.png"
         do {
           guard let selection = try self.providerDocumentPicker.preparePngExport(
-            suggestedName: suggestedName
+            suggestedName: suggestedName,
+            localProjectPath: arguments?["localProjectPath"] as? String
           ) else {
             result(nil)
             return
@@ -270,8 +271,11 @@ final class InkProviderDocumentPicker: NSObject, UIDocumentPickerDelegate {
   private static let maxProviderDepth = 64
 
   private var completion: ((Result<InkProviderProjectSelection?, Error>) -> Void)?
+  // Retain path-scoped source metadata for this runner session, without holding
+  // security-scoped access open. A rejected Open must not retire the current source.
+  private var providerProjects: [String: StagedProject] = [:]
+  private let providerProjectsLock = NSLock()
   private var activeSourceURL: URL?
-  private var activeLocalProjectURL: URL?
   private var activeCanWriteBack = false
   private var activePngExportURL: URL?
   private var activePngExportName: String?
@@ -310,11 +314,8 @@ final class InkProviderDocumentPicker: NSObject, UIDocumentPickerDelegate {
       do {
         let selection = try Self.stageProject(at: selectedURL)
         DispatchQueue.main.async {
+          self?.retainProviderProject(selection)
           self?.activeSourceURL = selection.sourceURL
-          self?.activeLocalProjectURL = URL(
-            fileURLWithPath: selection.path,
-            isDirectory: selection.path.lowercased().hasSuffix(".inkproj")
-          )
           self?.activeCanWriteBack = selection.canWriteBack
           self?.activePngExportURL = nil
           self?.activePngExportName = nil
@@ -331,16 +332,14 @@ final class InkProviderDocumentPicker: NSObject, UIDocumentPickerDelegate {
   }
 
   func commitProject(localPath: String) throws {
-    guard activeCanWriteBack, let sourceURL = activeSourceURL else { return }
     let fileManager = FileManager.default
     let localURL = URL(fileURLWithPath: localPath, isDirectory: true)
       .resolvingSymlinksInPath().standardizedFileURL
-    guard let expectedLocalURL = activeLocalProjectURL?
-      .resolvingSymlinksInPath().standardizedFileURL,
-      localURL == expectedLocalURL
-    else {
-      throw InkProviderDocumentError.copyFailed("The staged project path does not match.")
+    guard let selection = providerProject(at: localURL.path) else {
+      throw InkProviderDocumentError.copyFailed("No provider source is bound to this staged project.")
     }
+    guard selection.canWriteBack else { return }
+    let sourceURL = selection.sourceURL
     var localIsDirectory = ObjCBool(false)
     guard fileManager.fileExists(atPath: localURL.path, isDirectory: &localIsDirectory),
       localIsDirectory.boolValue
@@ -380,8 +379,15 @@ final class InkProviderDocumentPicker: NSObject, UIDocumentPickerDelegate {
     }
   }
 
-  func preparePngExport(suggestedName: String) throws -> InkProviderProjectSelection? {
-    guard activeCanWriteBack, activeSourceURL != nil else { return nil }
+  func preparePngExport(
+    suggestedName: String, localProjectPath: String?
+  ) throws -> InkProviderProjectSelection? {
+    guard let localProjectPath,
+      let selection = providerProject(at: localProjectPath),
+      selection.canWriteBack
+    else { return nil }
+    activeSourceURL = selection.sourceURL
+    activeCanWriteBack = selection.canWriteBack
     let fileManager = FileManager.default
     let appSupport = try fileManager.url(
       for: .applicationSupportDirectory,
@@ -451,6 +457,22 @@ final class InkProviderDocumentPicker: NSObject, UIDocumentPickerDelegate {
     let callback = completion
     completion = nil
     callback?(result)
+  }
+
+  private func retainProviderProject(_ project: StagedProject) {
+    let key = URL(fileURLWithPath: project.path)
+      .resolvingSymlinksInPath().standardizedFileURL.path
+    providerProjectsLock.lock()
+    defer { providerProjectsLock.unlock() }
+    providerProjects[key] = project
+  }
+
+  private func providerProject(at path: String) -> StagedProject? {
+    let key = URL(fileURLWithPath: path)
+      .resolvingSymlinksInPath().standardizedFileURL.path
+    providerProjectsLock.lock()
+    defer { providerProjectsLock.unlock() }
+    return providerProjects[key]
   }
 
   private struct StagedProject {

@@ -73,3 +73,11 @@ abstract interface class ComicExportPicker {
 abstract interface class ProviderDocumentState {
   bool get hasActiveProviderProject;
 }
+
+/// Binds picker write-back state only after a document transition succeeds.
+///
+/// Implementations must update this local bookkeeping synchronously without
+/// I/O or throwing. A null path releases selections when creating a new canvas.
+abstract interface class DocumentPickerSession {
+  void bindProject(String? localPath);
+}

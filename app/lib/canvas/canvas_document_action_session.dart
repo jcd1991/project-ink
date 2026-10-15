@@ -1,6 +1,7 @@
 import '../bridge/engine_api.dart';
 import '../documents/autosave_coordinator.dart';
 import '../documents/document_picker.dart';
+import '../documents/recent_projects.dart';
 
 /// Document-session values and callbacks consumed by canvas document actions.
 ///
@@ -13,6 +14,8 @@ abstract interface class CanvasDocumentActionSession {
   DocumentPicker? get documentPicker;
   Duration get documentPickerTimeout;
   String? get activeDocumentPath;
+  Future<List<RecentProjectEntry>> Function()? get loadRecentProjects;
+  Future<void> Function(String path)? get removeRecentProject;
 
   Future<void> Function({
     required int widthPx,
@@ -22,6 +25,7 @@ abstract interface class CanvasDocumentActionSession {
   get onNewDocument;
 
   Future<void> Function(String path)? get onOpenDocument;
+  Future<void> Function(String path)? get onImportEditablePsd;
   Future<void> Function(String path)? get onDocumentSaved;
   Future<void> Function()? get onBeforeOpenStudioProject;
   Future<void> Function(String path)? get onStudioProjectOpened;

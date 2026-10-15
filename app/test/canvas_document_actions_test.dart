@@ -7,14 +7,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/bridge/engine_api.dart';
+import 'package:project_ink/bridge/generated/api.dart' as rust;
 import 'package:project_ink/canvas/canvas_screen.dart';
 import 'package:project_ink/canvas/live_preview_controller.dart';
 import 'package:project_ink/comics/comic_workspace.dart';
 import 'package:project_ink/documents/autosave_coordinator.dart';
 import 'package:project_ink/documents/document_picker.dart';
+import 'package:project_ink/documents/recent_projects.dart';
 import 'package:project_ink/tools/brush_library_panel.dart';
 
-class _Picker implements DocumentPicker {
+class _Picker implements DocumentPicker, DocumentExportPicker {
   String? suggestedName;
   int saveRequests = 0;
 
@@ -33,6 +35,12 @@ class _Picker implements DocumentPicker {
   @override
   Future<String?> exportPng({String suggestedName = 'untitled.png'}) async =>
       '/tmp/export.png';
+
+  @override
+  Future<String?> saveExport({
+    required String extension,
+    String? suggestedName,
+  }) async => '/tmp/export.$extension';
 }
 
 class _CancelDocumentPicker extends _Picker {
@@ -52,6 +60,86 @@ class _PsdPicker extends _Picker implements PsdImportPicker {
   @override
   Future<String?> openPsd() async => '/tmp/replacement.psd';
 }
+
+class _ComicExportPicker extends _Picker implements ComicExportPicker {
+  @override
+  Future<String?> chooseComicExportDirectory({
+    String suggestedName = 'comic-pages',
+  }) async => '/tmp/$suggestedName';
+}
+
+class _ComicExportController extends ComicWorkspaceController {
+  _ComicExportController(this.project, this.warnings);
+
+  final rust.ComicProjectView project;
+  final List<String> warnings;
+  List<String>? warningsAfterNextRead;
+  bool? lastAllowRenderWarnings;
+  int exportCount = 0;
+
+  @override
+  rust.ComicProjectView? get snapshot => project;
+
+  @override
+  Future<void> ensureProjectLoaded() async {}
+
+  @override
+  Future<List<String>?> renderWarnings() async {
+    final changedWarnings = warningsAfterNextRead;
+    if (changedWarnings != null) {
+      warningsAfterNextRead = null;
+      return changedWarnings;
+    }
+    return warnings;
+  }
+
+  @override
+  Future<int?> batchExportPages(
+    String directory, {
+    bool allowRenderWarnings = false,
+  }) async {
+    lastAllowRenderWarnings = allowRenderWarnings;
+    exportCount++;
+    return 1;
+  }
+}
+
+rust.ComicProjectView _comicExportProject() => rust.ComicProjectView(
+  id: BigInt.one,
+  template: 1,
+  title: 'Export warning fixture',
+  pageCount: 1,
+  pages: <rust.ComicPageView>[
+    rust.ComicPageView(
+      id: BigInt.from(2),
+      pageNumber: 1,
+      widthPx: 1200,
+      heightPx: 1600,
+      dpi: 300,
+      panelCount: 0,
+      balloonCount: 0,
+      toneCount: 0,
+      effectLineCount: 0,
+      panels: const <rust.ComicPanelPreviewView>[],
+      balloons: const <rust.ComicBalloonPreviewView>[],
+      tones: const <rust.ComicTonePreviewView>[],
+      effectLines: const <rust.ComicEffectLinePreviewView>[],
+      bleedLeft: 24,
+      bleedTop: 24,
+      bleedRight: 24,
+      bleedBottom: 24,
+      trimX: 48,
+      trimY: 48,
+      trimWidth: 1104,
+      trimHeight: 1504,
+      safetyLeft: 48,
+      safetyTop: 48,
+      safetyRight: 48,
+      safetyBottom: 48,
+    ),
+  ],
+  materials: const <rust.ComicMaterialView>[],
+);
 
 class _StudioPicker extends _Picker {
   _StudioPicker(this.path);
@@ -107,6 +195,8 @@ class _BrushPicker implements DocumentPicker, BrushPicker, BrushTipImagePicker {
 class _RecordingEngine extends InMemoryEngineApi {
   String? savedPath;
   String? exportedPath;
+  String? exportedFormat;
+  String? editablePsdPath;
   int saveAttempts = 0;
   bool failSave = false;
   Future<void> Function()? beforeSaveCompletes;
@@ -121,6 +211,39 @@ class _RecordingEngine extends InMemoryEngineApi {
 
   @override
   Future<void> exportPng(String path) async => exportedPath = path;
+
+  @override
+  Future<void> exportDocument({
+    required String path,
+    required String format,
+  }) async {
+    exportedPath = path;
+    exportedFormat = format;
+  }
+
+  @override
+  Future<void> exportEditablePsd(String path) async => editablePsdPath = path;
+}
+
+class _EditablePsdEngine extends _RecordingEngine {
+  @override
+  Future<PsdImportInspectionView> inspectPsdImport(String path) async =>
+      const PsdImportInspectionView(
+        widthPx: 256,
+        heightPx: 256,
+        depth: 8,
+        layerCount: 3,
+        editableImportAvailable: true,
+        flattenedImportAvailable: true,
+        supportedFeatures: <String>[
+          'RGB 8-bit layers and groups',
+          'Conversion: Solid-color fill layers are imported as paint layers. Their fill color is baked into pixels and cannot be edited as a fill after import.',
+        ],
+        incompatibilities: <String>[],
+        flattenedImportIssues: <String>[],
+        estimatedEditableWorkingSetBytes: 4096,
+        estimatedFlattenedWorkingSetBytes: 2048,
+      );
 }
 
 class _DeferredLivePreview implements LivePreviewController {
@@ -316,13 +439,57 @@ class _BundleImportEngine extends _ImportEngine {
   }
 }
 
+class _AbrImportEngine extends _ImportEngine {
+  String? abrImportedPath;
+
+  @override
+  Future<BrushImportInspectionView> inspectBrushImport(String path) async {
+    inspectedPath = path;
+    return BrushImportInspectionView(
+      sourceFormat: 'PhotoshopAbr',
+      sourceSha256: _ImportEngine.sourceHash,
+      bytes: 256,
+      fidelity: 'Approximate',
+      importerVersion: 'test',
+    );
+  }
+
+  @override
+  Future<BrushImportReportView> convertBrushImport(String path) async {
+    convertedPath = path;
+    return BrushImportReportView(
+      sourceFormat: 'PhotoshopAbr',
+      sourceSha256: _ImportEngine.sourceHash,
+      importerVersion: 'test',
+      fidelity: 'Approximate',
+      mappings: <String>['diameter -> tip diameter'],
+      omitted: <String>['Photoshop renderer dynamics'],
+      warnings: <String>['Approximate tier C conversion.'],
+      resourceCount: 1,
+      previewWidth: 64,
+      previewHeight: 64,
+      brushCount: 2,
+    );
+  }
+
+  @override
+  Future<List<int>> importPhotoshopAbrVerified(
+    String path,
+    Uint8List sourceSha256,
+  ) async {
+    expect(sourceSha256, orderedEquals(_ImportEngine.sourceHash));
+    abrImportedPath = path;
+    return <int>[13, 14];
+  }
+}
+
 class _GuidedImageImportEngine extends _ImportEngine {
   bool includeExtractedAssets = false;
   @override
   Future<BrushImportInspectionView> inspectBrushImport(String path) async {
     inspectedPath = path;
     return BrushImportInspectionView(
-      sourceFormat: path.endsWith('.png') ? 'Image' : 'ProcreateBrush',
+      sourceFormat: path.endsWith('.png') ? 'Image' : 'BrushArchive',
       sourceSha256: _ImportEngine.sourceHash,
       bytes: 128,
       fidelity: path.endsWith('.png') ? 'Approximate' : 'GuidedRecreation',
@@ -334,7 +501,7 @@ class _GuidedImageImportEngine extends _ImportEngine {
   Future<BrushImportReportView> convertBrushImport(String path) async {
     convertedPath = path;
     return BrushImportReportView(
-      sourceFormat: path.endsWith('.png') ? 'Image' : 'ProcreateBrush',
+      sourceFormat: path.endsWith('.png') ? 'Image' : 'BrushArchive',
       sourceSha256: _ImportEngine.sourceHash,
       importerVersion: 'test',
       fidelity: path.endsWith('.png') ? 'Approximate' : 'GuidedRecreation',
@@ -818,6 +985,80 @@ void main() {
     expect(openedPath, '/tmp/open.inkproj');
   });
 
+  testWidgets('Open recent keeps missing entries removable', (tester) async {
+    final removedPaths = <String>[];
+    String? openedPath;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: _RecordingEngine(),
+          documentPicker: _Picker(),
+          targetPlatform: TargetPlatform.macOS,
+          onOpenDocument: (path) async => openedPath = path,
+          loadRecentProjects:
+              () async => const [
+                RecentProjectEntry(
+                  path: '/tmp/recent/project-a.inkproj',
+                  available: true,
+                ),
+                RecentProjectEntry(
+                  path: '/tmp/unavailable/project-b.inkproj',
+                  available: false,
+                ),
+              ],
+          removeRecentProject: (path) async {
+            removedPaths.add(path);
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await _invokeCommand(tester, 'Open project');
+    expect(find.text('project-a'), findsOneWidget);
+    expect(find.textContaining('Unavailable'), findsOneWidget);
+    await tester.tap(find.byTooltip('Remove project-b from recents'));
+    await tester.pumpAndSettle();
+    expect(removedPaths, ['/tmp/unavailable/project-b.inkproj']);
+    expect(find.textContaining('Unavailable'), findsNothing);
+
+    await tester.tap(find.text('project-a'));
+    await tester.pumpAndSettle();
+    expect(openedPath, '/tmp/recent/project-a.inkproj');
+  });
+
+  testWidgets('editable PSD export is offered separately from flattened PSD', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _RecordingEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _Picker(),
+          targetPlatform: TargetPlatform.iOS,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('More actions and workspace settings'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export…'));
+    await tester.pumpAndSettle();
+    expect(find.text('Editable PSD'), findsOneWidget);
+    expect(find.text('Flattened PSD'), findsOneWidget);
+    await tester.tap(find.text('Editable PSD'));
+    await tester.pumpAndSettle();
+
+    expect(engine.editablePsdPath, '/tmp/export.psd');
+    expect(engine.exportedFormat, isNull);
+  });
+
   testWidgets('comic package Open uses the multi-page project route', (
     tester,
   ) async {
@@ -901,6 +1142,92 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('EngineErrorImpl'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('comic export requires explicit confirmation for render warnings', (
+    tester,
+  ) async {
+    final warnings = <String>[
+      'Page 1 balloon 1: missing glyph U+2603.',
+      'Page 1 balloon 1: dialogue overflows its content rectangle.',
+      ...List<String>.generate(
+        13,
+        (index) => 'Page ${index + 2} balloon 1: clipped test dialogue.',
+      ),
+    ];
+    final controller = _ComicExportController(_comicExportProject(), warnings);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: _RecordingEngine(),
+          documentPicker: _ComicExportPicker(),
+          targetPlatform: TargetPlatform.macOS,
+          comicWorkspaceController: controller,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _invokeCommand(tester, 'Comic workspace');
+    await tester.pumpAndSettle();
+
+    final exportSection = find.text('Export');
+    if (exportSection.evaluate().isNotEmpty) {
+      await tester.tap(exportSection.last);
+    } else {
+      await tester.tap(find.byTooltip('More comic sections'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Export').last);
+    }
+    await tester.pumpAndSettle();
+    final exportPages = find.text('Export pages (PNG + SVG)');
+    await tester.ensureVisible(exportPages);
+    await tester.tap(exportPages);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Export with lettering warnings?'), findsOneWidget);
+    expect(find.textContaining('missing glyph U+2603'), findsOneWidget);
+    expect(find.textContaining('dialogue overflows'), findsOneWidget);
+    final lastWarning = find.textContaining('Page 14 balloon 1');
+    expect(lastWarning, findsNothing);
+    await tester.scrollUntilVisible(
+      lastWarning,
+      120,
+      scrollable: find.descendant(
+        of: find.byKey(const ValueKey('comic-export-warning-list')),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    expect(lastWarning, findsOneWidget);
+    await tester.tap(find.text('Cancel export'));
+    await tester.pumpAndSettle();
+    expect(controller.exportCount, 0);
+
+    await tester.ensureVisible(exportPages);
+    await tester.tap(exportPages);
+    await tester.pumpAndSettle();
+    controller.warningsAfterNextRead = <String>[
+      ...warnings,
+      'Page 15 balloon 1: a new overflow warning.',
+    ];
+    await tester.tap(find.text('Export with warnings'));
+    await tester.pumpAndSettle();
+    expect(controller.exportCount, 0);
+    expect(
+      find.text(
+        'Comic lettering changed. Review the updated export warnings and try again.',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.ensureVisible(exportPages);
+    await tester.tap(exportPages);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export with warnings'));
+    await tester.pumpAndSettle();
+
+    expect(controller.lastAllowRenderWarnings, isTrue);
+    expect(controller.exportCount, 1);
     expect(tester.takeException(), isNull);
   });
 
@@ -1015,6 +1342,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Import PSD').last);
       await tester.pumpAndSettle();
+      expect(find.text('Import PSD'), findsOneWidget);
+      await tester.tap(find.text('Import flattened image'));
+      await tester.pumpAndSettle();
     }
 
     await importPsd();
@@ -1028,6 +1358,72 @@ void main() {
     await tester.tap(find.text('Discard').last);
     await tester.pumpAndSettle();
     expect(importedPath, '/tmp/replacement.psd');
+  });
+
+  testWidgets('PSD import can be canceled before replacing the document', (
+    tester,
+  ) async {
+    final engine = _RecordingEngine();
+    String? importedPath;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          documentPicker: _PsdPicker(),
+          targetPlatform: TargetPlatform.macOS,
+          onOpenDocument: (path) async => importedPath = path,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Menu menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import PSD').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Import PSD'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(importedPath, isNull);
+  });
+
+  testWidgets('PSD editable choice routes to candidate import callback', (
+    tester,
+  ) async {
+    String? editablePath;
+    String? flattenedPath;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: _EditablePsdEngine(),
+          documentPicker: _PsdPicker(),
+          targetPlatform: TargetPlatform.macOS,
+          onOpenDocument: (path) async => flattenedPath = path,
+          onImportEditablePsd: (path) async => editablePath = path,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Menu menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import PSD').last);
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        '256 × 256 px, 8-bit, 3 logical layer node(s) (groups included).',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Import conversions'), findsOneWidget);
+    expect(
+      find.textContaining('cannot be edited as a fill after import'),
+      findsOneWidget,
+    );
+    expect(find.text('Import editable layers'), findsOneWidget);
+    await tester.tap(find.text('Import editable layers'));
+    await tester.pumpAndSettle();
+    expect(editablePath, '/tmp/replacement.psd');
+    expect(flattenedPath, isNull);
   });
 
   testWidgets('failed project open keeps canvas and explains likely cause', (
@@ -1151,7 +1547,8 @@ void main() {
       tester.widget<CanvasScreen>(find.byType(CanvasScreen)).activeDocumentPath,
       '/tmp/current.inkproj',
     );
-    expect(find.textContaining('Document action failed:'), findsOneWidget);
+    expect(find.text('Project save failed.'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1235,7 +1632,8 @@ void main() {
       tester.widget<CanvasScreen>(find.byType(CanvasScreen)).activeDocumentPath,
       '/tmp/current.inkproj',
     );
-    expect(find.textContaining('Document action failed:'), findsOneWidget);
+    expect(find.text('Project save failed.'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -1557,6 +1955,39 @@ void main() {
     expect(engine.bundleImportedPath, '/tmp/converted.kpp');
     expect(engine.importedPath, isNull);
   });
+
+  testWidgets(
+    'ABR import confirms Tier C report before transactional install',
+    (tester) async {
+      final engine = _AbrImportEngine();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CanvasScreen(
+            engine: engine,
+            documentPicker: _BrushPicker(),
+            targetPlatform: TargetPlatform.macOS,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await _invokeCommand(tester, 'Brush library');
+      await tester.pump();
+      await tester.tap(find.byTooltip('Import brush'));
+      await tester.pumpAndSettle();
+      expect(find.text('Brush is ready to install'), findsOneWidget);
+      expect(engine.abrImportedPath, isNull);
+      await tester.tap(find.text('Import details'));
+      await tester.pumpAndSettle();
+      expect(find.text('Brushes in pack: 2'), findsOneWidget);
+      expect(find.textContaining('Approximate tier C'), findsOneWidget);
+
+      await tester.tap(find.text('Install brush'));
+      await tester.pumpAndSettle();
+      expect(engine.abrImportedPath, '/tmp/converted.kpp');
+      expect(engine.importedPath, isNull);
+    },
+  );
 }
 
 Finder _command(String labelPrefix) => find.byWidgetPredicate(

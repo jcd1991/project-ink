@@ -20,7 +20,8 @@ class MainActivity : FlutterActivity() {
     private var stylusButtonDown = false
     private var providerResult: MethodChannel.Result? = null
     private var liveTextureRegistry: InkLiveTextureRegistry? = null
-    private var activeProviderImport: ProviderImport? = null
+    // Session-local capabilities: a rejected Open must not retire the current source.
+    private val providerImports = mutableMapOf<String, ProviderImport>()
     private var activeProviderPngExport: ProviderPngExport? = null
 
     private companion object {
@@ -62,6 +63,7 @@ class MainActivity : FlutterActivity() {
                 "commitProject" -> commitProviderProject(call.argument("localPath"), result)
                 "preparePngExport" -> prepareProviderPngExport(
                     call.argument("suggestedName"),
+                    call.argument("localProjectPath"),
                     result,
                 )
                 "commitPng" -> commitProviderPng(call.argument("localPath"), result)
@@ -134,7 +136,7 @@ class MainActivity : FlutterActivity() {
             try {
                 val imported = copyProviderProject(treeUri)
                 runOnUiThread {
-                    activeProviderImport = imported
+                    providerImports[imported.localPath.canonicalPath] = imported
                     activeProviderPngExport = null
                     result.success(
                         mapOf(
@@ -213,9 +215,18 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun commitProviderProject(localPath: String?, result: MethodChannel.Result) {
-        val imported = activeProviderImport
+        val imported = try {
+            localPath?.let { providerImports[File(it).canonicalPath] }
+        } catch (error: IOException) {
+            result.error("invalid_path", error.message, null)
+            return
+        }
         activeProviderPngExport = null
-        if (localPath == null || imported == null || imported.parentDocumentId == null) {
+        if (localPath == null || imported == null) {
+            result.error("invalid_path", "No provider source is bound to this staged project.", null)
+            return
+        }
+        if (imported.parentDocumentId == null) {
             result.success(null)
             return
         }
@@ -233,7 +244,7 @@ class MainActivity : FlutterActivity() {
             try {
                 val updated = replaceProviderProject(imported, local)
                 runOnUiThread {
-                    activeProviderImport = updated
+                    providerImports[updated.localPath.canonicalPath] = updated
                     result.success(null)
                 }
             } catch (error: Exception) {
@@ -246,9 +257,15 @@ class MainActivity : FlutterActivity() {
 
     private fun prepareProviderPngExport(
         suggestedName: String?,
+        localProjectPath: String?,
         result: MethodChannel.Result,
     ) {
-        val imported = activeProviderImport
+        val imported = try {
+            localProjectPath?.let { providerImports[File(it).canonicalPath] }
+        } catch (error: IOException) {
+            result.error("invalid_path", error.message, null)
+            return
+        }
         val parentDocumentId = imported?.parentDocumentId
         if (imported == null || parentDocumentId == null) {
             result.success(null)
@@ -623,10 +640,9 @@ class MainActivity : FlutterActivity() {
             InkPencilCommandEventStream.publish("toggleEraser")
         }
         stylusButtonDown = buttonDown
-        val packet = pointerAdapter.packet(event, resources.displayMetrics.density)
-        if (packet != null) {
-            if (InkPointerEventStream.publish(packet)) return true
-        }
+        // Let Flutter hit-test every S Pen contact so toolbar and layer-panel
+        // controls receive stylus taps. Activity-level dispatch cannot tell
+        // whether a contact landed on a canvas control or the drawing surface.
         return super.dispatchTouchEvent(event)
     }
 }

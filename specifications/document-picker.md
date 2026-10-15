@@ -58,3 +58,42 @@ volumes and selector failures fall back to the app-owned Documents/Projects
 directory. Root-only imports remain at their local staging path when saved or
 exported. Provider PNG promotion is bounded to the same 1 GiB file limit as
 project staging and is only attempted after a successful local Rust export.
+
+## Document binding and rejected Open
+
+`DocumentPickerSession.bindProject` is optional synchronous Dart bookkeeping.
+The application binds a path only after replacement succeeds, binds a newly
+saved destination after Save/Save As succeeds, and releases provider selections
+with `bindProject(null)` after New canvas succeeds. A pending Open selection
+does not replace the current write-back target. `saveProject` always chooses a
+new destination; ordinary Save uses the already bound path. New destinations
+must be outside every `.inkproj` or `.inkproj.bak` ancestor.
+
+Android and iOS retain imported source metadata keyed by canonical staged path
+for the runner session. No security-scoped access is held open between calls.
+This allows Save of the current project after another staged candidate fails
+Rust validation. Existing copy budgets and transactional promotion apply.
+
+`preparePngExport` now accepts `localProjectPath`, identifying the bound staged
+project. A null/unknown path offers no provider export destination. The Dart
+adapter skips provider export for a new/local canvas. Bundled native runners and
+Dart must be updated together; the channel name and existing method names stay
+unchanged. The supplied path never authorizes a new source: it must match an
+import recorded by this runner. Physical provider acceptance remains separate
+from mocked channel and widget tests.
+
+## Local recent-project index
+
+The app keeps a device-local most-recently-used list of at most 20 absolute
+local project-directory paths in shared preferences, with a display name and
+last-used timestamp for each entry. It stores filesystem paths only: provider
+URIs and paths under the operating-system temporary directory
+are rejected, and provider-backed staging paths are not added while the picker
+reports an active provider project. A path is added only after a successful
+open or save. The index is local navigation state; it does not add project
+contents, recovery state, or cloud data to preferences.
+
+Opening a recent entry uses the ordinary document replacement confirmation
+and barrier. Availability is checked when the chooser opens. Missing entries
+remain visible as unavailable until the user removes them, so a temporarily
+disconnected drive can be reconnected without losing the saved shortcut.
