@@ -57,6 +57,9 @@ abstract interface class EngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   });
   Future<int> beginBrushDraft(int brushId);
   Future<void> updateBrushDraft({
@@ -75,6 +78,9 @@ abstract interface class EngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   });
   Future<void> commitBrushDraft(int draftId);
   Future<void> cancelBrushDraft(int draftId);
@@ -315,6 +321,7 @@ abstract interface class EngineApi {
   /// Export the visible raster composite as deterministic PNG at [path].
   Future<void> exportPng(String path);
   Future<void> exportDocument({required String path, required String format});
+  Future<void> exportEditablePsd(String path);
 
   /// Export committed stroke samples for a local, deterministic time-lapse
   /// recorder. The JSON contains no document pixels or external paths.
@@ -324,10 +331,102 @@ abstract interface class EngineApi {
   Future<List<VectorStrokeSummaryView>> vectorStrokeSummaries({
     required int layerId,
   });
+  Future<List<VectorObjectSummaryView>> vectorObjectSummaries({
+    required int layerId,
+    required int offset,
+    required int limit,
+  });
+  Future<VectorObjectSummaryView?> vectorObjectDetail({
+    required int layerId,
+    required int objectId,
+  });
+  Future<int?> hitTestVectorObject({
+    required int layerId,
+    required double x,
+    required double y,
+    required double tolerancePx,
+  });
+  Future<VectorCandidateView> previewVectorShape({
+    required int layerId,
+    required int strokeId,
+  });
+  Future<VectorCandidateView> previewVectorShapeConstraint({
+    required int candidateToken,
+    required int constraint,
+  });
+  Future<VectorCandidateView> previewVectorLegacyTranslation({
+    required int layerId,
+    required int strokeId,
+    required double tx,
+    required double ty,
+  });
+  Future<VectorCandidateView> previewVectorCurveFit({
+    required int layerId,
+    required int strokeId,
+    required double tolerancePx,
+  });
+  Future<VectorCandidateView> previewVectorAnchorMove({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required double dx,
+    required double dy,
+  });
+  Future<VectorCandidateView> previewVectorHandleMove({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required bool incoming,
+    required double x,
+    required double y,
+  });
+  Future<VectorCandidateView> previewVectorAnchorSmooth({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required bool smooth,
+  });
+  Future<VectorCandidateView> previewVectorSegmentSplit({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int segment,
+    required double t,
+  });
+  Future<VectorCandidateView> previewVectorAnchorDelete({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+  });
+  Future<VectorCandidateView> previewVectorPathTransform({
+    required int layerId,
+    required int objectId,
+    required double tx,
+    required double ty,
+    required double rotationDegrees,
+    required double uniformScale,
+  });
+  Future<void> applyVectorCandidate({required int token});
+  Future<void> cancelVectorCandidate({required int token});
+  Future<void> restoreVectorOriginalInk({
+    required int layerId,
+    required int objectId,
+  });
+  Future<List<int>> repeatVectorPath({
+    required int layerId,
+    required int objectId,
+    required CanvasVectorRepeatOptions options,
+  });
   Future<void> exportBrush({required int brushId, required String path});
   Future<int> duplicateBrush(int brushId);
   Future<void> renameBrush({required int brushId, required String name});
   Future<BrushImportInspectionView> inspectBrushImport(String path);
+  Future<PsdImportInspectionView> inspectPsdImport(String path);
+  Future<EngineApi> openEditablePsdCandidate(String path);
   Future<BrushImportReportView> convertBrushImport(String path);
   Future<BrushImportStageView> stageBrushImport(String path);
   Future<BrushImportReportView> convertStagedBrushImport(int operationId);
@@ -340,6 +439,10 @@ abstract interface class EngineApi {
     Uint8List sourceSha256,
   );
   Future<List<int>> importKritaBundleVerified(
+    String path,
+    Uint8List sourceSha256,
+  );
+  Future<List<int>> importPhotoshopAbrVerified(
     String path,
     Uint8List sourceSha256,
   );
@@ -370,6 +473,13 @@ abstract interface class EngineApi {
     required int brightness,
     required int contrast,
   });
+  Future<int> beginLayerAdjustmentEdit({required int layerId});
+  Future<void> updateLayerAdjustmentEdit({
+    required int editId,
+    required String adjustmentJson,
+  });
+  Future<void> commitLayerAdjustmentEdit({required int editId});
+  Future<void> cancelLayerAdjustmentEdit({required int editId});
   Future<TileUpdateBatch> drainTileUpdates();
   Future<List<StrokeAcknowledgement>> drainStrokeAcknowledgements();
   Future<int> drainLiveDabOverflowCount();

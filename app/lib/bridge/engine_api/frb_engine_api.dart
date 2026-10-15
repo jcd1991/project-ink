@@ -525,6 +525,51 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<PsdImportInspectionView> inspectPsdImport(String path) async {
+    _requireOpen();
+    if (path.isEmpty) throw ArgumentError.value(path, 'path');
+    final value = await rust.inspectPsdImport(path: path);
+    return PsdImportInspectionView(
+      widthPx: value.widthPx,
+      heightPx: value.heightPx,
+      depth: value.depth,
+      layerCount: value.layerCount,
+      editableImportAvailable: value.editableImportAvailable,
+      flattenedImportAvailable: value.flattenedImportAvailable,
+      supportedFeatures: List<String>.unmodifiable(value.supportedFeatures),
+      incompatibilities: List<String>.unmodifiable(value.incompatibilities),
+      flattenedImportIssues: List<String>.unmodifiable(
+        value.flattenedImportIssues,
+      ),
+      estimatedEditableWorkingSetBytes:
+          value.estimatedEditableWorkingSetBytes.toInt(),
+      estimatedFlattenedWorkingSetBytes:
+          value.estimatedFlattenedWorkingSetBytes.toInt(),
+    );
+  }
+
+  @override
+  Future<EngineApi> openEditablePsdCandidate(String path) async {
+    _requireOpen();
+    if (path.isEmpty) throw ArgumentError.value(path, 'path');
+    try {
+      final candidate = await rust.openEditablePsd(
+        activeHandle: _handle,
+        path: path,
+      );
+      return await _fromHandle(candidate);
+    } on rust.EngineError catch (error, stack) {
+      debugPrint('Project Ink: editable PSD import failed: $error\n$stack');
+      Error.throwWithStackTrace(
+        const DocumentOpenException(
+          'Could not import the selected PSD as editable layers. It may use unsupported features or exceed the memory limit. Choose flattened import if available, or save and close another large document before retrying.',
+        ),
+        stack,
+      );
+    }
+  }
+
+  @override
   Future<BrushImportReportView> convertBrushImport(String path) async {
     _requireOpen();
     final value = await rust.convertBrushImport(path: path);
@@ -668,6 +713,24 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<List<int>> importPhotoshopAbrVerified(
+    String path,
+    Uint8List sourceSha256,
+  ) async {
+    _requireOpen();
+    if (sourceSha256.length != 32) {
+      throw ArgumentError.value(sourceSha256.length, 'sourceSha256');
+    }
+    final ids = await rust.importPhotoshopAbrVerified(
+      handle: _handle,
+      path: path,
+      sourceSha256: sourceSha256,
+    );
+    _revision = (await rust.revision(handle: _handle)).toInt();
+    return ids.map((id) => id.toInt()).toList(growable: false);
+  }
+
+  @override
   Future<void> updateBrushSettings({
     required int brushId,
     required double diameter,
@@ -684,6 +747,9 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   }) async {
     _requireOpen();
     if (brushId < 0) throw ArgumentError.value(brushId, 'brushId');
@@ -707,6 +773,9 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           rotationJitter: rotationJitter,
           smudge: smudge,
           wetness: wetness,
+          pulledString: pulledString,
+          stabilizerDistancePx: stabilizerDistancePx,
+          catchUpOnEnd: catchUpOnEnd,
         )).toInt();
   }
 
@@ -768,6 +837,9 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   }) async {
     _requireOpen();
     await rust.updateBrushDraft(
@@ -789,6 +861,9 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
       rotationJitter: rotationJitter,
       smudge: smudge,
       wetness: wetness,
+      pulledString: pulledString,
+      stabilizerDistancePx: stabilizerDistancePx,
+      catchUpOnEnd: catchUpOnEnd,
     );
   }
 
@@ -1940,6 +2015,13 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<void> exportEditablePsd(String path) {
+    _requireOpen();
+    if (path.isEmpty) throw ArgumentError('invalid PSD export path');
+    return rust.exportEditablePsd(handle: _handle, path: path);
+  }
+
+  @override
   Future<List<BrushSummaryView>> builtinBrushes() async {
     _requireOpen();
     final summaries = await rust.brushes(handle: _handle);
@@ -1958,7 +2040,11 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
             opacity: summary.opacity,
             spacing: summary.spacing,
             smoothing: summary.smoothing,
+            pulledString: summary.pulledString,
+            stabilizerDistancePx: summary.stabilizerDistancePx,
+            catchUpOnEnd: summary.catchUpOnEnd,
             pressureSize: summary.pressureSize,
+            pressureSizeReplace: summary.pressureSizeReplace,
             pressureOpacity: summary.pressureOpacity,
             hardness: summary.hardness,
             textureScale: summary.textureScale,
@@ -2013,6 +2099,7 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
             labelRgba: summary.labelRgba,
             adjustmentBrightness: summary.adjustmentBrightness,
             adjustmentContrast: summary.adjustmentContrast,
+            adjustmentJson: summary.adjustmentJson,
             canDrag: summary.canDrag,
             dragReason: summary.dragReason,
             canReceiveLayers: summary.canReceiveLayers,
@@ -2057,6 +2144,385 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
           ),
         )
         .toList(growable: false);
+  }
+
+  @override
+  Future<List<VectorObjectSummaryView>> vectorObjectSummaries({
+    required int layerId,
+    required int offset,
+    required int limit,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 || offset < 0 || limit < 1 || limit > 64) {
+      throw ArgumentError('invalid vector summary page');
+    }
+    final page = await rust.vectorObjectSummaries(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      offset: offset,
+      limit: limit,
+    );
+    return page
+        .map(
+          (summary) => VectorObjectSummaryView(
+            id: _safeId(summary.id, 'vector object'),
+            kind: summary.kind,
+            pointCount: summary.pointCount,
+            points: List<double>.unmodifiable(summary.points),
+            geometry: List<double>.unmodifiable(summary.geometry),
+            subpathStarts: List<int>.unmodifiable(summary.subpathStarts),
+            closed: List<bool>.unmodifiable(summary.closed),
+            hasSourceArchive: summary.hasSourceArchive,
+            minX: summary.minX,
+            minY: summary.minY,
+            maxX: summary.maxX,
+            maxY: summary.maxY,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  @override
+  Future<VectorObjectSummaryView?> vectorObjectDetail({
+    required int layerId,
+    required int objectId,
+  }) async {
+    if (layerId < 0 || objectId <= 0) {
+      throw ArgumentError('invalid vector object detail target');
+    }
+    final detail = await rust.vectorObjectDetail(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: _layerIds.toRust(objectId),
+    );
+    if (detail == null) return null;
+    return VectorObjectSummaryView(
+      id: _safeId(detail.id, 'vector object'),
+      kind: detail.kind,
+      pointCount: detail.pointCount,
+      points: List<double>.unmodifiable(detail.points),
+      geometry: List<double>.unmodifiable(detail.geometry),
+      subpathStarts: List<int>.unmodifiable(detail.subpathStarts),
+      closed: List<bool>.unmodifiable(detail.closed),
+      hasSourceArchive: detail.hasSourceArchive,
+      minX: detail.minX,
+      minY: detail.minY,
+      maxX: detail.maxX,
+      maxY: detail.maxY,
+    );
+  }
+
+  @override
+  Future<int?> hitTestVectorObject({
+    required int layerId,
+    required double x,
+    required double y,
+    required double tolerancePx,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 ||
+        !x.isFinite ||
+        !y.isFinite ||
+        !tolerancePx.isFinite ||
+        tolerancePx < 0 ||
+        tolerancePx > 4096) {
+      throw ArgumentError('invalid vector hit-test point or tolerance');
+    }
+    final id = await rust.hitTestVectorObject(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      x: x,
+      y: y,
+      tolerancePx: tolerancePx,
+    );
+    return id == null ? null : _safeId(id, 'vector object');
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorShape({
+    required int layerId,
+    required int strokeId,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 || strokeId <= 0) {
+      throw ArgumentError('invalid vector shape target');
+    }
+    final candidate = await rust.previewVectorShape(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      strokeId: BigInt.from(strokeId),
+    );
+    return _vectorCandidateView(candidate);
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorShapeConstraint({
+    required int candidateToken,
+    required int constraint,
+  }) async {
+    _requireOpen();
+    if (candidateToken <= 0 || (constraint != 0 && constraint != 1)) {
+      throw ArgumentError('invalid vector shape constraint');
+    }
+    final candidate = await rust.previewVectorShapeConstraint(
+      handle: _handle,
+      token: BigInt.from(candidateToken),
+      constraint: constraint,
+    );
+    return _vectorCandidateView(candidate);
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorLegacyTranslation({
+    required int layerId,
+    required int strokeId,
+    required double tx,
+    required double ty,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 || strokeId <= 0 || !tx.isFinite || !ty.isFinite) {
+      throw ArgumentError('invalid legacy vector translation');
+    }
+    final candidate = await rust.previewVectorLegacyTranslation(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      strokeId: BigInt.from(strokeId),
+      translationX: tx,
+      translationY: ty,
+    );
+    return _vectorCandidateView(candidate);
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorCurveFit({
+    required int layerId,
+    required int strokeId,
+    required double tolerancePx,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 ||
+        strokeId <= 0 ||
+        !tolerancePx.isFinite ||
+        tolerancePx < 0.25 ||
+        tolerancePx > 8.0) {
+      throw ArgumentError('invalid vector curve-fit target or tolerance');
+    }
+    final candidate = await rust.previewVectorCurveFit(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      strokeId: BigInt.from(strokeId),
+      tolerancePx: tolerancePx,
+    );
+    return _vectorCandidateView(candidate);
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorAnchorMove({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required double dx,
+    required double dy,
+  }) => _pathEdit(
+    () => rust.previewVectorAnchorMove(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      subpath: subpath,
+      anchor: anchor,
+      horizontalDelta: dx,
+      verticalDelta: dy,
+    ),
+    layerId,
+    objectId,
+    subpath,
+    anchor,
+  );
+
+  @override
+  Future<VectorCandidateView> previewVectorHandleMove({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required bool incoming,
+    required double x,
+    required double y,
+  }) => _pathEdit(
+    () => rust.previewVectorHandleMove(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      subpath: subpath,
+      anchor: anchor,
+      incoming: incoming,
+      handleX: x,
+      handleY: y,
+    ),
+    layerId,
+    objectId,
+    subpath,
+    anchor,
+  );
+
+  @override
+  Future<VectorCandidateView> previewVectorAnchorSmooth({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required bool smooth,
+  }) => _pathEdit(
+    () => rust.previewVectorAnchorSmooth(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      subpath: subpath,
+      anchor: anchor,
+      smooth: smooth,
+    ),
+    layerId,
+    objectId,
+    subpath,
+    anchor,
+  );
+
+  @override
+  Future<VectorCandidateView> previewVectorSegmentSplit({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int segment,
+    required double t,
+  }) => _pathEdit(
+    () => rust.previewVectorSegmentSplit(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      subpath: subpath,
+      segment: segment,
+      t: t,
+    ),
+    layerId,
+    objectId,
+    subpath,
+    segment,
+  );
+
+  @override
+  Future<VectorCandidateView> previewVectorAnchorDelete({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+  }) => _pathEdit(
+    () => rust.previewVectorAnchorDelete(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      subpath: subpath,
+      anchor: anchor,
+    ),
+    layerId,
+    objectId,
+    subpath,
+    anchor,
+  );
+
+  @override
+  Future<VectorCandidateView> previewVectorPathTransform({
+    required int layerId,
+    required int objectId,
+    required double tx,
+    required double ty,
+    required double rotationDegrees,
+    required double uniformScale,
+  }) => _pathEdit(
+    () => rust.previewVectorPathTransform(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      translationX: tx,
+      translationY: ty,
+      rotationDegrees: rotationDegrees,
+      uniformScale: uniformScale,
+    ),
+    layerId,
+    objectId,
+    0,
+    0,
+  );
+
+  Future<VectorCandidateView> _pathEdit(
+    Future<rust.VectorCandidateView> Function() operation,
+    int layerId,
+    int objectId,
+    int subpath,
+    int index,
+  ) async {
+    _requireOpen();
+    if (layerId < 0 || objectId <= 0 || subpath < 0 || index < 0) {
+      throw ArgumentError('invalid Bézier path edit target');
+    }
+    return _vectorCandidateView(await operation());
+  }
+
+  VectorCandidateView _vectorCandidateView(
+    rust.VectorCandidateView candidate,
+  ) => VectorCandidateView(
+    token: _safeId(candidate.token, 'vector candidate'),
+    sourceId: _safeId(candidate.sourceId, 'vector source'),
+    revision: candidate.revision.toInt(),
+    matched: candidate.matched,
+    kind: candidate.kind,
+    points: List<double>.unmodifiable(candidate.points),
+    geometry: List<double>.unmodifiable(candidate.geometry),
+    subpathStarts: List<int>.unmodifiable(
+      candidate.subpathStarts.map((value) => value.toInt()),
+    ),
+    closed: List<bool>.unmodifiable(candidate.closed),
+    strokeRgba: candidate.strokeRgba,
+    strokeWidth: candidate.strokeWidth,
+    notice: candidate.notice,
+  );
+
+  @override
+  Future<void> applyVectorCandidate({required int token}) async {
+    _requireOpen();
+    if (token <= 0) throw ArgumentError('invalid vector candidate token');
+    _revision =
+        (await rust.applyVectorCandidate(
+          handle: _handle,
+          token: BigInt.from(token),
+        )).toInt();
+  }
+
+  @override
+  Future<void> cancelVectorCandidate({required int token}) async {
+    _requireOpen();
+    if (token <= 0) return;
+    await rust.cancelVectorCandidate(
+      handle: _handle,
+      token: BigInt.from(token),
+    );
+  }
+
+  @override
+  Future<void> restoreVectorOriginalInk({
+    required int layerId,
+    required int objectId,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 || objectId <= 0) {
+      throw ArgumentError('invalid vector restoration target');
+    }
+    _revision =
+        (await rust.restoreVectorOriginalInk(
+          handle: _handle,
+          layerId: _layerIds.toRust(layerId),
+          objectId: BigInt.from(objectId),
+        )).toInt();
   }
 
   @override
@@ -2228,6 +2694,56 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<int> beginLayerAdjustmentEdit({required int layerId}) async {
+    _requireOpen();
+    if (layerId < 0) throw ArgumentError.value(layerId, 'layerId');
+    final id = await rust.beginLayerAdjustmentEdit(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+    );
+    return id.toInt();
+  }
+
+  @override
+  Future<void> updateLayerAdjustmentEdit({
+    required int editId,
+    required String adjustmentJson,
+  }) async {
+    _requireOpen();
+    if (editId <= 0 || adjustmentJson.length > 4096) {
+      throw ArgumentError('invalid adjustment preview');
+    }
+    _revision =
+        (await rust.updateLayerAdjustmentEdit(
+          handle: _handle,
+          editId: BigInt.from(editId),
+          adjustmentJson: adjustmentJson,
+        )).toInt();
+  }
+
+  @override
+  Future<void> commitLayerAdjustmentEdit({required int editId}) async {
+    _requireOpen();
+    if (editId <= 0) throw ArgumentError.value(editId, 'editId');
+    _revision =
+        (await rust.commitLayerAdjustmentEdit(
+          handle: _handle,
+          editId: BigInt.from(editId),
+        )).toInt();
+  }
+
+  @override
+  Future<void> cancelLayerAdjustmentEdit({required int editId}) async {
+    _requireOpen();
+    if (editId <= 0) return;
+    _revision =
+        (await rust.cancelLayerAdjustmentEdit(
+          handle: _handle,
+          editId: BigInt.from(editId),
+        )).toInt();
+  }
+
+  @override
   Future<TileUpdateBatch> drainTileUpdates() async {
     _requireOpen();
     final decoded = decodeTileUpdatePacket(
@@ -2245,6 +2761,43 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
       tiles: decoded.tiles,
       acknowledgements: decoded.acknowledgements,
     );
+  }
+
+  @override
+  Future<List<int>> repeatVectorPath({
+    required int layerId,
+    required int objectId,
+    required CanvasVectorRepeatOptions options,
+  }) async {
+    _requireOpen();
+    if (layerId < 0 || objectId <= 0) {
+      throw ArgumentError('invalid vector repeat target');
+    }
+    final mode = switch (options.mode) {
+      CanvasVectorRepeatMode.radial => rust.VectorRepeatMode.radial,
+      CanvasVectorRepeatMode.grid => rust.VectorRepeatMode.grid,
+      CanvasVectorRepeatMode.mirrorVertical =>
+        rust.VectorRepeatMode.mirrorVertical,
+      CanvasVectorRepeatMode.mirrorHorizontal =>
+        rust.VectorRepeatMode.mirrorHorizontal,
+      CanvasVectorRepeatMode.mirrorBoth => rust.VectorRepeatMode.mirrorBoth,
+    };
+    final ids = await rust.repeatVectorPath(
+      handle: _handle,
+      layerId: _layerIds.toRust(layerId),
+      objectId: BigInt.from(objectId),
+      request: rust.VectorRepeatRequest(
+        mode: mode,
+        copies: options.copies,
+        columns: options.columns,
+        rows: options.rows,
+        spacingX: options.spacingX,
+        spacingY: options.spacingY,
+        stepDegrees: options.stepDegrees,
+        scalePerCopy: options.scalePerCopy,
+      ),
+    );
+    return ids.map((id) => _safeId(id, 'repeated vector object')).toList();
   }
 
   @override

@@ -1,4 +1,38 @@
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
+
+class PsdImportInspectionView {
+  const PsdImportInspectionView({
+    required this.widthPx,
+    required this.heightPx,
+    required this.depth,
+    required this.layerCount,
+    required this.editableImportAvailable,
+    required this.flattenedImportAvailable,
+    required this.supportedFeatures,
+    required this.incompatibilities,
+    required this.flattenedImportIssues,
+    required this.estimatedEditableWorkingSetBytes,
+    required this.estimatedFlattenedWorkingSetBytes,
+  });
+
+  final int widthPx;
+  final int heightPx;
+  final int depth;
+  final int layerCount;
+  final bool editableImportAvailable;
+  final bool flattenedImportAvailable;
+  final List<String> supportedFeatures;
+  final List<String> incompatibilities;
+  final List<String> flattenedImportIssues;
+  final int estimatedEditableWorkingSetBytes;
+  final int estimatedFlattenedWorkingSetBytes;
+
+  /// Human-readable notes for accepted features that are converted on import.
+  List<String> get conversionNotices => supportedFeatures
+      .where((feature) => feature.startsWith('Conversion: '))
+      .map((feature) => feature.substring('Conversion: '.length))
+      .toList(growable: false);
+}
 
 class BrushSummaryView {
   const BrushSummaryView({
@@ -10,7 +44,11 @@ class BrushSummaryView {
     this.opacity = 1,
     this.spacing = 0.1,
     this.smoothing = 0,
+    this.pulledString = false,
+    this.stabilizerDistancePx = 0,
+    this.catchUpOnEnd = false,
     this.pressureSize = 0,
+    this.pressureSizeReplace = false,
     this.pressureOpacity = 0,
     this.hardness = 0.75,
     this.textureScale = 1,
@@ -31,7 +69,11 @@ class BrushSummaryView {
   final double opacity;
   final double spacing;
   final double smoothing;
+  final bool pulledString;
+  final double stabilizerDistancePx;
+  final bool catchUpOnEnd;
   final double pressureSize;
+  final bool pressureSizeReplace;
   final double pressureOpacity;
   final double hardness;
   final double textureScale;
@@ -124,6 +166,7 @@ class LayerSummaryView {
     this.labelRgba,
     this.adjustmentBrightness = 0,
     this.adjustmentContrast = 0,
+    this.adjustmentJson,
     this.canDrag = true,
     this.dragReason,
     this.canReceiveLayers = true,
@@ -160,6 +203,7 @@ class LayerSummaryView {
   final int? labelRgba;
   final int adjustmentBrightness;
   final int adjustmentContrast;
+  final String? adjustmentJson;
   final bool canDrag;
   final String? dragReason;
   final bool canReceiveLayers;
@@ -207,6 +251,101 @@ class VectorStrokeSummaryView {
   final double minY;
   final double maxX;
   final double maxY;
+}
+
+/// Bounded projection of one legacy or Bézier vector object.
+class VectorObjectSummaryView {
+  const VectorObjectSummaryView({
+    required this.id,
+    required this.kind,
+    required this.pointCount,
+    required this.minX,
+    required this.minY,
+    required this.maxX,
+    required this.maxY,
+    this.points = const <double>[],
+    this.geometry = const <double>[],
+    this.subpathStarts = const <int>[],
+    this.closed = const <bool>[],
+    this.hasSourceArchive = false,
+  });
+
+  final int id;
+  final String kind;
+  final int pointCount;
+  final List<double> points;
+  final List<double> geometry;
+  final List<int> subpathStarts;
+  final List<bool> closed;
+  final bool hasSourceArchive;
+  final double minX;
+  final double minY;
+  final double maxX;
+  final double maxY;
+}
+
+/// Temporary immutable Bézier projection returned by Rust for inspection.
+/// Geometry stores six document-pixel values per anchor: position, incoming
+/// handle, and outgoing handle. It is not document state until Apply succeeds.
+class VectorCandidateView {
+  const VectorCandidateView({
+    required this.token,
+    required this.sourceId,
+    required this.revision,
+    required this.matched,
+    required this.kind,
+    this.points = const <double>[],
+    required this.geometry,
+    required this.subpathStarts,
+    required this.closed,
+    required this.strokeRgba,
+    required this.strokeWidth,
+    required this.notice,
+  });
+
+  final int token;
+  final int sourceId;
+  final int revision;
+  final bool matched;
+  final String kind;
+  final List<double> points;
+  final List<double> geometry;
+  final List<int> subpathStarts;
+  final List<bool> closed;
+  final int strokeRgba;
+  final double strokeWidth;
+  final String notice;
+}
+
+enum CanvasVectorRepeatMode {
+  radial,
+  grid,
+  mirrorVertical,
+  mirrorHorizontal,
+  mirrorBoth,
+}
+
+@immutable
+class CanvasVectorRepeatOptions {
+  const CanvasVectorRepeatOptions({
+    required this.mode,
+    this.copies = 8,
+    this.columns = 3,
+    this.rows = 3,
+    this.spacingX = 32,
+    this.spacingY = 32,
+    this.stepDegrees = 45,
+    this.scalePerCopy = 1,
+  });
+
+  final CanvasVectorRepeatMode mode;
+  final int copies;
+  final int columns;
+  final int rows;
+  final double spacingX;
+  final double spacingY;
+  final double stepDegrees;
+  final double scalePerCopy;
 }
 
 /// Immutable document metadata needed by the viewport and tile cache.

@@ -4,11 +4,12 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `blend_mode_name`, `bound_studio_history_stack`, `bounded_text`, `comic_project_mut`, `comic_project`, `comic_template`, `comic_view`, `decode_live_dab_packet`, `document_mut`, `document_state`, `document`, `encode_live_dab_packet`, `group_mode_name`, `inspection_view`, `layer_kind_name`, `make_page_document_from_snapshot`, `make_page_document`, `materialize_and_set_panel_mask`, `materialize_studio_panel_layers`, `new_document_handle`, `page_document_snapshot`, `panel_mask_points`, `payload_bytes`, `purge_expired_brush_imports`, `refresh_applied_panel_frames`, `report_view`, `restore_page_document`, `staged_brush_import`, `studio_active_document_mut`, `studio_active_document`, `studio_capture_state`, `studio_from_project`, `studio_mutate`, `studio_panel_binding`, `studio_project_mut`, `studio_project`, `studio_push_history`, `studio_restore_state`, `studio_snapshot_payload_bytes`, `with_document_save_snapshot`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentHandleState`, `DocumentMutRef`, `DocumentRef`, `StagedBrushImport`, `StudioProjectHistoryEntry`, `StudioProjectHistoryState`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `blend_mode_name`, `bound_studio_history_stack`, `bounded_text`, `comic_project_mut`, `comic_project`, `comic_template`, `comic_view`, `decode_live_dab_packet`, `document_mut`, `document_state`, `document`, `encode_live_dab_packet`, `group_mode_name`, `inspection_view`, `layer_kind_name`, `make_page_document_from_snapshot`, `make_page_document`, `materialize_and_set_panel_mask`, `materialize_studio_panel_layers`, `new_document_handle`, `page_document_snapshot`, `panel_mask_points`, `payload_bytes`, `purge_expired_brush_imports`, `read_bounded_psd_source`, `refresh_applied_panel_frames`, `report_view`, `restore_page_document`, `retire_vector_candidate`, `stage_vector_candidate`, `stage_vector_path_edit`, `staged_brush_import`, `studio_active_document_mut`, `studio_active_document`, `studio_capture_state`, `studio_from_project`, `studio_mutate`, `studio_panel_binding`, `studio_project_mut`, `studio_project`, `studio_push_history`, `studio_restore_state`, `studio_snapshot_payload_bytes`, `vector_candidate_view`, `vector_path_center`, `with_document_save_snapshot`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentHandleState`, `DocumentMutRef`, `DocumentRef`, `StagedBrushImport`, `StagedVectorCandidate`, `StudioProjectHistoryEntry`, `StudioProjectHistoryState`, `VectorPathEdit`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Inspect an external brush before conversion or installation.
 Future<BrushImportInspectionView> inspectBrushImport({required String path}) =>
@@ -657,6 +658,18 @@ Future<Uint8List> studioRenderPagePreview({
   maxDimension: maxDimension,
 );
 
+/// Render comic-owned page content on a transparent canvas overlay. Artwork,
+/// print guides and editor selection state are excluded.
+Future<Uint8List> studioRenderPageOverlayPreview({
+  required StudioProjectHandle handle,
+  required int pageIndex,
+  required int maxDimension,
+}) => RustLib.instance.api.crateApiStudioRenderPageOverlayPreview(
+  handle: handle,
+  pageIndex: pageIndex,
+  maxDimension: maxDimension,
+);
+
 Future<Uint8List> studioProjectToJson({required StudioProjectHandle handle}) =>
     RustLib.instance.api.crateApiStudioProjectToJson(handle: handle);
 
@@ -675,20 +688,30 @@ Future<int> studioBatchExportPageManifests({
 Future<int> studioBatchExportPages({
   required StudioProjectHandle handle,
   required String directory,
+  required bool allowRenderWarnings,
 }) => RustLib.instance.api.crateApiStudioBatchExportPages(
   handle: handle,
   directory: directory,
+  allowRenderWarnings: allowRenderWarnings,
 );
 
 Future<int> studioBatchExportWebtoonSegments({
   required StudioProjectHandle handle,
   required String directory,
   required int maxHeightPx,
+  required bool allowRenderWarnings,
 }) => RustLib.instance.api.crateApiStudioBatchExportWebtoonSegments(
   handle: handle,
   directory: directory,
   maxHeightPx: maxHeightPx,
+  allowRenderWarnings: allowRenderWarnings,
 );
+
+/// Inspect the complete project for dialogue fallback, missing-glyph and
+/// overflow warnings before the user confirms a comic export.
+Future<List<String>> studioComicRenderWarnings({
+  required StudioProjectHandle handle,
+}) => RustLib.instance.api.crateApiStudioComicRenderWarnings(handle: handle);
 
 /// Dispatch an editor command against the active page document. Page
 /// activation itself is navigation, while drawing and layer commands remain
@@ -1346,6 +1369,23 @@ Future<ComicProjectHandle> comicProjectFromJson({required List<int> bytes}) =>
 Future<void> closeComicProject({required ComicProjectHandle handle}) =>
     RustLib.instance.api.crateApiCloseComicProject(handle: handle);
 
+/// Inspect a PSD without changing the current document.
+Future<PsdImportInspectionView> inspectPsdImport({required String path}) =>
+    RustLib.instance.api.crateApiInspectPsdImport(path: path);
+
+/// Open a PSD as a fully validated editable candidate document.
+///
+/// Construction is isolated from the active UI document. Hosts must not
+/// replace their current handle until this function succeeds and the normal
+/// document replacement barrier has drained accepted input.
+Future<DocumentHandle> openEditablePsd({
+  required DocumentHandle activeHandle,
+  required String path,
+}) => RustLib.instance.api.crateApiOpenEditablePsd(
+  activeHandle: activeHandle,
+  path: path,
+);
+
 /// Create a new transparent sRGB document using the stable v1 defaults.
 Future<DocumentHandle> createDefaultDocument({
   required BigInt id,
@@ -1775,6 +1815,9 @@ Future<BigInt> updateBrushSettings({
   required double smudge,
   required double wetness,
   required List<double> pressureCurvePoints,
+  required bool pulledString,
+  required double stabilizerDistancePx,
+  required bool catchUpOnEnd,
 }) => RustLib.instance.api.crateApiUpdateBrushSettings(
   handle: handle,
   brushId: brushId,
@@ -1792,6 +1835,9 @@ Future<BigInt> updateBrushSettings({
   smudge: smudge,
   wetness: wetness,
   pressureCurvePoints: pressureCurvePoints,
+  pulledString: pulledString,
+  stabilizerDistancePx: stabilizerDistancePx,
+  catchUpOnEnd: catchUpOnEnd,
 );
 
 /// Update the bounded RGBA color of a Rust-owned brush copy.
@@ -1852,6 +1898,9 @@ Future<void> updateBrushDraft({
   required double rotationJitter,
   required double smudge,
   required double wetness,
+  required bool pulledString,
+  required double stabilizerDistancePx,
+  required bool catchUpOnEnd,
   required List<double> pressureCurvePoints,
 }) => RustLib.instance.api.crateApiUpdateBrushDraft(
   handle: handle,
@@ -1869,6 +1918,9 @@ Future<void> updateBrushDraft({
   rotationJitter: rotationJitter,
   smudge: smudge,
   wetness: wetness,
+  pulledString: pulledString,
+  stabilizerDistancePx: stabilizerDistancePx,
+  catchUpOnEnd: catchUpOnEnd,
   pressureCurvePoints: pressureCurvePoints,
 );
 
@@ -1993,6 +2045,44 @@ Future<BigInt> setLayerBrightnessContrast({
   layerId: layerId,
   brightness: brightness,
   contrast: contrast,
+);
+
+/// Begin a Rust-owned, non-persistent adjustment preview transaction.
+Future<BigInt> beginLayerAdjustmentEdit({
+  required DocumentHandle handle,
+  required BigInt layerId,
+}) => RustLib.instance.api.crateApiBeginLayerAdjustmentEdit(
+  handle: handle,
+  layerId: layerId,
+);
+
+/// Preview one validated adjustment payload without adding history.
+Future<BigInt> updateLayerAdjustmentEdit({
+  required DocumentHandle handle,
+  required BigInt editId,
+  required String adjustmentJson,
+}) => RustLib.instance.api.crateApiUpdateLayerAdjustmentEdit(
+  handle: handle,
+  editId: editId,
+  adjustmentJson: adjustmentJson,
+);
+
+/// Commit the active adjustment preview as one undoable command.
+Future<BigInt> commitLayerAdjustmentEdit({
+  required DocumentHandle handle,
+  required BigInt editId,
+}) => RustLib.instance.api.crateApiCommitLayerAdjustmentEdit(
+  handle: handle,
+  editId: editId,
+);
+
+/// Cancel an adjustment preview and restore its committed settings.
+Future<BigInt> cancelLayerAdjustmentEdit({
+  required DocumentHandle handle,
+  required BigInt editId,
+}) => RustLib.instance.api.crateApiCancelLayerAdjustmentEdit(
+  handle: handle,
+  editId: editId,
 );
 
 /// Replace the ephemeral raster selection with a rectangle in canvas pixels.
@@ -2404,6 +2494,18 @@ Future<List<BigInt>> importKritaBundleVerified({
   sourceSha256: sourceSha256,
 );
 
+/// Import all readable ABR brushes transactionally when the source hash
+/// matches the compatibility report.
+Future<List<BigInt>> importPhotoshopAbrVerified({
+  required DocumentHandle handle,
+  required String path,
+  required List<int> sourceSha256,
+}) => RustLib.instance.api.crateApiImportPhotoshopAbrVerified(
+  handle: handle,
+  path: path,
+  sourceSha256: sourceSha256,
+);
+
 /// Return the original built-in Phase 2 brush library.
 Future<List<BrushSummary>> builtinBrushes() =>
     RustLib.instance.api.crateApiBuiltinBrushes();
@@ -2464,6 +2566,13 @@ Future<void> exportDocument({
   path: path,
   format: format,
 );
+
+/// Export supported raster layers as an editable PSD with a coherent merged composite.
+Future<void> exportEditablePsd({
+  required DocumentHandle handle,
+  required String path,
+}) =>
+    RustLib.instance.api.crateApiExportEditablePsd(handle: handle, path: path);
 
 /// Export the committed in-session stroke history for a local time-lapse tool.
 Future<void> exportTimeLapse({
@@ -2593,6 +2702,252 @@ Future<List<VectorStrokeSummary>> vectorStrokeSummaries({
 }) => RustLib.instance.api.crateApiVectorStrokeSummaries(
   handle: handle,
   layerId: layerId,
+);
+
+/// Read one bounded page of mixed vector summaries in layer order.
+Future<List<VectorObjectSummary>> vectorObjectSummaries({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required int offset,
+  required int limit,
+}) => RustLib.instance.api.crateApiVectorObjectSummaries(
+  handle: handle,
+  layerId: layerId,
+  offset: offset,
+  limit: limit,
+);
+
+/// Fetch geometry for one selected vector object without projecting its peers.
+Future<VectorObjectSummary?> vectorObjectDetail({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+}) => RustLib.instance.api.crateApiVectorObjectDetail(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+);
+
+/// Return the topmost editable vector object hit by a document-space point.
+Future<BigInt?> hitTestVectorObject({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required double x,
+  required double y,
+  required double tolerancePx,
+}) => RustLib.instance.api.crateApiHitTestVectorObject(
+  handle: handle,
+  layerId: layerId,
+  x: x,
+  y: y,
+  tolerancePx: tolerancePx,
+);
+
+/// Stage a recognized shape for preview without changing committed artwork.
+/// A new preview replaces the previous candidate for this document.
+Future<VectorCandidateView> previewVectorShape({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt strokeId,
+}) => RustLib.instance.api.crateApiPreviewVectorShape(
+  handle: handle,
+  layerId: layerId,
+  strokeId: strokeId,
+);
+
+/// Stage a fitted curve for preview without changing committed artwork.
+Future<VectorCandidateView> previewVectorCurveFit({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt strokeId,
+  required double tolerancePx,
+}) => RustLib.instance.api.crateApiPreviewVectorCurveFit(
+  handle: handle,
+  layerId: layerId,
+  strokeId: strokeId,
+  tolerancePx: tolerancePx,
+);
+
+/// Stage a translated legacy vector stroke for drag preview. Confirmed samples
+/// and their pressure/tilt values are preserved; document pixels change only
+/// when the returned candidate is applied.
+Future<VectorCandidateView> previewVectorLegacyTranslation({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt strokeId,
+  required double translationX,
+  required double translationY,
+}) => RustLib.instance.api.crateApiPreviewVectorLegacyTranslation(
+  handle: handle,
+  layerId: layerId,
+  strokeId: strokeId,
+  translationX: translationX,
+  translationY: translationY,
+);
+
+/// Constrain a recognized rectangle to a square (`0`) or ellipse to a circle
+/// (`1`) while retaining the current candidate token and its source archive.
+Future<VectorCandidateView> previewVectorShapeConstraint({
+  required DocumentHandle handle,
+  required BigInt token,
+  required int constraint,
+}) => RustLib.instance.api.crateApiPreviewVectorShapeConstraint(
+  handle: handle,
+  token: token,
+  constraint: constraint,
+);
+
+/// Preview moving an anchor while translating both absolute handles.
+Future<VectorCandidateView> previewVectorAnchorMove({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required int subpath,
+  required int anchor,
+  required double horizontalDelta,
+  required double verticalDelta,
+}) => RustLib.instance.api.crateApiPreviewVectorAnchorMove(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  subpath: subpath,
+  anchor: anchor,
+  horizontalDelta: horizontalDelta,
+  verticalDelta: verticalDelta,
+);
+
+/// Preview moving an absolute incoming or outgoing handle.
+Future<VectorCandidateView> previewVectorHandleMove({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required int subpath,
+  required int anchor,
+  required bool incoming,
+  required double handleX,
+  required double handleY,
+}) => RustLib.instance.api.crateApiPreviewVectorHandleMove(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  subpath: subpath,
+  anchor: anchor,
+  incoming: incoming,
+  handleX: handleX,
+  handleY: handleY,
+);
+
+/// Preview changing an anchor between independent corner and smooth handles.
+Future<VectorCandidateView> previewVectorAnchorSmooth({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required int subpath,
+  required int anchor,
+  required bool smooth,
+}) => RustLib.instance.api.crateApiPreviewVectorAnchorSmooth(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  subpath: subpath,
+  anchor: anchor,
+  smooth: smooth,
+);
+
+/// Preview splitting a cubic segment at its normalized parameter.
+Future<VectorCandidateView> previewVectorSegmentSplit({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required int subpath,
+  required int segment,
+  required double t,
+}) => RustLib.instance.api.crateApiPreviewVectorSegmentSplit(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  subpath: subpath,
+  segment: segment,
+  t: t,
+);
+
+/// Preview deleting an anchor, subject to open/closed path minimums.
+Future<VectorCandidateView> previewVectorAnchorDelete({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required int subpath,
+  required int anchor,
+}) => RustLib.instance.api.crateApiPreviewVectorAnchorDelete(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  subpath: subpath,
+  anchor: anchor,
+);
+
+/// Preview translation, rotation, and positive uniform scaling of a path.
+Future<VectorCandidateView> previewVectorPathTransform({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required double translationX,
+  required double translationY,
+  required double rotationDegrees,
+  required double uniformScale,
+}) => RustLib.instance.api.crateApiPreviewVectorPathTransform(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  translationX: translationX,
+  translationY: translationY,
+  rotationDegrees: rotationDegrees,
+  uniformScale: uniformScale,
+);
+
+/// Apply the current preview candidate as one undoable replacement. The
+/// revision and engine-generation checks run while holding the document-handle
+/// gate, so a page replacement or intervening edit cannot publish stale work.
+Future<BigInt> applyVectorCandidate({
+  required DocumentHandle handle,
+  required BigInt token,
+}) => RustLib.instance.api.crateApiApplyVectorCandidate(
+  handle: handle,
+  token: token,
+);
+
+/// Discard a staged preview. Cancellation never mutates document content.
+Future<void> cancelVectorCandidate({
+  required DocumentHandle handle,
+  required BigInt token,
+}) => RustLib.instance.api.crateApiCancelVectorCandidate(
+  handle: handle,
+  token: token,
+);
+
+/// Restore the archived sampled stroke as one undoable replacement.
+Future<BigInt> restoreVectorOriginalInk({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+}) => RustLib.instance.api.crateApiRestoreVectorOriginalInk(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+);
+
+/// Generate ordinary Bézier paths from a selected path and insert them as one
+/// revision-checked, undoable vector patch.
+Future<List<BigInt>> repeatVectorPath({
+  required DocumentHandle handle,
+  required BigInt layerId,
+  required BigInt objectId,
+  required VectorRepeatRequest request,
+}) => RustLib.instance.api.crateApiRepeatVectorPath(
+  handle: handle,
+  layerId: layerId,
+  objectId: objectId,
+  request: request,
 );
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ComicProjectHandle>>
@@ -2784,7 +3139,11 @@ class BrushSummary {
   final double opacity;
   final double spacing;
   final double smoothing;
+  final bool pulledString;
+  final double stabilizerDistancePx;
+  final bool catchUpOnEnd;
   final double pressureSize;
+  final bool pressureSizeReplace;
   final double pressureOpacity;
   final double hardness;
   final double textureScale;
@@ -2806,7 +3165,11 @@ class BrushSummary {
     required this.opacity,
     required this.spacing,
     required this.smoothing,
+    required this.pulledString,
+    required this.stabilizerDistancePx,
+    required this.catchUpOnEnd,
     required this.pressureSize,
+    required this.pressureSizeReplace,
     required this.pressureOpacity,
     required this.hardness,
     required this.textureScale,
@@ -2830,7 +3193,11 @@ class BrushSummary {
       opacity.hashCode ^
       spacing.hashCode ^
       smoothing.hashCode ^
+      pulledString.hashCode ^
+      stabilizerDistancePx.hashCode ^
+      catchUpOnEnd.hashCode ^
       pressureSize.hashCode ^
+      pressureSizeReplace.hashCode ^
       pressureOpacity.hashCode ^
       hardness.hashCode ^
       textureScale.hashCode ^
@@ -2856,7 +3223,11 @@ class BrushSummary {
           opacity == other.opacity &&
           spacing == other.spacing &&
           smoothing == other.smoothing &&
+          pulledString == other.pulledString &&
+          stabilizerDistancePx == other.stabilizerDistancePx &&
+          catchUpOnEnd == other.catchUpOnEnd &&
           pressureSize == other.pressureSize &&
+          pressureSizeReplace == other.pressureSizeReplace &&
           pressureOpacity == other.pressureOpacity &&
           hardness == other.hardness &&
           textureScale == other.textureScale &&
@@ -3539,6 +3910,9 @@ class LayerSummary {
   final int? labelRgba;
   final int adjustmentBrightness;
   final int adjustmentContrast;
+
+  /// Canonical JSON for the current typed adjustment parameters, when set.
+  final String? adjustmentJson;
   final bool canDrag;
   final String? dragReason;
   final bool canReceiveLayers;
@@ -3575,6 +3949,7 @@ class LayerSummary {
     this.labelRgba,
     required this.adjustmentBrightness,
     required this.adjustmentContrast,
+    this.adjustmentJson,
     required this.canDrag,
     this.dragReason,
     required this.canReceiveLayers,
@@ -3613,6 +3988,7 @@ class LayerSummary {
       labelRgba.hashCode ^
       adjustmentBrightness.hashCode ^
       adjustmentContrast.hashCode ^
+      adjustmentJson.hashCode ^
       canDrag.hashCode ^
       dragReason.hashCode ^
       canReceiveLayers.hashCode ^
@@ -3653,6 +4029,7 @@ class LayerSummary {
           labelRgba == other.labelRgba &&
           adjustmentBrightness == other.adjustmentBrightness &&
           adjustmentContrast == other.adjustmentContrast &&
+          adjustmentJson == other.adjustmentJson &&
           canDrag == other.canDrag &&
           dragReason == other.dragReason &&
           canReceiveLayers == other.canReceiveLayers &&
@@ -3668,6 +4045,257 @@ class LayerSummary {
           canApplyMask == other.canApplyMask &&
           applyMaskReason == other.applyMaskReason &&
           mergeDownReason == other.mergeDownReason;
+}
+
+/// Bounded structural and compatibility report shown before PSD import.
+class PsdImportInspectionView {
+  final int widthPx;
+  final int heightPx;
+  final int depth;
+  final int layerCount;
+  final bool editableImportAvailable;
+  final bool flattenedImportAvailable;
+  final List<String> supportedFeatures;
+  final List<String> incompatibilities;
+  final List<String> flattenedImportIssues;
+  final BigInt estimatedEditableWorkingSetBytes;
+  final BigInt estimatedFlattenedWorkingSetBytes;
+
+  const PsdImportInspectionView({
+    required this.widthPx,
+    required this.heightPx,
+    required this.depth,
+    required this.layerCount,
+    required this.editableImportAvailable,
+    required this.flattenedImportAvailable,
+    required this.supportedFeatures,
+    required this.incompatibilities,
+    required this.flattenedImportIssues,
+    required this.estimatedEditableWorkingSetBytes,
+    required this.estimatedFlattenedWorkingSetBytes,
+  });
+
+  @override
+  int get hashCode =>
+      widthPx.hashCode ^
+      heightPx.hashCode ^
+      depth.hashCode ^
+      layerCount.hashCode ^
+      editableImportAvailable.hashCode ^
+      flattenedImportAvailable.hashCode ^
+      supportedFeatures.hashCode ^
+      incompatibilities.hashCode ^
+      flattenedImportIssues.hashCode ^
+      estimatedEditableWorkingSetBytes.hashCode ^
+      estimatedFlattenedWorkingSetBytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PsdImportInspectionView &&
+          runtimeType == other.runtimeType &&
+          widthPx == other.widthPx &&
+          heightPx == other.heightPx &&
+          depth == other.depth &&
+          layerCount == other.layerCount &&
+          editableImportAvailable == other.editableImportAvailable &&
+          flattenedImportAvailable == other.flattenedImportAvailable &&
+          supportedFeatures == other.supportedFeatures &&
+          incompatibilities == other.incompatibilities &&
+          flattenedImportIssues == other.flattenedImportIssues &&
+          estimatedEditableWorkingSetBytes ==
+              other.estimatedEditableWorkingSetBytes &&
+          estimatedFlattenedWorkingSetBytes ==
+              other.estimatedFlattenedWorkingSetBytes;
+}
+
+/// Immutable preview projection for one staged shape-recognition or curve-fit
+/// candidate. Geometry stores six `f64` values per anchor in document pixels:
+/// position, incoming handle, and outgoing handle.
+class VectorCandidateView {
+  final BigInt token;
+  final BigInt sourceId;
+  final BigInt revision;
+  final bool matched;
+  final String kind;
+
+  /// Legacy sampled points in `(x, y, pressure, tilt)` groups, when present.
+  final Float64List points;
+  final Float64List geometry;
+  final Uint32List subpathStarts;
+  final List<bool> closed;
+  final int strokeRgba;
+  final double strokeWidth;
+  final String notice;
+
+  const VectorCandidateView({
+    required this.token,
+    required this.sourceId,
+    required this.revision,
+    required this.matched,
+    required this.kind,
+    required this.points,
+    required this.geometry,
+    required this.subpathStarts,
+    required this.closed,
+    required this.strokeRgba,
+    required this.strokeWidth,
+    required this.notice,
+  });
+
+  @override
+  int get hashCode =>
+      token.hashCode ^
+      sourceId.hashCode ^
+      revision.hashCode ^
+      matched.hashCode ^
+      kind.hashCode ^
+      points.hashCode ^
+      geometry.hashCode ^
+      subpathStarts.hashCode ^
+      closed.hashCode ^
+      strokeRgba.hashCode ^
+      strokeWidth.hashCode ^
+      notice.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VectorCandidateView &&
+          runtimeType == other.runtimeType &&
+          token == other.token &&
+          sourceId == other.sourceId &&
+          revision == other.revision &&
+          matched == other.matched &&
+          kind == other.kind &&
+          points == other.points &&
+          geometry == other.geometry &&
+          subpathStarts == other.subpathStarts &&
+          closed == other.closed &&
+          strokeRgba == other.strokeRgba &&
+          strokeWidth == other.strokeWidth &&
+          notice == other.notice;
+}
+
+/// Bounded ordered projection of a legacy ink or editable Bézier object.
+class VectorObjectSummary {
+  final BigInt id;
+  final String kind;
+  final int pointCount;
+  final Float32List points;
+  final Float64List geometry;
+  final Uint32List subpathStarts;
+  final List<bool> closed;
+  final bool hasSourceArchive;
+  final double minX;
+  final double minY;
+  final double maxX;
+  final double maxY;
+
+  const VectorObjectSummary({
+    required this.id,
+    required this.kind,
+    required this.pointCount,
+    required this.points,
+    required this.geometry,
+    required this.subpathStarts,
+    required this.closed,
+    required this.hasSourceArchive,
+    required this.minX,
+    required this.minY,
+    required this.maxX,
+    required this.maxY,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      kind.hashCode ^
+      pointCount.hashCode ^
+      points.hashCode ^
+      geometry.hashCode ^
+      subpathStarts.hashCode ^
+      closed.hashCode ^
+      hasSourceArchive.hashCode ^
+      minX.hashCode ^
+      minY.hashCode ^
+      maxX.hashCode ^
+      maxY.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VectorObjectSummary &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          kind == other.kind &&
+          pointCount == other.pointCount &&
+          points == other.points &&
+          geometry == other.geometry &&
+          subpathStarts == other.subpathStarts &&
+          closed == other.closed &&
+          hasSourceArchive == other.hasSourceArchive &&
+          minX == other.minX &&
+          minY == other.minY &&
+          maxX == other.maxX &&
+          maxY == other.maxY;
+}
+
+/// Materialized Bézier repeat operation accepted by the vector editor.
+enum VectorRepeatMode {
+  radial,
+  grid,
+  mirrorVertical,
+  mirrorHorizontal,
+  mirrorBoth,
+}
+
+/// Bounded settings for one atomic repeat of a selected Bézier path.
+class VectorRepeatRequest {
+  final VectorRepeatMode mode;
+  final int copies;
+  final int columns;
+  final int rows;
+  final double spacingX;
+  final double spacingY;
+  final double stepDegrees;
+  final double scalePerCopy;
+
+  const VectorRepeatRequest({
+    required this.mode,
+    required this.copies,
+    required this.columns,
+    required this.rows,
+    required this.spacingX,
+    required this.spacingY,
+    required this.stepDegrees,
+    required this.scalePerCopy,
+  });
+
+  @override
+  int get hashCode =>
+      mode.hashCode ^
+      copies.hashCode ^
+      columns.hashCode ^
+      rows.hashCode ^
+      spacingX.hashCode ^
+      spacingY.hashCode ^
+      stepDegrees.hashCode ^
+      scalePerCopy.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VectorRepeatRequest &&
+          runtimeType == other.runtimeType &&
+          mode == other.mode &&
+          copies == other.copies &&
+          columns == other.columns &&
+          rows == other.rows &&
+          spacingX == other.spacingX &&
+          spacingY == other.spacingY &&
+          stepDegrees == other.stepDegrees &&
+          scalePerCopy == other.scalePerCopy;
 }
 
 /// Bounded editable vector-stroke projection used by the vector inspector.

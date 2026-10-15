@@ -7,9 +7,12 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_web.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
@@ -21,43 +24,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_ComicProjectHandlePtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandle;
+  get rust_arc_decrement_strong_count_ComicProjectHandlePtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandle;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_CompositeTilesSnapshotHandlePtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle;
+  get rust_arc_decrement_strong_count_CompositeTilesSnapshotHandlePtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_DocumentHandlePtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle;
+  get rust_arc_decrement_strong_count_DocumentHandlePtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_DocumentSpecPtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpec;
+  get rust_arc_decrement_strong_count_DocumentSpecPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpec;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_EditorCommandPtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommand;
+  get rust_arc_decrement_strong_count_EditorCommandPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommand;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_EngineErrorPtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError;
+  get rust_arc_decrement_strong_count_EngineErrorPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_EngineEventPtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEvent;
+  get rust_arc_decrement_strong_count_EngineEventPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEvent;
 
-  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_LayerPtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayer;
-
-  CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_LiveSurfaceHandlePtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandle;
+  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_LayerPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayer;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_StudioProjectHandlePtr =>
-      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandle;
+  get rust_arc_decrement_strong_count_LiveSurfaceHandlePtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandle;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_StudioProjectHandlePtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandle;
 
   @protected
   ComicProjectHandle
@@ -246,6 +249,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
+  VectorObjectSummary dco_decode_box_autoadd_vector_object_summary(dynamic raw);
+
+  @protected
+  VectorRepeatRequest dco_decode_box_autoadd_vector_repeat_request(dynamic raw);
+
+  @protected
   BrushImportInspectionView dco_decode_brush_import_inspection_view(
     dynamic raw,
   );
@@ -304,6 +313,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_32(dynamic raw);
 
   @protected
+  double dco_decode_f_64(dynamic raw);
+
+  @protected
   HistoryEntryView dco_decode_history_entry_view(dynamic raw);
 
   @protected
@@ -338,6 +350,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BigInt> dco_decode_list_U128(dynamic raw);
+
+  @protected
+  List<bool> dco_decode_list_bool(dynamic raw);
 
   @protected
   List<BrushPreviewPoint> dco_decode_list_brush_preview_point(dynamic raw);
@@ -393,6 +408,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Float32List dco_decode_list_prim_f_32_strict(dynamic raw);
 
   @protected
+  Float64List dco_decode_list_prim_f_64_strict(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_i_32_loose(dynamic raw);
 
   @protected
@@ -411,6 +429,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<VectorObjectSummary> dco_decode_list_vector_object_summary(dynamic raw);
+
+  @protected
   List<VectorStrokeSummary> dco_decode_list_vector_stroke_summary(dynamic raw);
 
   @protected
@@ -423,7 +444,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
+  VectorObjectSummary? dco_decode_opt_box_autoadd_vector_object_summary(
+    dynamic raw,
+  );
+
+  @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  PsdImportInspectionView dco_decode_psd_import_inspection_view(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -442,6 +471,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BigInt dco_decode_usize(dynamic raw);
+
+  @protected
+  VectorCandidateView dco_decode_vector_candidate_view(dynamic raw);
+
+  @protected
+  VectorObjectSummary dco_decode_vector_object_summary(dynamic raw);
+
+  @protected
+  VectorRepeatMode dco_decode_vector_repeat_mode(dynamic raw);
+
+  @protected
+  VectorRepeatRequest dco_decode_vector_repeat_request(dynamic raw);
 
   @protected
   VectorStrokeSummary dco_decode_vector_stroke_summary(dynamic raw);
@@ -633,6 +674,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  VectorObjectSummary sse_decode_box_autoadd_vector_object_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  VectorRepeatRequest sse_decode_box_autoadd_vector_repeat_request(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BrushImportInspectionView sse_decode_brush_import_inspection_view(
     SseDeserializer deserializer,
   );
@@ -711,6 +762,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
   HistoryEntryView sse_decode_history_entry_view(SseDeserializer deserializer);
 
   @protected
@@ -749,6 +803,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<BigInt> sse_decode_list_U128(SseDeserializer deserializer);
+
+  @protected
+  List<bool> sse_decode_list_bool(SseDeserializer deserializer);
 
   @protected
   List<BrushPreviewPoint> sse_decode_list_brush_preview_point(
@@ -816,6 +873,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Float32List sse_decode_list_prim_f_32_strict(SseDeserializer deserializer);
 
   @protected
+  Float64List sse_decode_list_prim_f_64_strict(SseDeserializer deserializer);
+
+  @protected
   List<int> sse_decode_list_prim_i_32_loose(SseDeserializer deserializer);
 
   @protected
@@ -834,6 +894,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<VectorObjectSummary> sse_decode_list_vector_object_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<VectorStrokeSummary> sse_decode_list_vector_stroke_summary(
     SseDeserializer deserializer,
   );
@@ -848,7 +913,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  VectorObjectSummary? sse_decode_opt_box_autoadd_vector_object_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  PsdImportInspectionView sse_decode_psd_import_inspection_view(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -867,6 +942,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BigInt sse_decode_usize(SseDeserializer deserializer);
+
+  @protected
+  VectorCandidateView sse_decode_vector_candidate_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  VectorObjectSummary sse_decode_vector_object_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  VectorRepeatMode sse_decode_vector_repeat_mode(SseDeserializer deserializer);
+
+  @protected
+  VectorRepeatRequest sse_decode_vector_repeat_request(
+    SseDeserializer deserializer,
+  );
 
   @protected
   VectorStrokeSummary sse_decode_vector_stroke_summary(
@@ -1089,6 +1182,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_vector_object_summary(
+    VectorObjectSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_vector_repeat_request(
+    VectorRepeatRequest self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_brush_import_inspection_view(
     BrushImportInspectionView self,
     SseSerializer serializer,
@@ -1182,6 +1287,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
   void sse_encode_history_entry_view(
     HistoryEntryView self,
     SseSerializer serializer,
@@ -1227,6 +1335,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_U128(List<BigInt> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_bool(List<bool> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_brush_preview_point(
@@ -1313,6 +1424,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_prim_f_64_strict(
+    Float64List self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_i_32_loose(
     List<int> self,
     SseSerializer serializer,
@@ -1346,6 +1463,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_vector_object_summary(
+    List<VectorObjectSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_vector_stroke_summary(
     List<VectorStrokeSummary> self,
     SseSerializer serializer,
@@ -1361,8 +1484,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_vector_object_summary(
+    VectorObjectSummary? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_list_prim_u_8_strict(
     Uint8List? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_psd_import_inspection_view(
+    PsdImportInspectionView self,
     SseSerializer serializer,
   );
 
@@ -1383,6 +1518,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_usize(BigInt self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_vector_candidate_view(
+    VectorCandidateView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_vector_object_summary(
+    VectorObjectSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_vector_repeat_mode(
+    VectorRepeatMode self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_vector_repeat_request(
+    VectorRepeatRequest self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_vector_stroke_summary(

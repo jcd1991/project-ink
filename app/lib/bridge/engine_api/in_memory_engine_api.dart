@@ -9,6 +9,30 @@ import '../../tools/brush_library.dart'
     show BrushCurvePointView, BrushPreviewPointView;
 
 const int _additionalBuiltinBrushIdBase = 4000000000000000;
+const List<double> _starterPressureCurvePoints = <double>[
+  0,
+  0,
+  0.003,
+  0.005,
+  0.006,
+  0.02,
+  0.01,
+  0.08,
+  0.015,
+  0.3,
+  0.02,
+  0.45,
+  0.04,
+  0.63,
+  0.08,
+  0.78,
+  0.15,
+  0.9,
+  0.3,
+  0.99,
+  1,
+  1,
+];
 
 class InMemoryEngineApi implements EngineApi {
   InMemoryEngineApi();
@@ -20,6 +44,8 @@ class InMemoryEngineApi implements EngineApi {
   ];
   int? activeBrushColorRgba;
   int _nextOpacityEditId = 1;
+  int _nextAdjustmentEditId = 1;
+  final Map<int, int> _adjustmentEdits = <int, int>{};
   int _nextBrushDraft = 1;
   final Set<int> _brushDrafts = <int>{};
   Uint8List? _comicBytes;
@@ -99,6 +125,9 @@ class InMemoryEngineApi implements EngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   }) async {
     if (brushId < 0 ||
         !diameter.isFinite ||
@@ -117,6 +146,12 @@ class InMemoryEngineApi implements EngineApi {
       throw ArgumentError('invalid brush settings');
     }
     _validateCurvePoints(pressureCurvePoints);
+    if (!stabilizerDistancePx.isFinite ||
+        stabilizerDistancePx < 0 ||
+        stabilizerDistancePx > 100 ||
+        (!pulledString && catchUpOnEnd)) {
+      throw ArgumentError('invalid path stabilizer settings');
+    }
   }
 
   @override
@@ -144,6 +179,9 @@ class InMemoryEngineApi implements EngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   }) async {
     if (!_brushDrafts.contains(draftId)) {
       throw StateError('brush draft is not active');
@@ -164,6 +202,9 @@ class InMemoryEngineApi implements EngineApi {
       rotationJitter: rotationJitter,
       smudge: smudge,
       wetness: wetness,
+      pulledString: pulledString,
+      stabilizerDistancePx: stabilizerDistancePx,
+      catchUpOnEnd: catchUpOnEnd,
     );
   }
 
@@ -252,6 +293,49 @@ class InMemoryEngineApi implements EngineApi {
   }
 
   @override
+  Future<int> beginLayerAdjustmentEdit({required int layerId}) async {
+    final layer = _layers.where((candidate) => candidate.id == layerId);
+    if (layer.isEmpty || layer.first.kind != 'Adjustment') {
+      throw ArgumentError('adjustment preview requires an adjustment layer');
+    }
+    final id = _nextAdjustmentEditId++;
+    _adjustmentEdits[id] = layerId;
+    return id;
+  }
+
+  @override
+  Future<void> updateLayerAdjustmentEdit({
+    required int editId,
+    required String adjustmentJson,
+  }) async {
+    final layerId = _adjustmentEdits[editId];
+    if (layerId == null || adjustmentJson.length > 4096) {
+      throw ArgumentError('invalid adjustment preview');
+    }
+    final decoded = jsonDecode(adjustmentJson);
+    if (decoded is! Map<String, dynamic> || decoded.length != 1) {
+      throw ArgumentError('invalid adjustment preview payload');
+    }
+    // The in-memory adapter has no compositor; accept the transaction without
+    // replacing the layer summary and losing unrelated projected properties.
+    _revision++;
+  }
+
+  @override
+  Future<void> commitLayerAdjustmentEdit({required int editId}) async {
+    if (_adjustmentEdits.remove(editId) == null) {
+      throw ArgumentError('adjustment edit is no longer active');
+    }
+    _revision++;
+  }
+
+  @override
+  Future<void> cancelLayerAdjustmentEdit({required int editId}) async {
+    if (_adjustmentEdits.remove(editId) == null) return;
+    _revision++;
+  }
+
+  @override
   Future<void> setVectorPoint({
     required int layerId,
     required int strokeId,
@@ -324,6 +408,30 @@ class InMemoryEngineApi implements EngineApi {
       importerVersion: 'in-memory-test',
     );
   }
+
+  @override
+  Future<PsdImportInspectionView> inspectPsdImport(String path) async {
+    if (path.isEmpty) throw ArgumentError('invalid PSD inspection path');
+    return const PsdImportInspectionView(
+      widthPx: 256,
+      heightPx: 256,
+      depth: 8,
+      layerCount: 1,
+      editableImportAvailable: false,
+      flattenedImportAvailable: true,
+      supportedFeatures: <String>['RGB 8-bit composite'],
+      incompatibilities: <String>['Editable PSD conversion is not available.'],
+      flattenedImportIssues: <String>[],
+      estimatedEditableWorkingSetBytes: 0,
+      estimatedFlattenedWorkingSetBytes: 0,
+    );
+  }
+
+  @override
+  Future<EngineApi> openEditablePsdCandidate(String path) async =>
+      throw UnsupportedError(
+        'Editable PSD candidates require the Rust engine.',
+      );
 
   @override
   Future<BrushImportReportView> convertBrushImport(String path) async {
@@ -405,6 +513,17 @@ class InMemoryEngineApi implements EngineApi {
   ) async {
     if (path.isEmpty || sourceSha256.length != 32) {
       throw ArgumentError('invalid Krita bundle verification hash');
+    }
+    return <int>[13, 14];
+  }
+
+  @override
+  Future<List<int>> importPhotoshopAbrVerified(
+    String path,
+    Uint8List sourceSha256,
+  ) async {
+    if (path.isEmpty || sourceSha256.length != 32) {
+      throw ArgumentError('invalid Photoshop ABR verification hash');
     }
     return <int>[13, 14];
   }
@@ -1169,121 +1288,212 @@ class InMemoryEngineApi implements EngineApi {
   }
 
   @override
+  Future<void> exportEditablePsd(String path) async {
+    if (path.isEmpty) throw ArgumentError('invalid PSD export path');
+    throw UnsupportedError('Editable PSD export requires the Rust engine.');
+  }
+
+  @override
   Future<List<BrushSummaryView>> builtinBrushes() async => const [
     BrushSummaryView(
       id: 1,
       name: 'Technical Pen',
       isBuiltin: true,
       tags: ['ink'],
+      diameterPx: 12,
+      pressureSize: 1,
+      pressureSizeReplace: true,
+      pressureCurvePoints: <double>[
+        0,
+        0.12,
+        0.003,
+        0.13,
+        0.006,
+        0.15,
+        0.01,
+        0.2,
+        0.015,
+        0.24,
+        0.02,
+        0.27,
+        0.04,
+        0.32,
+        0.08,
+        0.36,
+        0.12,
+        0.4,
+        0.2,
+        0.56,
+        0.3,
+        0.75,
+        0.42,
+        0.9,
+        0.55,
+        0.96,
+        1,
+        1,
+      ],
     ),
     BrushSummaryView(
       id: 2,
       name: 'HB Sketch Pencil',
       isBuiltin: true,
       tags: ['sketch'],
+      pressureSize: 0.55,
+      pressureOpacity: 0.35,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 3,
       name: 'Opaque Round',
       isBuiltin: true,
       tags: ['paint'],
+      pressureSize: 0.8,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 4,
       name: 'Soft Airbrush',
       isBuiltin: true,
       tags: ['paint'],
+      pressureOpacity: 0.85,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 5,
       name: 'Marker',
       isBuiltin: true,
       tags: ['ink', 'paint'],
+      pressureSize: 0.55,
+      pressureOpacity: 0.3,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
-    BrushSummaryView(id: 6, name: 'G-Pen', isBuiltin: true, tags: ['ink']),
+    BrushSummaryView(
+      id: 6,
+      name: 'G-Pen',
+      isBuiltin: true,
+      tags: ['ink'],
+      pressureSize: 0.85,
+      pressureCurvePoints: _starterPressureCurvePoints,
+    ),
     BrushSummaryView(
       id: 7,
       name: 'Dry Gouache',
       isBuiltin: true,
       tags: ['paint'],
+      pressureSize: 0.25,
+      pressureOpacity: 0.35,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 8,
       name: 'Digital Watercolor Wash',
       isBuiltin: true,
       tags: ['watercolor'],
+      pressureOpacity: 0.45,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 9,
       name: 'Watercolor Blender',
       isBuiltin: true,
       tags: ['watercolor'],
+      pressureSize: 0.2,
+      pressureOpacity: 0.4,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 10,
       name: 'Ink Spatter',
       isBuiltin: true,
       tags: ['effect'],
+      pressureSize: 0.45,
+      pressureOpacity: 0.45,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 11,
       name: 'Ribbon Chain',
       isBuiltin: true,
       tags: ['effect'],
+      pressureSize: 0.65,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: 12,
       name: 'Acrylic Rake',
       isBuiltin: true,
       tags: ['paint'],
+      pressureSize: 0.45,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 1,
       name: 'Soft Graphite',
       isBuiltin: true,
       tags: ['sketch', 'pencil', 'soft'],
+      pressureSize: 0.62,
+      pressureOpacity: 0.35,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 2,
       name: 'Charcoal',
       isBuiltin: true,
       tags: ['sketch', 'charcoal', 'texture'],
+      pressureSize: 0.62,
+      pressureOpacity: 0.4,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 3,
       name: 'Brush Pen',
       isBuiltin: true,
       tags: ['ink', 'pressure', 'taper'],
+      pressureSize: 0.62,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 4,
       name: 'Dry Ink',
       isBuiltin: true,
       tags: ['ink', 'texture', 'dry'],
+      pressureSize: 0.62,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 5,
       name: 'Flat Paint',
       isBuiltin: true,
       tags: ['paint', 'opaque', 'flat'],
+      pressureSize: 0.25,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 6,
       name: 'Soft Blender',
       isBuiltin: true,
       tags: ['blend', 'smudge', 'soft'],
+      pressureSize: 0.25,
+      pressureOpacity: 0.3,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 7,
       name: 'Hard Eraser',
       isBuiltin: true,
       tags: ['eraser', 'hard', 'clean'],
+      pressureSize: 0.65,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
     BrushSummaryView(
       id: _additionalBuiltinBrushIdBase + 8,
       name: 'Soft Eraser',
       isBuiltin: true,
       tags: ['eraser', 'soft'],
+      pressureSize: 0.55,
+      pressureOpacity: 0.3,
+      pressureCurvePoints: _starterPressureCurvePoints,
     ),
   ];
 
@@ -1297,6 +1507,211 @@ class InMemoryEngineApi implements EngineApi {
   }) async {
     if (layerId < 0) throw ArgumentError('invalid vector layer');
     return const <VectorStrokeSummaryView>[];
+  }
+
+  @override
+  Future<List<VectorObjectSummaryView>> vectorObjectSummaries({
+    required int layerId,
+    required int offset,
+    required int limit,
+  }) async {
+    if (layerId < 0 || offset < 0 || limit < 1 || limit > 64) {
+      throw ArgumentError('invalid vector summary page');
+    }
+    return const <VectorObjectSummaryView>[];
+  }
+
+  @override
+  Future<VectorObjectSummaryView?> vectorObjectDetail({
+    required int layerId,
+    required int objectId,
+  }) async {
+    if (layerId < 0 || objectId <= 0) {
+      throw ArgumentError('invalid vector object detail target');
+    }
+    return null;
+  }
+
+  @override
+  Future<int?> hitTestVectorObject({
+    required int layerId,
+    required double x,
+    required double y,
+    required double tolerancePx,
+  }) async {
+    if (layerId < 0 ||
+        !x.isFinite ||
+        !y.isFinite ||
+        !tolerancePx.isFinite ||
+        tolerancePx < 0 ||
+        tolerancePx > 4096) {
+      throw ArgumentError('invalid vector hit-test point or tolerance');
+    }
+    return null;
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorShape({
+    required int layerId,
+    required int strokeId,
+  }) async {
+    if (layerId < 0 || strokeId <= 0) {
+      throw ArgumentError('invalid vector shape target');
+    }
+    return VectorCandidateView(
+      token: 0,
+      sourceId: strokeId,
+      revision: _revision,
+      matched: false,
+      kind: 'NoMatch',
+      geometry: const <double>[],
+      subpathStarts: const <int>[],
+      closed: const <bool>[],
+      strokeRgba: 0,
+      strokeWidth: 0,
+      notice: 'No supported shape recognized.',
+    );
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorShapeConstraint({
+    required int candidateToken,
+    required int constraint,
+  }) async {
+    if (candidateToken <= 0 || (constraint != 0 && constraint != 1)) {
+      throw ArgumentError('invalid vector shape constraint');
+    }
+    throw UnsupportedError('shape constraints require the Rust vector engine');
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorLegacyTranslation({
+    required int layerId,
+    required int strokeId,
+    required double tx,
+    required double ty,
+  }) async {
+    if (layerId < 0 || strokeId <= 0 || !tx.isFinite || !ty.isFinite) {
+      throw ArgumentError('invalid legacy vector translation');
+    }
+    throw UnsupportedError('vector previews require the Rust vector engine');
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorCurveFit({
+    required int layerId,
+    required int strokeId,
+    required double tolerancePx,
+  }) async {
+    if (layerId < 0 ||
+        strokeId <= 0 ||
+        !tolerancePx.isFinite ||
+        tolerancePx < 0.25 ||
+        tolerancePx > 8.0) {
+      throw ArgumentError('invalid vector curve-fit target or tolerance');
+    }
+    throw UnsupportedError('curve fitting requires the Rust vector engine');
+  }
+
+  @override
+  Future<VectorCandidateView> previewVectorAnchorMove({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required double dx,
+    required double dy,
+  }) => _unsupportedPathEdit(layerId, objectId, subpath, anchor);
+
+  @override
+  Future<VectorCandidateView> previewVectorHandleMove({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required bool incoming,
+    required double x,
+    required double y,
+  }) => _unsupportedPathEdit(layerId, objectId, subpath, anchor);
+
+  @override
+  Future<VectorCandidateView> previewVectorAnchorSmooth({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+    required bool smooth,
+  }) => _unsupportedPathEdit(layerId, objectId, subpath, anchor);
+
+  @override
+  Future<VectorCandidateView> previewVectorSegmentSplit({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int segment,
+    required double t,
+  }) => _unsupportedPathEdit(layerId, objectId, subpath, segment);
+
+  @override
+  Future<VectorCandidateView> previewVectorAnchorDelete({
+    required int layerId,
+    required int objectId,
+    required int subpath,
+    required int anchor,
+  }) => _unsupportedPathEdit(layerId, objectId, subpath, anchor);
+
+  @override
+  Future<VectorCandidateView> previewVectorPathTransform({
+    required int layerId,
+    required int objectId,
+    required double tx,
+    required double ty,
+    required double rotationDegrees,
+    required double uniformScale,
+  }) => _unsupportedPathEdit(layerId, objectId, 0, 0);
+
+  Future<VectorCandidateView> _unsupportedPathEdit(
+    int layerId,
+    int objectId,
+    int subpath,
+    int index,
+  ) {
+    if (layerId < 0 || objectId <= 0 || subpath < 0 || index < 0) {
+      return Future.error(ArgumentError('invalid Bézier path edit target'));
+    }
+    return Future.error(
+      UnsupportedError('Bézier edits require the Rust vector engine'),
+    );
+  }
+
+  @override
+  Future<void> applyVectorCandidate({required int token}) async {
+    if (token <= 0) throw ArgumentError('invalid vector candidate token');
+  }
+
+  @override
+  Future<void> cancelVectorCandidate({required int token}) async {}
+
+  @override
+  Future<void> restoreVectorOriginalInk({
+    required int layerId,
+    required int objectId,
+  }) async {
+    if (layerId < 0 || objectId <= 0) {
+      throw ArgumentError('invalid vector restoration target');
+    }
+  }
+
+  @override
+  Future<List<int>> repeatVectorPath({
+    required int layerId,
+    required int objectId,
+    required CanvasVectorRepeatOptions options,
+  }) async {
+    if (layerId < 0 || objectId <= 0) {
+      throw ArgumentError('invalid vector repeat target');
+    }
+    throw UnsupportedError('Vector repeat requires the Rust vector engine');
   }
 
   @override
