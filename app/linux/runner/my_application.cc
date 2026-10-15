@@ -34,6 +34,24 @@ static void my_application_activate(GApplication* application) {
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
+  // Flutter bundles the icon beside its assets. Resolve it from the executable
+  // location so the window manager sees the same mark in debug and release
+  // bundles, regardless of the launcher's working directory.
+  g_autofree gchar* executable_path =
+      g_file_read_link("/proc/self/exe", nullptr);
+  if (executable_path != nullptr) {
+    g_autofree gchar* executable_dir = g_path_get_dirname(executable_path);
+    g_autofree gchar* icon_path = g_build_filename(
+        executable_dir, "data", "flutter_assets", "assets", "branding",
+        "project-ink-app-icon-master.png", nullptr);
+    g_autoptr(GError) icon_error = nullptr;
+    GdkPixbuf* icon = gdk_pixbuf_new_from_file(icon_path, &icon_error);
+    if (icon != nullptr) {
+      gtk_window_set_icon(window, icon);
+      g_object_unref(icon);
+    }
+  }
+
   // Use a header bar when running in GNOME as this is the common style used
   // by applications and is the setup most users will be using (e.g. Ubuntu
   // desktop).

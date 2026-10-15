@@ -30,5 +30,6 @@ flutter:
   assets:
     - ../assets/brushes/
     - ../assets/textures/
+    - ../assets/branding/project-ink-app-icon-master.png
     - ../assets/templates/
     - assets/icons/
