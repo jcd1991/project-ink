@@ -208,7 +208,10 @@ double liveStrokePreviewWidthAt(
     preview.pressureCurvePoints,
     pressure,
   );
-  final pressureScale = 1 + preview.pressureSize * mappedPressure;
+  final pressureScale =
+      preview.pressureSizeReplace
+          ? preview.pressureSize * mappedPressure
+          : 1 + preview.pressureSize * mappedPressure;
   return math.max(0.75, preview.width * pressureScale).toDouble();
 }
 
@@ -252,6 +255,7 @@ class LiveStrokePreview {
     required this.color,
     required this.width,
     required this.pressureSize,
+    this.pressureSizeReplace = false,
     this.opacity = 1.0,
     this.pressureOpacity = 0.0,
     required this.documentWidth,
@@ -269,6 +273,7 @@ class LiveStrokePreview {
   final Color color;
   final double width;
   final double pressureSize;
+  final bool pressureSizeReplace;
   final double opacity;
   final double pressureOpacity;
   final int documentWidth;

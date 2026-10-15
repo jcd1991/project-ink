@@ -14,6 +14,7 @@ class DesktopLiveTextureAdapter implements NativeLiveTextureAdapter {
   static const int _headerBytes = 8;
   static const int _recordBytes = 56;
   static const int _maxRecordsPerPacket = 2048;
+  static const int _maxPacketsPerBatch = 4;
 
   final MethodChannel _channel;
 
@@ -71,6 +72,16 @@ class DesktopLiveTextureAdapter implements NativeLiveTextureAdapter {
       'textureId': textureId,
       'packet': packet,
     });
+  }
+
+  @override
+  Future<void> renderDabBatches(int textureId, List<Uint8List> packets) async {
+    if (packets.isEmpty || packets.length > _maxPacketsPerBatch) {
+      throw ArgumentError.value(packets.length, 'packets.length');
+    }
+    for (final packet in packets) {
+      await renderDabs(textureId, packet);
+    }
   }
 
   @override

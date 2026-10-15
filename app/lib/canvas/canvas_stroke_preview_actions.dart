@@ -15,6 +15,7 @@ class CanvasStrokePreviewHost {
     required this.color,
     required this.width,
     required this.pressureSize,
+    this.pressureSizeReplace,
     required this.opacity,
     required this.pressureOpacity,
     this.pressureCurvePoints = _identityPressureCurve,
@@ -37,6 +38,7 @@ class CanvasStrokePreviewHost {
   final Color Function() color;
   final double Function() width;
   final double Function() pressureSize;
+  final bool Function()? pressureSizeReplace;
   final double Function() opacity;
   final double Function() pressureOpacity;
   final List<double> Function() pressureCurvePoints;
@@ -196,6 +198,7 @@ class CanvasStrokePreviewActions implements CanvasTilePreviewActions {
       color: host.color(),
       width: host.width(),
       pressureSize: host.pressureSize(),
+      pressureSizeReplace: host.pressureSizeReplace?.call() ?? false,
       opacity: host.opacity(),
       pressureOpacity: host.pressureOpacity(),
       pressureCurvePoints: host.pressureCurvePoints(),

@@ -51,6 +51,31 @@ void main() {
       adapter.renderDabs(4, Uint8List(8 + 2048 * 56 + 1)),
       throwsArgumentError,
     );
+    await expectLater(
+      adapter.renderDabBatches(4, <Uint8List>[]),
+      throwsArgumentError,
+    );
+    await expectLater(
+      adapter.renderDabBatches(4, List<Uint8List>.filled(5, Uint8List(64))),
+      throwsArgumentError,
+    );
     expect(calls, isEmpty);
   });
+
+  test(
+    'desktop adapter preserves packet ordering in a bounded batch',
+    () async {
+      final adapter = DesktopLiveTextureAdapter(channel: channel);
+      final first = Uint8List(64);
+      final second = Uint8List(64);
+      await adapter.renderDabBatches(4, <Uint8List>[first, second]);
+
+      expect(calls.map((call) => call.method), <String>[
+        'renderDabs',
+        'renderDabs',
+      ]);
+      expect(calls[0].arguments['packet'], first);
+      expect(calls[1].arguments['packet'], second);
+    },
+  );
 }

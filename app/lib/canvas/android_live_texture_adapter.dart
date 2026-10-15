@@ -10,6 +10,7 @@ class AndroidLiveTextureAdapter implements NativeLiveTextureAdapter {
 
   static const String _channelName = 'org.projectink.studio/live_texture_v1';
   static const int _maxRecordsPerPacket = 2048;
+  static const int _maxPacketsPerBatch = 4;
   static const int _headerBytes = 8;
   static const int _recordBytes = 56;
   final MethodChannel _channel;
@@ -70,6 +71,24 @@ class AndroidLiveTextureAdapter implements NativeLiveTextureAdapter {
     await _channel.invokeMethod<void>('renderDabs', <String, Object>{
       'textureId': textureId,
       'packet': packet,
+    });
+  }
+
+  @override
+  Future<void> renderDabBatches(int textureId, List<Uint8List> packets) async {
+    _validateTextureId(textureId);
+    if (packets.isEmpty || packets.length > _maxPacketsPerBatch) {
+      throw ArgumentError.value(packets.length, 'packets.length');
+    }
+    for (final packet in packets) {
+      if (packet.length < _headerBytes ||
+          packet.length > _headerBytes + _maxRecordsPerPacket * _recordBytes) {
+        throw ArgumentError.value(packet.length, 'packet.length');
+      }
+    }
+    await _channel.invokeMethod<void>('renderDabBatches', <String, Object>{
+      'textureId': textureId,
+      'packets': packets,
     });
   }
 

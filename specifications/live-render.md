@@ -78,7 +78,27 @@ The macOS and iOS runners own bounded IOSurface-backed Flutter texture
 registries, connected to the canvas and Rust live-dab lifecycle. On Apple
 targets, unique append-only dab batches are rendered into the retained wgpu
 surface without rebuilding prior dabs. Android uses a bounded
-`SurfaceProducer` texture and hardware-canvas dab presentation. Windows and
+`SurfaceProducer` texture and hardware-canvas presentation. Dabs are recorded
+in cached `RenderNode` groups covering at most eight input sequences and 64 dab
+indices each; new packets re-record only affected groups, and the surface
+replays cached nodes instead of rebuilding circle draw commands for the whole
+stroke on every update. Acknowledgement and cancellation remove or rebuild
+affected groups; viewport changes re-record retained groups with the new
+transform. The surface buffer estimate remains capped at 256 MiB across the
+platform's up-to-three buffers. Flutter submits up to four bounded 2,048-dab
+packets in one channel operation; Android records the whole group and publishes
+one surface frame so a long-stroke drain does not wait for one display frame
+per packet.
+CPU acknowledgements are monotonic per stroke. The Flutter controller merges
+an acknowledgement burst to its highest committed sequence before asking the
+native surface to rebuild, so a CPU commit containing many packet-level
+acknowledgements causes one retained-batch rebuild per stroke rather than one
+full rebuild per sample. As soon as the matching CPU frame is published, the
+Flutter texture is hidden when its retained dabs are fully CPU-covered; native
+batch cleanup may finish afterward without delaying the committed canvas.
+When no retained dabs remain, the native texture is marked unavailable and
+the committed CPU tiles remain the visible result.
+Windows and
 Linux currently use native pixel-buffer texture registration backed by the
 shared `LiveTextureCore` CPU dab rasterizer; this is a presentation/compatibility
 path, not proof of GPU dab rendering on those platforms. Both desktop runners

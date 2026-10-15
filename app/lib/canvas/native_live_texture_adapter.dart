@@ -11,6 +11,9 @@ abstract interface class NativeLiveTextureAdapter {
 
   Future<void> renderDabs(int textureId, Uint8List packet);
 
+  /// Applies a bounded group of packets before publishing one native frame.
+  Future<void> renderDabBatches(int textureId, List<Uint8List> packets);
+
   Future<void> acknowledge(int textureId, BigInt strokeId, int sequence);
 
   Future<void> cancelAll(int textureId);

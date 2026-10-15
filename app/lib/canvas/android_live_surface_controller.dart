@@ -41,9 +41,13 @@ class NativeLiveSurfaceController implements LivePreviewController {
   final ValueNotifier<bool> gpuFrameReady = ValueNotifier<bool>(false);
 
   final Map<_DabKey, Uint8List> _pendingDabs = <_DabKey, Uint8List>{};
+  final Map<BigInt, StrokeAcknowledgement> _pendingAcknowledgements =
+      <BigInt, StrokeAcknowledgement>{};
   Future<void> _work = Future<void>.value();
+  Completer<void>? _acknowledgementFlush;
   bool _pumpRequested = false;
   bool _pumpQueued = false;
+  bool _acknowledgementFlushQueued = false;
   bool _failed = false;
   bool _disposed = false;
   int? _registeredTextureId;
@@ -135,21 +139,73 @@ class NativeLiveSurfaceController implements LivePreviewController {
 
   @override
   Future<void> acknowledge(StrokeAcknowledgement acknowledgement) {
-    return _enqueue(() async {
-      final texture = _registeredTextureId;
-      _pendingDabs.removeWhere(
-        (key, _) =>
-            key.strokeId == acknowledgement.stroke &&
-            key.sequence <= acknowledgement.highestCommittedSequence,
-      );
-      if (texture == null) return;
-      await _textureAdapter.acknowledge(
-        texture,
-        acknowledgement.stroke,
-        acknowledgement.highestCommittedSequence,
-      );
-      gpuFrameReady.value = true;
-    });
+    if (_disposed || _failed) return Future<void>.value();
+    final previous = _pendingAcknowledgements[acknowledgement.stroke];
+    if (previous == null ||
+        acknowledgement.highestCommittedSequence >
+            previous.highestCommittedSequence) {
+      _pendingAcknowledgements[acknowledgement.stroke] = acknowledgement;
+    }
+    final flush = _acknowledgementFlush ??= Completer<void>();
+    _queueAcknowledgementFlush();
+    return flush.future;
+  }
+
+  /// Coalesce the many monotonic CPU acknowledgements from one refresh into a
+  /// single native texture rebuild per stroke. Rebuilding the retained GPU
+  /// batches once per pointer sample made long strokes visibly redraw after
+  /// the authoritative CPU frame had already appeared.
+  void _queueAcknowledgementFlush() {
+    if (_acknowledgementFlushQueued || _disposed || _failed) return;
+    _acknowledgementFlushQueued = true;
+    unawaited(
+      _enqueue(() async {
+        while (_pendingAcknowledgements.isNotEmpty && !_disposed && !_failed) {
+          final acknowledgements = _pendingAcknowledgements.values.toList(
+            growable: false,
+          );
+          _pendingAcknowledgements.clear();
+          final texture = _registeredTextureId;
+          var removedPendingDabs = false;
+          for (final acknowledgement in acknowledgements) {
+            final countBefore = _pendingDabs.length;
+            _pendingDabs.removeWhere(
+              (key, _) =>
+                  key.strokeId == acknowledgement.stroke &&
+                  key.sequence <= acknowledgement.highestCommittedSequence,
+            );
+            removedPendingDabs |= _pendingDabs.length < countBefore;
+          }
+          // The CPU frame that produced these acknowledgements is already
+          // published. Hide any fully covered live texture immediately; the
+          // native surface can rebuild its retained nodes asynchronously.
+          // Waiting for that extra native frame made committed strokes appear
+          // to redraw after the artist had already seen the CPU result.
+          if (removedPendingDabs) {
+            gpuFrameReady.value = _pendingDabs.isNotEmpty;
+          }
+          for (final acknowledgement in acknowledgements) {
+            if (texture == null) continue;
+            await _textureAdapter.acknowledge(
+              texture,
+              acknowledgement.stroke,
+              acknowledgement.highestCommittedSequence,
+            );
+          }
+        }
+        gpuFrameReady.value = _pendingDabs.isNotEmpty;
+      }).then((_) {
+        _acknowledgementFlushQueued = false;
+        if (_pendingAcknowledgements.isNotEmpty && !_disposed && !_failed) {
+          _queueAcknowledgementFlush();
+          return;
+        }
+        _pendingAcknowledgements.clear();
+        final flush = _acknowledgementFlush;
+        _acknowledgementFlush = null;
+        if (flush != null && !flush.isCompleted) flush.complete();
+      }),
+    );
   }
 
   @override
@@ -176,6 +232,7 @@ class NativeLiveSurfaceController implements LivePreviewController {
     }
     await _releaseTexture();
     _pendingDabs.clear();
+    _pendingAcknowledgements.clear();
     textureId.dispose();
     gpuFrameReady.dispose();
   }
@@ -220,31 +277,41 @@ class NativeLiveSurfaceController implements LivePreviewController {
     _pumpQueued = false;
     final texture = _registeredTextureId;
     if (texture == null) return;
-    var remainingFullBatches = 4;
-    do {
-      _pumpRequested = false;
+    _pumpRequested = false;
+    var remainingPackets = 4;
+    var exhaustedPacketBudget = false;
+    var pendingDabCount = _pendingDabs.length;
+    final packets = <Uint8List>[];
+    final recordsByPacket = <List<_DabRecord>>[];
+    while (remainingPackets > 0) {
       final packet = await _engine.drainLiveDabs(limit: _maxRecordsPerPacket);
       final records = _validateAndReadDabs(packet);
-      if (records.isNotEmpty) {
-        if (_pendingDabs.length + records.length > _maxPendingDabs) {
-          throw StateError(
-            '$_platformName live preview retention reached its bound.',
-          );
-        }
-        await _textureAdapter.renderDabs(texture, packet);
+      if (records.isEmpty) break;
+      pendingDabCount += records.length;
+      if (pendingDabCount > _maxPendingDabs) {
+        throw StateError(
+          '$_platformName live preview retention reached its bound.',
+        );
+      }
+      packets.add(packet);
+      recordsByPacket.add(records);
+      remainingPackets--;
+      if (records.length < _maxRecordsPerPacket) break;
+      if (remainingPackets == 0) exhaustedPacketBudget = true;
+    }
+    if (await _engine.drainLiveDabOverflowCount() != 0) {
+      throw StateError('Rust reported confirmed-dab live-preview overflow.');
+    }
+    if (packets.isNotEmpty) {
+      await _textureAdapter.renderDabBatches(texture, packets);
+      for (final records in recordsByPacket) {
         for (final record in records) {
           _pendingDabs[record.key] = record.bytes;
         }
-        gpuFrameReady.value = true;
       }
-      if (await _engine.drainLiveDabOverflowCount() != 0) {
-        throw StateError('Rust reported confirmed-dab live-preview overflow.');
-      }
-      if (records.length == _maxRecordsPerPacket) {
-        remainingFullBatches--;
-        _pumpRequested = remainingFullBatches > 0;
-      }
-    } while (_pumpRequested && !_disposed && !_failed);
+      gpuFrameReady.value = true;
+    }
+    _pumpRequested |= exhaustedPacketBudget;
     if (_pumpRequested && !_disposed && !_failed) pump();
   }
 
@@ -290,6 +357,8 @@ class NativeLiveSurfaceController implements LivePreviewController {
     _failed = true;
     gpuFrameReady.value = false;
     textureId.value = null;
+    _pendingDabs.clear();
+    _pendingAcknowledgements.clear();
     debugPrint(
       'Project Ink $_platformName live preview unavailable; using Flutter preview: $error',
     );

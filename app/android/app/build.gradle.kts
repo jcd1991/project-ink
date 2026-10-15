@@ -29,6 +29,18 @@ android {
         versionName = flutter.versionName
     }
 
+    // Keep trace-enabled debug/profile installs beside the signed alpha so
+    // acceptance tooling can read their private diagnostics with `run-as`
+    // without uninstalling the artist's current app or touching its data.
+    buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+        }
+        getByName("profile") {
+            applicationIdSuffix = ".debug"
+        }
+    }
+
 }
 
 dependencies {

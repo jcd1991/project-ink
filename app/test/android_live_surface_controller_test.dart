@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
@@ -64,10 +65,10 @@ void main() {
       controller.pump();
       await controller.pendingWork;
       final renderCall = calls.singleWhere(
-        (call) => call.method == 'renderDabs',
+        (call) => call.method == 'renderDabBatches',
       );
       expect(renderCall.arguments['textureId'], 0);
-      expect(renderCall.arguments['packet'], engine.packet);
+      expect(renderCall.arguments['packets'], <Uint8List>[engine.packet]);
       expect(controller.gpuFrameReady.value, isTrue);
 
       await controller.acknowledge(
@@ -110,6 +111,121 @@ void main() {
   );
 
   test(
+    'coalesces a stroke acknowledgement burst into one texture rebuild',
+    () async {
+      const stroke = 0x3456;
+      engine.packets = <Uint8List>[
+        _oneDabPacket(strokeId: BigInt.from(stroke), sequence: 1),
+        _oneDabPacket(strokeId: BigInt.from(stroke), sequence: 2),
+        _oneDabPacket(strokeId: BigInt.from(stroke), sequence: 3),
+      ];
+      final controller = AndroidLiveSurfaceController(
+        engine: engine,
+        textureAdapter: AndroidLiveTextureAdapter(channel: channel),
+      );
+      controller.synchronizeViewport(
+        viewportSize: const Size(100, 100),
+        devicePixelRatio: 1,
+        pan: Offset.zero,
+        scale: 1,
+        rotation: 0,
+        mirrored: false,
+        documentWidth: 100,
+        documentHeight: 100,
+      );
+      await controller.pendingWork;
+      controller.pump();
+      await controller.pendingWork;
+      calls.clear();
+
+      await Future.wait(<Future<void>>[
+        for (var sequence = 1; sequence <= 3; sequence++)
+          controller.acknowledge(
+            StrokeAcknowledgement(
+              stroke: BigInt.from(stroke),
+              highestCommittedSequence: sequence,
+              revision: sequence,
+              minTileX: 0,
+              minTileY: 0,
+              maxTileX: 0,
+              maxTileY: 0,
+            ),
+          ),
+      ]);
+
+      final acknowledgements =
+          calls.where((call) => call.method == 'acknowledge').toList();
+      expect(acknowledgements, hasLength(1));
+      expect(acknowledgements.single.arguments['sequence'], 3);
+      expect(controller.gpuFrameReady.value, isFalse);
+      await controller.dispose();
+    },
+  );
+
+  test(
+    'hides CPU-covered live texture before native cleanup finishes',
+    () async {
+      const stroke = 0x7890;
+      final nativeAcknowledgementStarted = Completer<void>();
+      final finishNativeAcknowledgement = Completer<void>();
+      engine.packet = _oneDabPacket(strokeId: BigInt.from(stroke), sequence: 1);
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        if (call.method == 'create') {
+          return <String, Object>{'textureId': 0};
+        }
+        if (call.method == 'acknowledge') {
+          if (!nativeAcknowledgementStarted.isCompleted) {
+            nativeAcknowledgementStarted.complete();
+          }
+          await finishNativeAcknowledgement.future;
+        }
+        return null;
+      });
+      final controller = AndroidLiveSurfaceController(
+        engine: engine,
+        textureAdapter: AndroidLiveTextureAdapter(channel: channel),
+      );
+      controller.synchronizeViewport(
+        viewportSize: const Size(100, 100),
+        devicePixelRatio: 1,
+        pan: Offset.zero,
+        scale: 1,
+        rotation: 0,
+        mirrored: false,
+        documentWidth: 100,
+        documentHeight: 100,
+      );
+      await controller.pendingWork;
+      controller.pump();
+      await controller.pendingWork;
+      expect(controller.gpuFrameReady.value, isTrue);
+
+      final acknowledgement = controller.acknowledge(
+        StrokeAcknowledgement(
+          stroke: BigInt.from(stroke),
+          highestCommittedSequence: 1,
+          revision: 2,
+          minTileX: 0,
+          minTileY: 0,
+          maxTileX: 0,
+          maxTileY: 0,
+        ),
+      );
+      var acknowledgementCompleted = false;
+      unawaited(acknowledgement.then((_) => acknowledgementCompleted = true));
+      await nativeAcknowledgementStarted.future;
+
+      expect(controller.gpuFrameReady.value, isFalse);
+      expect(acknowledgementCompleted, isFalse);
+
+      finishNativeAcknowledgement.complete();
+      await acknowledgement;
+      await controller.dispose();
+    },
+  );
+
+  test(
     'malformed Rust dabs disable the adapter and retain CPU fallback',
     () async {
       engine.packet = Uint8List.fromList(<int>[2, 0, 0]);
@@ -134,7 +250,7 @@ void main() {
       expect(controller.textureId.value, isNull);
       expect(controller.gpuFrameReady.value, isFalse);
       expect(calls.last.method, 'dispose');
-      expect(calls.any((call) => call.method == 'renderDabs'), isFalse);
+      expect(calls.any((call) => call.method == 'renderDabBatches'), isFalse);
       await controller.dispose();
     },
   );
@@ -166,7 +282,7 @@ void main() {
       expect(controller.textureId.value, 0);
       expect(
         calls.map((call) => call.method),
-        containsAll(<String>['create', 'setViewport', 'renderDabs']),
+        containsAll(<String>['create', 'setViewport', 'renderDabBatches']),
       );
       expect(controller.gpuFrameReady.value, isTrue);
 
@@ -179,8 +295,12 @@ void main() {
     'surfaces above the triple-buffer budget are rejected before creation',
     () async {
       final adapter = AndroidLiveTextureAdapter(channel: channel);
+      await adapter.create(width: 4096, height: 4096);
+      expect(calls.single.method, 'create');
+
+      calls.clear();
       await expectLater(
-        adapter.create(width: 8192, height: 8192),
+        adapter.create(width: 4620, height: 4620),
         throwsArgumentError,
       );
       expect(calls, isEmpty);
@@ -226,9 +346,53 @@ void main() {
     controller.pump();
     await controller.pendingWork;
 
-    final renderCall = calls.singleWhere((call) => call.method == 'renderDabs');
-    final packet = renderCall.arguments['packet'] as Uint8List;
+    final renderCall = calls.singleWhere(
+      (call) => call.method == 'renderDabBatches',
+    );
+    final packets =
+        (renderCall.arguments['packets'] as List<Object?>).cast<Uint8List>();
+    final packet = packets.single;
     expect(ByteData.sublistView(packet).getUint32(4, Endian.little), 2);
+    await controller.dispose();
+  });
+
+  test('groups a bounded long-stroke drain into one surface frame', () async {
+    engine.packets = <Uint8List>[
+      _manyDabPacket(2048),
+      _oneDabPacket(strokeId: BigInt.from(0x1234), sequence: 10),
+      Uint8List.fromList(<int>[3, 0, 0, 0, 0, 0, 0, 0]),
+    ];
+    final controller = AndroidLiveSurfaceController(
+      engine: engine,
+      textureAdapter: AndroidLiveTextureAdapter(channel: channel),
+    );
+    controller.synchronizeViewport(
+      viewportSize: const Size(100, 100),
+      devicePixelRatio: 1,
+      pan: Offset.zero,
+      scale: 1,
+      rotation: 0,
+      mirrored: false,
+      documentWidth: 100,
+      documentHeight: 100,
+    );
+    await controller.pendingWork;
+    controller.pump();
+    await controller.pendingWork;
+
+    final renderCalls =
+        calls.where((call) => call.method == 'renderDabBatches').toList();
+    expect(renderCalls, hasLength(1));
+    final packets =
+        (renderCalls.single.arguments['packets'] as List<Object?>)
+            .cast<Uint8List>();
+    expect(packets, hasLength(2));
+    expect(
+      ByteData.sublistView(packets.first).getUint32(4, Endian.little),
+      2048,
+    );
+    expect(ByteData.sublistView(packets.last).getUint32(4, Endian.little), 1);
+    expect(controller.gpuFrameReady.value, isTrue);
     await controller.dispose();
   });
 
@@ -252,6 +416,25 @@ void main() {
       expect(calls, hasLength(1));
     },
   );
+
+  test('Android adapter bounds grouped packet submission', () async {
+    final adapter = AndroidLiveTextureAdapter(channel: channel);
+    final one = _oneDabPacket(strokeId: BigInt.from(8), sequence: 1);
+    await adapter.renderDabBatches(0, <Uint8List>[one, one]);
+    expect(calls.single.method, 'renderDabBatches');
+    expect(calls.single.arguments['packets'], <Uint8List>[one, one]);
+
+    calls.clear();
+    await expectLater(
+      adapter.renderDabBatches(0, <Uint8List>[]),
+      throwsArgumentError,
+    );
+    await expectLater(
+      adapter.renderDabBatches(0, List<Uint8List>.filled(5, one)),
+      throwsArgumentError,
+    );
+    expect(calls, isEmpty);
+  });
 }
 
 Uint8List _oneDabPacket({required BigInt strokeId, required int sequence}) {
@@ -289,11 +472,28 @@ Uint8List _twoDabPacket({required BigInt strokeId, required int sequence}) {
   return packet;
 }
 
+Uint8List _manyDabPacket(int count) {
+  final packet = Uint8List(8 + count * 56);
+  final data = ByteData.sublistView(packet);
+  data.setUint16(0, 3, Endian.little);
+  data.setUint16(2, 0, Endian.little);
+  data.setUint32(4, count, Endian.little);
+  final template = _oneDabPacket(strokeId: BigInt.from(8), sequence: 1);
+  for (var index = 0; index < count; index++) {
+    final offset = 8 + index * 56;
+    packet.setRange(offset, offset + 56, template, 8);
+    data.setUint32(offset + 20, index, Endian.little);
+  }
+  return packet;
+}
+
 class _FakeDabSource implements LiveDabSourceApi {
   Uint8List packet = Uint8List.fromList(<int>[3, 0, 0, 0, 0, 0, 0, 0]);
+  List<Uint8List> packets = <Uint8List>[];
 
   @override
-  Future<Uint8List> drainLiveDabs({int limit = 2048}) async => packet;
+  Future<Uint8List> drainLiveDabs({int limit = 2048}) async =>
+      packets.isEmpty ? packet : packets.removeAt(0);
 
   @override
   Future<int> drainLiveDabOverflowCount() async => 0;
