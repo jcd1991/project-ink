@@ -20,6 +20,20 @@ The example emits one JSON object with:
   and reversible snapshots owned by Rust. It excludes allocator/process RSS,
   worker queue capacity, Flutter image cache, and operating-system overhead.
 
+The raster crate also has a focused release microbenchmark for the copy-on-write
+history snapshot path:
+
+```sh
+cargo bench -p ink-raster --bench tile_store_history
+```
+
+It clones a prepared 64-tile sparse store 10,000 times and reports elapsed and
+average clone time. This isolates snapshot-container cost; it is not a stroke,
+save, or full-document benchmark. On the local arm64 development host during
+the copy-on-write change, the same harness measured 309 ns/clone before and
+11 ns/clone after. These are comparative local observations, not CI thresholds
+or portable latency claims.
+
 The benchmark is a regression signal, not a physical latency claim. Phase 1
 stylus-to-visible-update targets still require timestamped traces on the M1/M4
 iPads and Galaxy S23 Ultra. The legacy CPU recorded-stroke fixture uses

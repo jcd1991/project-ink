@@ -202,28 +202,32 @@ class Phase1PerformanceTrace {
     _rejectedConfirmedSampleCount += summary.confirmedSampleCount;
   }
 
-  void markVisibleUpdate({
+  int markVisibleUpdate({
     required int packetMicros,
     required Duration tileDecode,
     required int dirtyTiles,
   }) {
     _visibleUpdateCount++;
     _dirtyTileCount += dirtyTiles;
-    _append(
-      _pointerToVisibleMicros,
-      math.max(0, _clock.elapsedMicroseconds - packetMicros),
+    final latencyMicros = math.max(
+      0,
+      _clock.elapsedMicroseconds - packetMicros,
     );
+    _append(_pointerToVisibleMicros, latencyMicros);
     _append(_tileDecodeMicros, math.max(0, tileDecode.inMicroseconds));
+    return latencyMicros;
   }
 
   /// Records the first Flutter frame that painted the live path. This
   /// measures app-side packet-to-frame latency, not display scan-out.
-  void markLivePreviewFramePresented({required int packetMicros}) {
+  int markLivePreviewFramePresented({required int packetMicros}) {
     _visibleUpdateCount++;
-    _append(
-      _pointerToVisibleMicros,
-      math.max(0, _clock.elapsedMicroseconds - packetMicros),
+    final latencyMicros = math.max(
+      0,
+      _clock.elapsedMicroseconds - packetMicros,
     );
+    _append(_pointerToVisibleMicros, latencyMicros);
+    return latencyMicros;
   }
 
   Phase1PerformanceSnapshot snapshot() => Phase1PerformanceSnapshot(

@@ -7,7 +7,7 @@ void main() {
   testWidgets('coalesces diagnostics and samples the visible frame once', (
     tester,
   ) async {
-    final events = <String>[];
+    final events = <(String, Map<String, Object?>)>[];
     final trace = Phase1PerformanceTrace();
     var callbackCount = 0;
     var snapshotCount = 0;
@@ -34,7 +34,7 @@ void main() {
           packetMicros: 10,
         );
       },
-      record: (event, fields) => events.add(event),
+      record: (event, fields) => events.add((event, fields)),
       performanceTrace: trace,
       performanceSnapshotCallback: () => (_) => callbackCount++,
     );
@@ -44,7 +44,12 @@ void main() {
     await tester.pumpWidget(const SizedBox());
 
     expect(snapshotCount, 1);
-    expect(events, ['canvas.live_preview_frame']);
+    expect(events.map((event) => event.$1), [
+      'canvas.live_preview_frame',
+      'canvas.pointer_to_visible_sample',
+    ]);
+    expect(events.last.$2['path'], 'live_preview_frame');
+    expect(events.last.$2['packetToVisibleUs'], isA<int>());
     expect(callbackCount, 1);
     expect(trace.snapshot().visibleUpdateCount, 1);
     diagnostics.dispose();

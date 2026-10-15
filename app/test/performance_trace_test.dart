@@ -11,11 +11,12 @@ void main() {
     final trace = Phase1PerformanceTrace(capacity: 3);
     final first = trace.markPacketReceived();
     await Future<void>.delayed(const Duration(milliseconds: 1));
-    trace.markVisibleUpdate(
+    final firstVisibleLatency = trace.markVisibleUpdate(
       packetMicros: first,
       tileDecode: const Duration(microseconds: 10),
       dirtyTiles: 2,
     );
+    expect(firstVisibleLatency, greaterThan(0));
     final second = trace.markPacketReceived();
     trace.markVisibleUpdate(
       packetMicros: second,
@@ -56,9 +57,10 @@ void main() {
     final trace = Phase1PerformanceTrace();
     final packet = trace.markPacketReceived();
     await Future<void>.delayed(const Duration(milliseconds: 1));
-    trace.markLivePreviewFramePresented(packetMicros: packet);
+    final latency = trace.markLivePreviewFramePresented(packetMicros: packet);
 
     final snapshot = trace.snapshot();
+    expect(latency, greaterThan(0));
     expect(snapshot.visibleUpdateCount, 1);
     expect(snapshot.pointerToVisibleMicros.single, greaterThan(0));
     expect(snapshot.p99PointerToVisibleMs, greaterThan(0));

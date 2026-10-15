@@ -92,9 +92,17 @@ class CanvasLivePreviewFrameDiagnostics {
       record('canvas.live_preview_frame', frame.toDiagnosticFields());
       if (frame.packetMicros case final packetMicros?
           when performanceSnapshotCallback() != null) {
-        performanceTrace.markLivePreviewFramePresented(
+        final latencyMicros = performanceTrace.markLivePreviewFramePresented(
           packetMicros: packetMicros,
         );
+        record('canvas.pointer_to_visible_sample', <String, Object?>{
+          'path': 'live_preview_frame',
+          'packetToVisibleUs': latencyMicros,
+          'previewRevision': frame.previewRevision,
+          'visiblePreviewIndexEnd':
+              frame.pointCount == 0 ? null : frame.pointCount - 1,
+          'pointCount': frame.pointCount,
+        });
         performanceSnapshotCallback()?.call(performanceTrace.snapshot());
       }
     });

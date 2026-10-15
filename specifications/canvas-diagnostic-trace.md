@@ -14,15 +14,15 @@ the app process and a `canvas.session_started` row records the active canvas
 context. A `log.segment_rotated` row marks segment changes and reports any rows
 dropped while the file was being rotated.
 
-- `input.native_packet` captures native stylus packets from UIKit Pencil or
-  Android MotionEvent input, then the packet after native queue compaction.
-  Its `stage` is `native_pointer_event_channel` on both platforms and the
-  accepted preview device is labeled `stylus`. `input.engine_packet` captures
-  the coordinates and flags actually passed to Rust after viewport transform,
-  canvas clipping, and eraser handling. Flutter touch/stylus packets are
-  recorded at the engine boundary as well. Packets are base64-encoded and use
-  pointer-packet v1: a four-byte little-endian header followed by 48-byte
-  samples, as defined in `pointer-packet.md`.
+- `input.native_packet` captures native stylus packets from UIKit Pencil and,
+  where enabled, the packet after native queue compaction. Its stage is
+  `native_pointer_event_channel` and the accepted preview device is labeled
+  `stylus`. Android S Pen canvas input now uses Flutter's hit-tested pointer
+  path and is recorded at the engine boundary instead. `input.engine_packet`
+  captures the coordinates and flags actually passed to Rust after viewport
+  transform, canvas clipping, and eraser handling. Packets are base64-encoded
+  and use pointer-packet v1: a four-byte little-endian header followed by
+  48-byte samples, as defined in `pointer-packet.md`.
 - `input.flutter_touch_boundary` records touch down/up/cancel contacts and
   their active-pointer state. `input.touch_gesture_classified` records a
   completed command gesture, its configured binding, and the mapped action;
@@ -41,6 +41,12 @@ dropped while the file was being rotated.
   only to keep the trace small.
 - `canvas.cpu_frame_presented` marks the post-frame Flutter presentation with
   its document revision and dirty-tile count.
+- `canvas.pointer_to_visible_sample` records each measured app-side packet-to-
+  post-frame latency sample. Its `path` distinguishes a Flutter live-preview
+  frame from a committed CPU tile frame; CPU samples also include the commit ID,
+  revision, decode time, and dirty-tile count. These bounded numeric fields
+  make trace percentiles attributable to individual presentation paths without
+  adding packet coordinates or artwork content.
 - `native.*` records low-rate UIKit Pencil events such as contact, estimated
   force revisions, cancellation, dropped/rejected pointer packets, and Metal
   texture errors. `error` records caught Flutter, Rust-bridge, storage, and
