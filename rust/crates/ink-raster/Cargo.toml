@@ -8,5 +8,9 @@ license.workspace = true
 ink-model = { path = "../ink-model" }
 serde = { version = "1", features = ["derive"] }
 
+[[bench]]
+name = "tile_store_history"
+harness = false
+
 [lints]
 workspace = true

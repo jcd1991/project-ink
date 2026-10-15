@@ -22,6 +22,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::{self, Write as _};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+use ink_text::{
+    Family, LayoutRequest, LayoutResult, Orientation, PathElement, TextEngine, TextError,
+};
 
 const MAX_PAGES: usize = 512;
 const MAX_TOTAL_PAGE_PIXELS: u64 = 128 * 1024 * 1024;
@@ -35,7 +40,10 @@ const MAX_INK_LINES: usize = 4096;
 const MAX_TONE_LAYERS: usize = 256;
 const MAX_POLYGON_POINTS: usize = 64;
 const MAX_EXPORT_SEGMENTS: usize = 4096;
-const FORMAT_VERSION: u16 = 2;
+const MAX_RENDER_WARNINGS: usize = 4096;
+const FORMAT_VERSION: u16 = 3;
+const RENDER_SEMANTICS: u16 = 1;
+static TEXT_ENGINE: OnceLock<Mutex<TextEngine>> = OnceLock::new();
 // Panel IDs and mask IDs are separate metadata namespaces. A deterministic
 // namespace transform lets split operations create a stable mask identity for
 // the new panel without changing the public bridge signature or consuming a
@@ -486,6 +494,8 @@ fn point_inside_page(page: &Page, x: f32, y: f32) -> bool {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ComicProject {
     pub format_version: u16,
+    #[serde(default = "default_render_semantics")]
+    pub render_semantics: u16,
     pub id: u128,
     pub template: ProjectTemplate,
     pub title: String,
@@ -495,6 +505,10 @@ pub struct ComicProject {
     pub page_documents: Vec<PageDocumentRef>,
     #[serde(default)]
     pub panel_layers: Vec<PanelLayerBinding>,
+}
+
+fn default_render_semantics() -> u16 {
+    RENDER_SEMANTICS
 }
 
 #[derive(Deserialize)]
@@ -533,6 +547,13 @@ pub struct ComicPreviewImage {
     pub width: u32,
     pub height: u32,
     pub pixels_rgba: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageRenderMode {
+    PrintPreview,
+    CanvasOverlay,
+    Export,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -581,6 +602,7 @@ impl ComicProject {
     pub fn new(id: u128, template: ProjectTemplate, title: impl Into<String>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
+            render_semantics: RENDER_SEMANTICS,
             id,
             template,
             title: title.into(),
@@ -592,17 +614,15 @@ impl ComicProject {
     }
 
     pub fn validate(&self) -> Result<(), ComicError> {
-        if self.format_version != FORMAT_VERSION
-            || self.title.len() > MAX_TEXT_BYTES
+        if self.format_version != FORMAT_VERSION || self.render_semantics != RENDER_SEMANTICS {
+            return Err(ComicError::InvalidVersion);
+        }
+        if self.title.len() > MAX_TEXT_BYTES
             || self.pages.len() > MAX_PAGES
             || self.materials.len() > MAX_MATERIALS
             || self.page_documents.len() != self.pages.len()
         {
-            return Err(if self.format_version == FORMAT_VERSION {
-                ComicError::LimitExceeded
-            } else {
-                ComicError::InvalidVersion
-            });
+            return Err(ComicError::LimitExceeded);
         }
         total_page_pixels(&self.pages)?;
         let mut ids = std::collections::HashSet::new();
@@ -1759,6 +1779,134 @@ impl ComicProject {
         let scale = (max_dimension as f32 / largest).min(1.0);
         let width = preview_dimension(page.spec.width_px, scale);
         let height = preview_dimension(page.spec.height_px, scale);
+        self.render_page_content(
+            page_index,
+            width,
+            height,
+            None,
+            PageRenderMode::PrintPreview,
+        )
+    }
+
+    /// Rasterize comic-owned page content into a transparent overlay for the
+    /// active canvas document. Artwork and print guides are excluded.
+    pub fn render_page_overlay_preview(
+        &self,
+        page_index: usize,
+        max_dimension: u32,
+    ) -> Result<ComicPreviewImage, ComicError> {
+        self.validate()?;
+        if !(64..=4096).contains(&max_dimension) {
+            return Err(ComicError::InvalidPageSpec);
+        }
+        let page = self
+            .pages
+            .get(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        let largest = page.spec.width_px.max(page.spec.height_px).max(1) as f32;
+        let scale = (max_dimension as f32 / largest).min(1.0);
+        let width = preview_dimension(page.spec.width_px, scale);
+        let height = preview_dimension(page.spec.height_px, scale);
+        self.render_page_content(
+            page_index,
+            width,
+            height,
+            None,
+            PageRenderMode::CanvasOverlay,
+        )
+    }
+
+    /// Report fallback, missing-glyph, and overflow conditions for all pages.
+    pub fn render_warnings(&self) -> Result<Vec<String>, ComicError> {
+        self.validate()?;
+        let mut engine = lock_text_engine();
+        let mut warnings = Vec::new();
+        for page in &self.pages {
+            for balloon in &page.balloons {
+                if balloon.text.is_empty() {
+                    continue;
+                }
+                let (family, family_supported) = resolve_font_family(&balloon.style.font_family);
+                if !family_supported {
+                    let fallback = match family {
+                        Family::Sans => "Noto Sans CJK JP",
+                        Family::Serif => "Noto Serif CJK JP",
+                    };
+                    warnings.push(format!(
+                        "Page {}, balloon {}: font family '{}' is unsupported; using {fallback}.",
+                        page.spec.page_number,
+                        balloon.id,
+                        balloon
+                            .style
+                            .font_family
+                            .chars()
+                            .take(96)
+                            .collect::<String>(),
+                    ));
+                }
+                let layout = layout_balloon_text(balloon, family, &mut engine)
+                    .map_err(|_| ComicError::InvalidGeometry)?;
+                if !layout.missing_glyphs.is_empty() {
+                    warnings.push(format!(
+                        "Page {}, balloon {}: one or more characters are missing from the bundled fonts.",
+                        page.spec.page_number, balloon.id
+                    ));
+                }
+                if layout.overflow {
+                    warnings.push(format!(
+                        "Page {}, balloon {}: dialogue exceeds its text area and will be clipped.",
+                        page.spec.page_number, balloon.id
+                    ));
+                }
+                if warnings.len() >= MAX_RENDER_WARNINGS {
+                    warnings.push("Further comic rendering warnings were omitted.".into());
+                    return Ok(warnings);
+                }
+            }
+        }
+        Ok(warnings)
+    }
+
+    /// Renders comic-owned page content over an exact-size artwork RGBA image.
+    /// Print guides and editor selection state are intentionally omitted.
+    pub fn render_page_with_artwork(
+        &self,
+        page_index: usize,
+        width: u32,
+        height: u32,
+        artwork_rgba: &[u8],
+    ) -> Result<ComicPreviewImage, ComicError> {
+        self.validate()?;
+        let page = self
+            .pages
+            .get(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        if width != page.spec.width_px || height != page.spec.height_px {
+            return Err(ComicError::InvalidGeometry);
+        }
+        self.render_page_content(
+            page_index,
+            width,
+            height,
+            Some(artwork_rgba),
+            PageRenderMode::Export,
+        )
+    }
+
+    fn render_page_content(
+        &self,
+        page_index: usize,
+        width: u32,
+        height: u32,
+        artwork_rgba: Option<&[u8]>,
+        mode: PageRenderMode,
+    ) -> Result<ComicPreviewImage, ComicError> {
+        let page = self
+            .pages
+            .get(page_index)
+            .ok_or(ComicError::InvalidGeometry)?;
+        let scale = (width as f32 / page.spec.width_px as f32)
+            .min(height as f32 / page.spec.height_px as f32);
         let pixel_count = usize::try_from(width)
             .ok()
             .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
@@ -1766,49 +1914,68 @@ impl ComicProject {
         if pixel_count > 16 * 1024 * 1024 {
             return Err(ComicError::LimitExceeded);
         }
-        let mut pixels = vec![255_u8; pixel_count * 4];
-        for alpha in (3..pixels.len()).step_by(4) {
-            pixels[alpha] = 255;
+        let expected_bytes = pixel_count
+            .checked_mul(4)
+            .ok_or(ComicError::LimitExceeded)?;
+        let mut pixels = if let Some(artwork) = artwork_rgba {
+            if artwork.len() != expected_bytes {
+                return Err(ComicError::InvalidGeometry);
+            }
+            artwork.to_vec()
+        } else if mode == PageRenderMode::CanvasOverlay {
+            vec![0_u8; expected_bytes]
+        } else {
+            vec![255_u8; expected_bytes]
+        };
+        if artwork_rgba.is_none() && mode != PageRenderMode::CanvasOverlay {
+            for alpha in (3..pixels.len()).step_by(4) {
+                pixels[alpha] = 255;
+            }
         }
         let blue = [37, 99, 235, 220];
         let orange = [217, 119, 6, 220];
-        draw_rect_outline(&mut pixels, width, height, page.spec.trim, scale, blue, 2.0);
-        draw_rect_outline(
-            &mut pixels,
-            width,
-            height,
-            Rect {
-                x: page.spec.trim.x + page.spec.safety.left,
-                y: page.spec.trim.y + page.spec.safety.top,
-                width: page.spec.trim.width - page.spec.safety.left - page.spec.safety.right,
-                height: page.spec.trim.height - page.spec.safety.top - page.spec.safety.bottom,
-            },
-            scale,
-            orange,
-            2.0,
-        );
-        for panel in &page.panels {
-            if panel.border_px > 0.0 {
-                if panel.shape == PanelShape::Polygon && panel.polygon.len() >= 3 {
-                    draw_polygon_outline(
-                        &mut pixels,
-                        width,
-                        height,
-                        &panel.polygon,
-                        scale,
-                        [29, 78, 121, 255],
-                        panel.border_px,
-                    );
-                } else {
-                    draw_rect_outline(
-                        &mut pixels,
-                        width,
-                        height,
-                        panel.bounds,
-                        scale,
-                        [29, 78, 121, 255],
-                        panel.border_px,
-                    );
+        let mut text_engine = lock_text_engine();
+        if mode == PageRenderMode::PrintPreview {
+            draw_rect_outline(&mut pixels, width, height, page.spec.trim, scale, blue, 2.0);
+            draw_rect_outline(
+                &mut pixels,
+                width,
+                height,
+                Rect {
+                    x: page.spec.trim.x + page.spec.safety.left,
+                    y: page.spec.trim.y + page.spec.safety.top,
+                    width: page.spec.trim.width - page.spec.safety.left - page.spec.safety.right,
+                    height: page.spec.trim.height - page.spec.safety.top - page.spec.safety.bottom,
+                },
+                scale,
+                orange,
+                2.0,
+            );
+        }
+        if mode != PageRenderMode::CanvasOverlay {
+            for panel in &page.panels {
+                if panel.border_px > 0.0 {
+                    if panel.shape == PanelShape::Polygon && panel.polygon.len() >= 3 {
+                        draw_polygon_outline(
+                            &mut pixels,
+                            width,
+                            height,
+                            &panel.polygon,
+                            scale,
+                            [29, 78, 121, 255],
+                            panel.border_px,
+                        );
+                    } else {
+                        draw_rect_outline(
+                            &mut pixels,
+                            width,
+                            height,
+                            panel.bounds,
+                            scale,
+                            [29, 78, 121, 255],
+                            panel.border_px,
+                        );
+                    }
                 }
             }
         }
@@ -1838,6 +2005,7 @@ impl ComicProject {
             );
         }
         for balloon in &page.balloons {
+            fill_balloon_background(&mut pixels, width, height, balloon, scale);
             draw_polyline(
                 &mut pixels,
                 width,
@@ -1874,14 +2042,7 @@ impl ComicProject {
                     balloon.style.outline_px.max(2.0),
                 ),
             }
-            draw_text_stub(
-                &mut pixels,
-                width,
-                height,
-                balloon.bounds,
-                balloon.text.len(),
-                scale,
-            );
+            draw_balloon_text_pixels(&mut pixels, width, height, balloon, scale, &mut text_engine);
         }
         Ok(ComicPreviewImage {
             width,
@@ -1921,13 +2082,14 @@ impl ComicProject {
         // serde_json builds without arbitrary-precision numbers.
         let envelope: ComicFormatEnvelope = serde_json::from_slice(bytes)
             .map_err(|error| ComicError::InvalidJson(error.to_string()))?;
-        if envelope.format_version != 1 && envelope.format_version != FORMAT_VERSION {
+        if !(1..=FORMAT_VERSION).contains(&envelope.format_version) {
             return Err(ComicError::InvalidVersion);
         }
         let mut project: Self = serde_json::from_slice(bytes)
             .map_err(|error| ComicError::InvalidJson(error.to_string()))?;
-        if envelope.format_version == 1 {
+        if envelope.format_version < FORMAT_VERSION {
             project.format_version = FORMAT_VERSION;
+            project.render_semantics = RENDER_SEMANTICS;
             project.page_documents = project
                 .pages
                 .iter()
@@ -2003,6 +2165,7 @@ impl ComicProject {
             page.spec.page_number
         )
         .map_err(|_| ComicError::InvalidJson("SVG formatting failed".into()))?;
+        let mut text_engine = lock_text_engine();
         if let Some(artwork_png) = artwork_png {
             let encoded = base64::engine::general_purpose::STANDARD.encode(artwork_png);
             writeln!(
@@ -2138,30 +2301,17 @@ impl ComicProject {
                 ""
             };
             let centered_text = balloon.shape != BalloonShape::Narration;
-            let text_x = if centered_text {
-                r.x + r.width / 2.0
-            } else {
-                r.x + text_style.font_size_px
-            };
             let text_center_y = if centered_text {
                 r.y + r.height / 2.0 + text_style.font_size_px / 3.0
             } else {
                 r.y + text_style.font_size_px * 1.4
             };
-            let (text_markup, text_y, text_font_size) = svg_text_content(
-                &balloon.text,
-                SvgTextBox {
-                    x: text_x,
-                    center_y: text_center_y,
-                    font_size: text_style.font_size_px,
-                    max_width: (r.width - text_style.font_size_px * 2.0)
-                        .max(text_style.font_size_px),
-                    max_height: (r.height - text_style.font_size_px * 2.0)
-                        .max(text_style.font_size_px),
-                    centered: centered_text,
-                    vertical: text_style.orientation == TextOrientation::Vertical,
-                },
-            );
+            // Text itself is emitted below as bundled-font glyph outlines.
+            // The empty compatibility text elements in the shape branches
+            // keep the balloon structure readable to older SVG consumers.
+            let text_markup = "";
+            let text_y = text_center_y;
+            let text_font_size = text_style.font_size_px;
             if balloon.shape == BalloonShape::Narration {
                 writeln!(
                     svg,
@@ -2263,6 +2413,7 @@ impl ComicProject {
                 )
             }
             .map_err(|_| ComicError::InvalidJson("SVG formatting failed".into()))?;
+            svg.push_str(&balloon_text_svg(balloon, &mut text_engine));
         }
         for effect in &page.effect_lines {
             let points = effect
@@ -2351,6 +2502,68 @@ fn preview_alpha(value: f32, maximum: f32) -> u8 {
         return 0;
     }
     value.clamp(0.0, 1.0).mul_add(maximum, 0.0).round() as u8
+}
+
+// Validated page geometry and the preview pixel cap keep these coordinates in
+// the non-negative, <=4096 range before conversion to integer pixel bounds.
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+fn fill_balloon_background(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    balloon: &Balloon,
+    scale: f32,
+) {
+    let bounds = balloon.bounds;
+    let left = (bounds.x * scale).floor().max(0.0) as u32;
+    let top = (bounds.y * scale).floor().max(0.0) as u32;
+    let right = ((bounds.x + bounds.width) * scale).ceil().min(width as f32) as u32;
+    let bottom = ((bounds.y + bounds.height) * scale)
+        .ceil()
+        .min(height as f32) as u32;
+    if left >= right || top >= bottom || !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let burst = (balloon.shape == BalloonShape::Burst).then(|| burst_points(bounds));
+    for y in top..bottom {
+        for x in left..right {
+            let page_x = (x as f32 + 0.5) / scale;
+            let page_y = (y as f32 + 0.5) / scale;
+            let inside = match balloon.shape {
+                BalloonShape::Oval | BalloonShape::Thought => {
+                    let dx = (page_x - (bounds.x + bounds.width / 2.0))
+                        / (bounds.width / 2.0).max(f32::EPSILON);
+                    let dy = (page_y - (bounds.y + bounds.height / 2.0))
+                        / (bounds.height / 2.0).max(f32::EPSILON);
+                    dx.mul_add(dx, dy * dy) <= 1.0
+                }
+                BalloonShape::Narration => true,
+                BalloonShape::Burst => burst
+                    .as_ref()
+                    .is_some_and(|points| point_in_polygon(page_x, page_y, points)),
+            };
+            if inside && let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) {
+                blend_preview_pixel(pixels, width, height, x, y, [255; 4]);
+            }
+        }
+    }
+}
+
+fn point_in_polygon(x: f32, y: f32, points: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut previous = points.len().saturating_sub(1);
+    for current in 0..points.len() {
+        let (current_x, current_y) = points[current];
+        let (previous_x, previous_y) = points[previous];
+        let crosses = (current_y > y) != (previous_y > y)
+            && x < (previous_x - current_x) * (y - current_y) / (previous_y - current_y)
+                + current_x;
+        if crosses {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
 }
 
 fn blend_preview_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: [u8; 4]) {
@@ -2640,32 +2853,73 @@ fn draw_tone(pixels: &mut [u8], width: u32, height: u32, tone: &ToneLayer, scale
     }
 }
 
-fn draw_text_stub(
+fn draw_balloon_text_pixels(
     pixels: &mut [u8],
     width: u32,
     height: u32,
-    bounds: Rect,
-    text_len: usize,
+    balloon: &Balloon,
     scale: f32,
+    engine: &mut TextEngine,
 ) {
-    if text_len == 0 {
+    if balloon.text.is_empty() {
         return;
     }
-    let lines = text_len.clamp(1, 4);
-    let left = bounds.x + bounds.width * 0.2;
-    let line_width = bounds.width * 0.6;
-    for line in 0..lines {
-        let y = bounds.y + bounds.height * (0.35 + line as f32 * 0.14);
-        draw_preview_line(
+    let style = &balloon.style;
+    let inset = style.font_size_px.max(1.0);
+    let content_width = (balloon.bounds.width - inset * 2.0).max(1.0);
+    let content_height = (balloon.bounds.height - inset * 2.0).max(1.0);
+    if let Ok(layout) =
+        layout_balloon_text(balloon, resolve_font_family(&style.font_family).0, engine)
+    {
+        let origin = (
+            (balloon.bounds.x + inset) * scale,
+            (balloon.bounds.y + inset) * scale,
+        );
+        layout.paint_rgba_with_outline_clipped(
             pixels,
             width,
             height,
-            preview_point(left, y, scale),
-            preview_point(left + line_width, y, scale),
-            [17, 17, 17, 150],
-            (bounds.height * 0.015 * scale).max(1.0),
+            origin,
+            scale,
+            style.fill_rgba,
+            (style.outline_px > 0.0).then_some((style.outline_rgba, style.outline_px)),
+            Some((
+                origin.0,
+                origin.1,
+                origin.0 + content_width * scale,
+                origin.1 + content_height * scale,
+            )),
         );
     }
+}
+
+fn resolve_font_family(value: &str) -> (Family, bool) {
+    match value.trim().to_lowercase().as_str() {
+        "serif" | "noto serif cjk jp" => (Family::Serif, true),
+        "sans" | "sans-serif" | "noto sans cjk jp" => (Family::Sans, true),
+        unknown if unknown.contains("serif") && !unknown.contains("sans") => (Family::Serif, false),
+        _ => (Family::Sans, false),
+    }
+}
+
+fn layout_balloon_text(
+    balloon: &Balloon,
+    family: Family,
+    engine: &mut TextEngine,
+) -> Result<LayoutResult, TextError> {
+    let style = &balloon.style;
+    let inset = style.font_size_px.max(1.0);
+    engine.layout(LayoutRequest {
+        text: &balloon.text,
+        family,
+        font_size: style.font_size_px,
+        width: (balloon.bounds.width - inset * 2.0).max(1.0),
+        height: (balloon.bounds.height - inset * 2.0).max(1.0),
+        orientation: match style.orientation {
+            TextOrientation::Horizontal => Orientation::Horizontal,
+            TextOrientation::Vertical => Orientation::Vertical,
+        },
+    })
 }
 
 fn validate_export_directory(directory: &Path) -> Result<(), ComicError> {
@@ -2709,96 +2963,81 @@ fn escape_xml(value: &str) -> String {
     escaped
 }
 
-#[derive(Clone, Copy)]
-struct SvgTextBox {
-    x: f32,
-    center_y: f32,
-    font_size: f32,
-    max_width: f32,
-    max_height: f32,
-    centered: bool,
-    vertical: bool,
+fn lock_text_engine() -> std::sync::MutexGuard<'static, TextEngine> {
+    TEXT_ENGINE
+        .get_or_init(|| Mutex::new(TextEngine::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn svg_text_content(text: &str, layout: SvgTextBox) -> (String, f32, f32) {
-    let SvgTextBox {
-        x,
-        center_y,
-        font_size,
-        max_width,
-        max_height,
-        centered,
-        vertical,
-    } = layout;
-    if vertical || text.is_empty() {
-        return (escape_xml(text), center_y, font_size);
+fn balloon_text_svg(balloon: &Balloon, engine: &mut TextEngine) -> String {
+    if balloon.text.is_empty() {
+        return String::new();
     }
-    let mut text_font_size = font_size;
-    let mut lines = wrap_svg_text_lines(text, max_width, text_font_size);
-    for _ in 0..24 {
-        let line_height = (text_font_size * 1.2).max(1.0);
-        let content_height = lines.len() as f32 * line_height;
-        if content_height <= max_height || text_font_size <= 6.0 {
-            break;
-        }
-        text_font_size = (text_font_size * 0.9).max(6.0);
-        lines = wrap_svg_text_lines(text, max_width, text_font_size);
-    }
-    let line_height = (text_font_size * 1.2).max(1.0);
-    let first_y = if centered {
-        center_y - (lines.len().saturating_sub(1) as f32 * line_height / 2.0)
-    } else {
-        center_y
+    let style = &balloon.style;
+    let inset = style.font_size_px.max(1.0);
+    let width = (balloon.bounds.width - inset * 2.0).max(1.0);
+    let height = (balloon.bounds.height - inset * 2.0).max(1.0);
+    let family = resolve_font_family(&style.font_family).0;
+    let Ok(layout) = layout_balloon_text(balloon, family, engine) else {
+        return String::new();
     };
     let mut markup = String::new();
-    for (index, line) in lines.iter().enumerate() {
-        let dy = if index == 0 { 0.0 } else { line_height };
+    let _ = write!(
+        markup,
+        r##"<g transform="translate({:.3} {:.3})" fill="#{:02x}{:02x}{:02x}" fill-opacity="{:.4}" data-balloon-id="{}"><title>{}</title>"##,
+        balloon.bounds.x + inset,
+        balloon.bounds.y + inset,
+        style.fill_rgba[0],
+        style.fill_rgba[1],
+        style.fill_rgba[2],
+        f32::from(style.fill_rgba[3]) / 255.0,
+        balloon.id,
+        escape_xml(&balloon.text)
+    );
+    if style.outline_px > 0.0 {
         let _ = write!(
             markup,
-            r#"<tspan x="{x:.3}" dy="{dy:.3}">{}</tspan>"#,
-            escape_xml(line)
+            r##" stroke="#{:02x}{:02x}{:02x}" stroke-opacity="{:.4}" stroke-width="{:.3}" stroke-linejoin="round" paint-order="stroke""##,
+            style.outline_rgba[0],
+            style.outline_rgba[1],
+            style.outline_rgba[2],
+            f32::from(style.outline_rgba[3]) / 255.0,
+            style.outline_px,
         );
     }
-    (markup, first_y, text_font_size)
-}
-
-// The cast is safe after clamping the finite positive result into 1..=256.
-#[allow(clippy::cast_sign_loss)]
-fn wrap_svg_text_lines(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
-    let max_chars = (max_width / (font_size * 0.55).max(1.0))
-        .floor()
-        .clamp(1.0, 256.0) as usize;
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut line = String::new();
-        for word in paragraph.split_whitespace() {
-            if word.chars().count() > max_chars {
-                if !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
+    let _ = write!(markup, r#" clip-path="url(#balloon-clip-{})""#, balloon.id);
+    markup.push('>');
+    let _ = write!(
+        markup,
+        r#"<defs><clipPath id="balloon-clip-{}"><rect x="0" y="0" width="{width:.3}" height="{height:.3}"/></clipPath></defs>"#,
+        balloon.id,
+        width = width,
+        height = height,
+    );
+    for glyph in layout.glyphs {
+        markup.push_str("<path d=\"");
+        for element in glyph.path {
+            match element {
+                PathElement::Move(x, y) => {
+                    let _ = write!(markup, "M{x:.3} {y:.3}");
                 }
-                let mut fragment = String::new();
-                for character in word.chars() {
-                    fragment.push(character);
-                    if fragment.chars().count() >= max_chars {
-                        lines.push(std::mem::take(&mut fragment));
-                    }
+                PathElement::Line(x, y) => {
+                    let _ = write!(markup, "L{x:.3} {y:.3}");
                 }
-                line = fragment;
-            } else if line.is_empty() {
-                line.push_str(word);
-            } else if line.chars().count() + 1 + word.chars().count() <= max_chars {
-                line.push(' ');
-                line.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut line));
-                line.push_str(word);
+                PathElement::Quad(cx, cy, x, y) => {
+                    let _ = write!(markup, "Q{cx:.3} {cy:.3} {x:.3} {y:.3}");
+                }
+                PathElement::Cubic(c0x, c0y, c1x, c1y, x, y) => {
+                    let _ = write!(markup, "C{c0x:.3} {c0y:.3} {c1x:.3} {c1y:.3} {x:.3} {y:.3}");
+                }
+                PathElement::Close => markup.push('Z'),
             }
         }
-        if !line.is_empty() || paragraph.is_empty() {
-            lines.push(line);
-        }
+        markup.push_str("\"/>");
     }
-    lines
+    markup.push_str("</g>");
+    markup
 }
 
 pub fn print_page(width_px: u32, height_px: u32, dpi: f32, page_number: u32, id: u128) -> Page {
@@ -2985,6 +3224,17 @@ mod tests {
             "data-balloon-id=\"{}\" data-balloon-panel-id=\"{}\"",
             restored.pages[0].balloons[0].id, restored.pages[0].panels[0].id
         )));
+        assert!(svg.contains("<path d=\""));
+        assert!(svg.contains("<title>Panel 1: draw the next line.</title>"));
+        let rendered = restored
+            .render_page_preview(0, 512)
+            .expect("lettered preview");
+        let mut without_dialogue = restored.clone();
+        without_dialogue.pages[0].balloons[0].text.clear();
+        let unlettered = without_dialogue
+            .render_page_preview(0, 512)
+            .expect("preview without dialogue");
+        assert_ne!(rendered.pixels_rgba, unlettered.pixels_rgba);
         assert_eq!(restored.search_dialogue("NEXT").len(), 32);
     }
 
@@ -3000,7 +3250,7 @@ mod tests {
         let legacy_bytes = serde_json::to_vec(&legacy).expect("legacy encode");
 
         let migrated = ComicProject::from_json(&legacy_bytes).expect("migrate");
-        assert_eq!(migrated.format_version, 2);
+        assert_eq!(migrated.format_version, 3);
         assert_eq!(migrated.pages, project.pages);
         assert_eq!(migrated.page_documents.len(), project.pages.len());
         assert_eq!(
@@ -3539,7 +3789,8 @@ mod tests {
         });
         let escaped =
             String::from_utf8(project.page_svg(0).expect("escaped SVG")).expect("UTF-8 SVG");
-        assert!(escaped.contains("<tspan x="));
+        assert!(escaped.contains("<path d=\""));
+        assert!(!escaped.contains("<tspan x="));
         assert!(escaped.contains("&lt;"));
         assert!(escaped.contains("&amp;"));
         assert!(escaped.contains("sound&gt;"));
@@ -3550,6 +3801,158 @@ mod tests {
         assert!(escaped.contains("<polygon points="));
         assert!(escaped.contains("paint-order=\"stroke\""));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn comic_export_composites_artwork_and_lettering_without_guides() {
+        let mut project = ComicProject::new(21, ProjectTemplate::PrintComic, "lettered page");
+        let mut page = print_page(256, 256, 300.0, 1, 22);
+        page.balloons.push(Balloon {
+            id: 23,
+            shape: BalloonShape::Oval,
+            bounds: Rect {
+                x: 64.0,
+                y: 64.0,
+                width: 128.0,
+                height: 96.0,
+            },
+            tail: vec![(100.0, 150.0), (84.0, 180.0)],
+            text: "漫画".into(),
+            style: TextStyle {
+                orientation: TextOrientation::Vertical,
+                ..TextStyle::default()
+            },
+            panel_id: None,
+        });
+        project.add_page(page).expect("add page");
+        let artwork = [24, 96, 180, 255].repeat(256 * 256);
+        let overlay = project
+            .render_page_overlay_preview(0, 256)
+            .expect("transparent comic overlay");
+        assert_eq!(&overlay.pixels_rgba[0..4], &[0, 0, 0, 0]);
+        assert!(
+            overlay
+                .pixels_rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0)
+        );
+        let balloon_fill = (100 * overlay.width as usize + 80) * 4;
+        assert_eq!(
+            &overlay.pixels_rgba[balloon_fill..balloon_fill + 4],
+            &[255, 255, 255, 255]
+        );
+        let exported = project
+            .render_page_with_artwork(0, 256, 256, &artwork)
+            .expect("composite export");
+        assert_eq!(&exported.pixels_rgba[..4], &[24, 96, 180, 255]);
+        assert_ne!(exported.pixels_rgba, artwork);
+
+        let mut without_dialogue = project.clone();
+        without_dialogue.pages[0].balloons[0].text.clear();
+        let unlettered = without_dialogue
+            .render_page_with_artwork(0, 256, 256, &artwork)
+            .expect("composite without text");
+        assert_ne!(exported.pixels_rgba, unlettered.pixels_rgba);
+        assert_eq!(exported.width, 256);
+        assert_eq!(exported.height, 256);
+    }
+
+    #[test]
+    fn japanese_vertical_dialogue_survives_project_round_trip_and_exports_once() {
+        let mut project = ComicProject::new(41, ProjectTemplate::PrintComic, "vertical dialogue");
+        let mut page = print_page(320, 320, 300.0, 1, 42);
+        page.panels.push(Panel {
+            id: 43,
+            bounds: Rect {
+                x: 24.0,
+                y: 24.0,
+                width: 272.0,
+                height: 272.0,
+            },
+            shape: PanelShape::Rectangle,
+            polygon: Vec::new(),
+            border_px: 4.0,
+            gutter_px: 8.0,
+            mask_layer_id: None,
+        });
+        page.balloons.push(Balloon {
+            id: 44,
+            shape: BalloonShape::Oval,
+            bounds: Rect {
+                x: 104.0,
+                y: 48.0,
+                width: 112.0,
+                height: 176.0,
+            },
+            tail: vec![(136.0, 200.0), (120.0, 232.0)],
+            text: "「漫画です。」<&".into(),
+            style: TextStyle {
+                orientation: TextOrientation::Vertical,
+                ..TextStyle::default()
+            },
+            panel_id: Some(43),
+        });
+        project.add_page(page).expect("valid Japanese page");
+
+        let saved = project.to_json().expect("serialize project");
+        let reopened = ComicProject::from_json(&saved).expect("reopen project");
+        let artwork = [28, 96, 172, 255].repeat(320 * 320);
+        let png = reopened
+            .render_page_with_artwork(0, 320, 320, &artwork)
+            .expect("render lettered PNG");
+        assert_eq!(&png.pixels_rgba[..4], &[28, 96, 172, 255]);
+        assert_ne!(png.pixels_rgba, artwork);
+
+        let svg = String::from_utf8(
+            reopened
+                .page_svg_with_raster_artwork(0, b"bounded artwork fixture")
+                .expect("render lettered SVG"),
+        )
+        .expect("SVG is UTF-8");
+        assert!(svg.contains("data-page-artwork=\"true\""));
+        assert!(svg.contains("data-balloon-id=\"44\""));
+        assert!(svg.contains("data-balloon-panel-id=\"43\""));
+        assert!(svg.contains("data-balloon-tail=\"44\""));
+        assert!(svg.contains("&lt;&amp;"));
+        assert!(svg.contains("<path d=\""));
+        assert_eq!(svg.matches("<g transform=\"translate(").count(), 1);
+        assert!(!svg.contains("data-trim-guide"));
+    }
+
+    #[test]
+    fn render_warnings_identify_font_fallback_missing_glyphs_and_overflow() {
+        let mut project = ComicProject::new(31, ProjectTemplate::PrintComic, "warnings");
+        let mut page = print_page(512, 512, 300.0, 1, 32);
+        page.balloons.push(Balloon {
+            id: 33,
+            shape: BalloonShape::Oval,
+            bounds: Rect {
+                x: 64.0,
+                y: 64.0,
+                width: 48.0,
+                height: 48.0,
+            },
+            tail: Vec::new(),
+            text: "🫠".repeat(16),
+            style: TextStyle {
+                font_family: "Comic Sans MS".into(),
+                font_size_px: 40.0,
+                ..TextStyle::default()
+            },
+            panel_id: None,
+        });
+        project.add_page(page).expect("valid warning fixture");
+
+        let warnings = project.render_warnings().expect("render warnings");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("unsupported"))
+        );
+        assert!(warnings.iter().any(|warning| warning.contains("missing")));
+        assert!(warnings.iter().any(|warning| warning.contains("clipped")));
     }
 
     #[test]

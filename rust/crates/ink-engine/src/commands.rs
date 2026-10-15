@@ -1,14 +1,15 @@
 use super::{
     ActiveStroke, BrushPreset, CompiledBrush, CompiledBrushState, DocumentSpec, EditorCommand,
-    EngineError, EngineEvent, EngineState, HashMap, HashSet, Layer, LayerId, LayerKind, LayerState,
-    MAX_COMMAND_JOURNAL_ENTRIES, MAX_FILL_PIXELS, MAX_LAYERS, MAX_PANEL_MASK_PIXELS, Rgba8,
-    SelectionMask, StrokeInputMetrics, Tile, TileDescriptor, TileStore, TimeLapseSample,
-    TimeLapseStroke, Transaction, VectorPoint, VectorStroke, advance_revision,
-    ancestor_has_mask_node, apply_post_effects, builtin_library, compositor_blend_mode,
-    encode_command, flush_deferred_dual_dabs, history_label, layer_subtree_ids, lock_recover,
-    merge_raster_layers, next_layer_id, normalize_sibling_orders, point_inside_polygon,
-    rasterize_vector_stroke, rebuild_vector_layer, restore_brush_override, time_lapse_has_capacity,
-    trim_history_snapshots, validate_layer_tree, validate_vector_stroke,
+    EngineError, EngineEvent, EngineState, HashMap, HashSet, Layer, LayerAdjustment, LayerId,
+    LayerKind, LayerState, MAX_COMMAND_JOURNAL_ENTRIES, MAX_FILL_PIXELS, MAX_LAYERS,
+    MAX_PANEL_MASK_PIXELS, Rgba8, SelectionMask, StrokeInputMetrics, Tile, TileDescriptor,
+    TileStore, TimeLapseSample, TimeLapseStroke, Transaction, VectorPatchEdit, VectorPoint,
+    VectorStroke, advance_revision, ancestor_has_mask_node, apply_post_effects, builtin_library,
+    compositor_blend_mode, flush_deferred_dual_dabs, history_label, layer_subtree_ids,
+    lock_recover, merge_raster_layers, next_layer_id, normalize_sibling_orders,
+    point_inside_polygon, rasterize_vector_stroke, rebuild_vector_layer, restore_brush_override,
+    time_lapse_has_capacity, trim_history_snapshots, try_encode_command, validate_layer_tree,
+    validate_vector_stroke,
 };
 
 /// Commit a pending opacity preview as one ordinary, undoable command.
@@ -164,6 +165,166 @@ impl super::Document {
         self.flush_input()?;
         cancel_pending_opacity_edit(&mut lock_recover(&self.state), Some(edit_id))
     }
+
+    /// Begin a non-persistent adjustment preview for one adjustment layer.
+    pub fn begin_layer_adjustment_edit(&mut self, layer: LayerId) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        let mut state = lock_recover(&self.state);
+        if let Some(edit) = state.adjustment_edit {
+            if edit.layer == layer {
+                return Ok(edit.id);
+            }
+            commit_pending_adjustment_edit(&mut state, Some(edit.id))?;
+        }
+        if state.opacity_edit.is_some() {
+            commit_pending_opacity_edit(&mut state, None)?;
+        }
+        ensure_unlocked(&state, layer)?;
+        let layer_state = state.layers.get(&layer).ok_or(EngineError::InvalidLayer)?;
+        if layer_state.layer.kind != LayerKind::Adjustment {
+            return Err(EngineError::InvalidCommand(
+                "adjustment preview requires an adjustment layer".into(),
+            ));
+        }
+        let original = layer_state.layer.adjustment.ok_or_else(|| {
+            EngineError::InvalidCommand("adjustment layer is missing settings".into())
+        })?;
+        let id = state.next_adjustment_edit;
+        state.next_adjustment_edit = id.checked_add(1).ok_or_else(|| {
+            EngineError::InvalidCommand("adjustment edit ID space is exhausted".into())
+        })?;
+        state.adjustment_edit = Some(super::state::LayerAdjustmentEdit {
+            id,
+            layer,
+            original,
+        });
+        Ok(id)
+    }
+
+    /// Update an adjustment preview without recording history or persistence.
+    pub fn update_layer_adjustment_edit(
+        &mut self,
+        edit_id: u64,
+        adjustment: LayerAdjustment,
+    ) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        let adjustment = adjustment
+            .validate()
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+        let mut state = lock_recover(&self.state);
+        let edit = state.adjustment_edit.ok_or_else(|| {
+            EngineError::InvalidCommand("layer adjustment edit is no longer active".into())
+        })?;
+        if edit.id != edit_id {
+            return Err(EngineError::InvalidCommand(
+                "layer adjustment edit ID does not match".into(),
+            ));
+        }
+        ensure_unlocked(&state, edit.layer)?;
+        let layer_state = state
+            .layers
+            .get_mut(&edit.layer)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer_state.layer.adjustment == Some(adjustment) {
+            return Ok(state.revision);
+        }
+        layer_state.layer.adjustment = Some(adjustment);
+        advance_revision(&mut state)?;
+        let revision = state.revision;
+        state.events.push(EngineEvent::LayersChanged { revision });
+        Ok(revision)
+    }
+
+    /// Commit a preview as one ordinary, undoable adjustment command.
+    pub fn commit_layer_adjustment_edit(&mut self, edit_id: u64) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        commit_pending_adjustment_edit(&mut lock_recover(&self.state), Some(edit_id))
+    }
+
+    /// Restore the original adjustment without adding an undo entry.
+    pub fn cancel_layer_adjustment_edit(&mut self, edit_id: u64) -> Result<u64, EngineError> {
+        self.flush_input()?;
+        cancel_pending_adjustment_edit(&mut lock_recover(&self.state), Some(edit_id))
+    }
+}
+
+pub(super) fn commit_pending_adjustment_edit(
+    state: &mut EngineState,
+    expected_id: Option<u64>,
+) -> Result<u64, EngineError> {
+    let Some(edit) = state.adjustment_edit else {
+        return if expected_id.is_some() {
+            Err(EngineError::InvalidCommand(
+                "layer adjustment edit is no longer active".into(),
+            ))
+        } else {
+            Ok(state.revision)
+        };
+    };
+    if expected_id.is_some_and(|expected| expected != edit.id) {
+        return Err(EngineError::InvalidCommand(
+            "layer adjustment edit ID does not match".into(),
+        ));
+    }
+    let current = state
+        .layers
+        .get(&edit.layer)
+        .ok_or(EngineError::InvalidLayer)?
+        .layer
+        .adjustment
+        .ok_or_else(|| EngineError::InvalidCommand("adjustment settings are missing".into()))?;
+    if current == edit.original {
+        state.adjustment_edit = None;
+        return Ok(state.revision);
+    }
+    ensure_unlocked(state, edit.layer)?;
+    state.adjustment_edit = None;
+    state
+        .layers
+        .get_mut(&edit.layer)
+        .ok_or(EngineError::InvalidLayer)?
+        .layer
+        .adjustment = Some(edit.original);
+    dispatch_state(
+        state,
+        EditorCommand::SetLayerAdjustment {
+            layer: edit.layer,
+            adjustment: current,
+        },
+    )
+}
+
+pub(super) fn cancel_pending_adjustment_edit(
+    state: &mut EngineState,
+    expected_id: Option<u64>,
+) -> Result<u64, EngineError> {
+    let Some(edit) = state.adjustment_edit else {
+        return if expected_id.is_some() {
+            Err(EngineError::InvalidCommand(
+                "layer adjustment edit is no longer active".into(),
+            ))
+        } else {
+            Ok(state.revision)
+        };
+    };
+    if expected_id.is_some_and(|expected| expected != edit.id) {
+        return Err(EngineError::InvalidCommand(
+            "layer adjustment edit ID does not match".into(),
+        ));
+    }
+    state.adjustment_edit = None;
+    let layer_state = state
+        .layers
+        .get_mut(&edit.layer)
+        .ok_or(EngineError::InvalidLayer)?;
+    if layer_state.layer.adjustment == Some(edit.original) {
+        return Ok(state.revision);
+    }
+    layer_state.layer.adjustment = Some(edit.original);
+    advance_revision(state)?;
+    let revision = state.revision;
+    state.events.push(EngineEvent::LayersChanged { revision });
+    Ok(revision)
 }
 
 /// Validate every requested subtree before removing any layer, then commit
@@ -498,8 +659,49 @@ fn validate_lock_access(state: &EngineState, command: &EditorCommand) -> Result<
         | EditorCommand::ConnectVectorStrokes { layer, .. }
         | EditorCommand::EraseVectorSegment { layer, .. }
         | EditorCommand::SetVectorPoint { layer, .. }
+        | EditorCommand::ApplyVectorPatch { layer, .. }
         | EditorCommand::BeginStroke { layer, .. } => ensure_unlocked(state, *layer),
     }
+}
+
+fn insert_vector_object(
+    layer: &mut LayerState,
+    object_id: ink_model::Id,
+    object: ink_model::VectorObject,
+    position: usize,
+) -> Result<(), EngineError> {
+    let id = ink_model::StrokeId::from_u128(object_id.0);
+    match object {
+        ink_model::VectorObject::LegacyInk { stroke } => {
+            layer.vectors.try_reserve(1).map_err(|_| {
+                EngineError::InvalidCommand("vector patch exceeds available memory".into())
+            })?;
+            layer.vectors.push((id, stroke));
+        }
+        ink_model::VectorObject::BezierPath { path, source } => {
+            layer.bezier_paths.try_reserve(1).map_err(|_| {
+                EngineError::InvalidCommand("vector patch exceeds available memory".into())
+            })?;
+            layer.bezier_paths.push((id, path, source));
+        }
+    }
+    layer
+        .vector_order
+        .try_reserve(1)
+        .map_err(|_| EngineError::InvalidCommand("vector patch exceeds available memory".into()))?;
+    layer.vector_order.insert(position, id);
+    Ok(())
+}
+
+fn remove_vector_object(layer: &mut LayerState, object_id: ink_model::Id) -> bool {
+    let id = ink_model::StrokeId::from_u128(object_id.0);
+    let previous_len = layer.vectors.len() + layer.bezier_paths.len();
+    layer.vectors.retain(|(candidate, _)| *candidate != id);
+    layer
+        .bezier_paths
+        .retain(|(candidate, _, _)| *candidate != id);
+    layer.vector_order.retain(|candidate| *candidate != id);
+    previous_len != layer.vectors.len() + layer.bezier_paths.len()
 }
 
 fn validate_mask_apply_target(state: &EngineState, mask: LayerId) -> Result<(), EngineError> {
@@ -690,14 +892,9 @@ pub(super) fn dispatch_state(
             "command journal safety limit reached; save and reopen the document".into(),
         ));
     }
-    // A canvas command establishes a new top-level history branch. Brush
-    // library edits use a small session-scoped slot because they are not part
-    // of the raster layer snapshot schema; clear that slot once another
-    // command starts so Undo always follows the most recent mutation domain.
-    if !matches!(command, EditorCommand::Undo | EditorCommand::Redo) {
-        state.brush_undo = None;
-        state.brush_redo = None;
-    }
+    let journal_payload = try_encode_command(&command).map_err(|error| {
+        EngineError::InvalidCommand(format!("command encoding failed: {error}"))
+    })?;
     let before_layers = if matches!(
         command,
         EditorCommand::Undo
@@ -925,6 +1122,8 @@ pub(super) fn dispatch_state(
             let dirty = layer_state.tiles.allocated_coordinates();
             layer_state.tiles.clear();
             layer_state.vectors.clear();
+            layer_state.bezier_paths.clear();
+            layer_state.vector_order.clear();
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {
                 revision: state.revision,
@@ -1048,6 +1247,8 @@ pub(super) fn dispatch_state(
                     layer,
                     tiles: TileStore::default(),
                     vectors: Vec::new(),
+                    bezier_paths: Vec::new(),
+                    vector_order: Vec::new(),
                 });
             }
             for layer in new_layers {
@@ -1130,6 +1331,8 @@ pub(super) fn dispatch_state(
                     layer,
                     tiles: TileStore::default(),
                     vectors: Vec::new(),
+                    bezier_paths: Vec::new(),
+                    vector_order: Vec::new(),
                 },
             );
             advance_revision(state)?;
@@ -1299,6 +1502,8 @@ pub(super) fn dispatch_state(
                     layer: group_layer,
                     tiles: TileStore::default(),
                     vectors: Vec::new(),
+                    bezier_paths: Vec::new(),
+                    vector_order: Vec::new(),
                 },
             );
             for (order, sibling_id) in new_siblings.into_iter().enumerate() {
@@ -2823,7 +3028,12 @@ pub(super) fn dispatch_state(
                     "vector strokes require a vector-ink layer".into(),
                 ));
             }
-            if layer_state.vectors.iter().any(|(id, _)| id == stroke) {
+            if layer_state.vectors.iter().any(|(id, _)| id == stroke)
+                || layer_state
+                    .bezier_paths
+                    .iter()
+                    .any(|(id, _, _)| id == stroke)
+            {
                 return Err(EngineError::InvalidCommand(
                     "vector stroke ID already exists on this layer".into(),
                 ));
@@ -2853,6 +3063,7 @@ pub(super) fn dispatch_state(
             let dirty =
                 rasterize_vector_stroke(&mut layer_state.tiles, &vector, width_px, height_px);
             layer_state.vectors.push((*stroke, vector));
+            layer_state.vector_order.push(*stroke);
             advance_revision(state)?;
             state.events.push(EngineEvent::LayersChanged {
                 revision: state.revision,
@@ -2900,6 +3111,15 @@ pub(super) fn dispatch_state(
                     "vector transform requires a vector-ink layer".into(),
                 ));
             }
+            if layer_state
+                .bezier_paths
+                .iter()
+                .any(|(id, _, _)| id == stroke)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "legacy vector transform is unsupported for Bézier paths".into(),
+                ));
+            }
             let vector = layer_state
                 .vectors
                 .iter_mut()
@@ -2926,7 +3146,7 @@ pub(super) fn dispatch_state(
                     background: ink_model::Rgba8::default(),
                 },
             )?;
-            let dirty = rebuild_vector_layer(layer_state, width_px, height_px);
+            let dirty = rebuild_vector_layer(layer_state, width_px, height_px)?;
             advance_revision(state)?;
             state.events.push(EngineEvent::TilesDirty {
                 revision: state.revision,
@@ -2955,6 +3175,15 @@ pub(super) fn dispatch_state(
                 .layers
                 .get_mut(layer)
                 .ok_or(EngineError::InvalidLayer)?;
+            if layer_state
+                .bezier_paths
+                .iter()
+                .any(|(id, _, _)| id == stroke)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "legacy vector simplification is unsupported for Bézier paths".into(),
+                ));
+            }
             let vector = layer_state
                 .vectors
                 .iter_mut()
@@ -2974,7 +3203,7 @@ pub(super) fn dispatch_state(
                     background: ink_model::Rgba8::default(),
                 },
             )?;
-            let dirty = rebuild_vector_layer(layer_state, width_px, height_px);
+            let dirty = rebuild_vector_layer(layer_state, width_px, height_px)?;
             advance_revision(state)?;
             state.events.push(EngineEvent::TilesDirty {
                 revision: state.revision,
@@ -3004,6 +3233,15 @@ pub(super) fn dispatch_state(
                 .layers
                 .get_mut(layer)
                 .ok_or(EngineError::InvalidLayer)?;
+            if layer_state
+                .bezier_paths
+                .iter()
+                .any(|(id, _, _)| id == first || id == second)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "legacy vector connection is unsupported for Bézier paths".into(),
+                ));
+            }
             let first_index = layer_state
                 .vectors
                 .iter()
@@ -3028,7 +3266,8 @@ pub(super) fn dispatch_state(
                 })?;
             layer_state.vectors[first_index].1 = joined;
             layer_state.vectors.remove(second_index);
-            let dirty = rebuild_vector_layer(layer_state, width_px, height_px);
+            layer_state.vector_order.retain(|id| id != second);
+            let dirty = rebuild_vector_layer(layer_state, width_px, height_px)?;
             advance_revision(state)?;
             state.events.push(EngineEvent::TilesDirty {
                 revision: state.revision,
@@ -3064,6 +3303,15 @@ pub(super) fn dispatch_state(
                 .layers
                 .get_mut(layer)
                 .ok_or(EngineError::InvalidLayer)?;
+            if layer_state
+                .bezier_paths
+                .iter()
+                .any(|(id, _, _)| id == stroke)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "legacy segment erase is unsupported for Bézier paths".into(),
+                ));
+            }
             let index = layer_state
                 .vectors
                 .iter()
@@ -3074,6 +3322,7 @@ pub(super) fn dispatch_state(
             let (_, original) = layer_state.vectors[index].clone();
             let pieces = original.erase_segment((*center_x, *center_y), *radius);
             layer_state.vectors.remove(index);
+            layer_state.vector_order.retain(|id| id != stroke);
             let mut next_id = layer_state
                 .vectors
                 .iter()
@@ -3090,8 +3339,9 @@ pub(super) fn dispatch_state(
                     ink_model::StrokeId::from_u128(value)
                 };
                 layer_state.vectors.push((id, piece));
+                layer_state.vector_order.push(id);
             }
-            let dirty = rebuild_vector_layer(layer_state, width_px, height_px);
+            let dirty = rebuild_vector_layer(layer_state, width_px, height_px)?;
             advance_revision(state)?;
             state.events.push(EngineEvent::TilesDirty {
                 revision: state.revision,
@@ -3137,6 +3387,15 @@ pub(super) fn dispatch_state(
                     "vector control points require a vector-ink layer".into(),
                 ));
             }
+            if layer_state
+                .bezier_paths
+                .iter()
+                .any(|(id, _, _)| id == stroke)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "legacy point editing is unsupported for Bézier paths".into(),
+                ));
+            }
             let vector = layer_state
                 .vectors
                 .iter_mut()
@@ -3168,7 +3427,7 @@ pub(super) fn dispatch_state(
                 vector.points[point_index] = previous;
                 return Err(error);
             }
-            let dirty = rebuild_vector_layer(layer_state, width_px, height_px);
+            let dirty = rebuild_vector_layer(layer_state, width_px, height_px)?;
             advance_revision(state)?;
             state.events.push(EngineEvent::TilesDirty {
                 revision: state.revision,
@@ -3180,6 +3439,140 @@ pub(super) fn dispatch_state(
                     })
                     .collect(),
             });
+        }
+        EditorCommand::ApplyVectorPatch { layer, edits } => {
+            if edits.is_empty() || edits.len() > 4_096 {
+                return Err(EngineError::InvalidCommand(
+                    "vector patch edit count is outside limits".into(),
+                ));
+            }
+            let mut edited_ids = HashSet::new();
+            edited_ids.try_reserve(edits.len()).map_err(|_| {
+                EngineError::InvalidCommand("vector patch exceeds available memory".into())
+            })?;
+            for edit in edits {
+                let id = match edit {
+                    VectorPatchEdit::Insert { object_id, .. }
+                    | VectorPatchEdit::Replace { object_id, .. }
+                    | VectorPatchEdit::Remove { object_id } => *object_id,
+                };
+                if id.0 == 0 || !edited_ids.insert(id) {
+                    return Err(EngineError::InvalidCommand(
+                        "vector patch IDs must be nonzero and unique".into(),
+                    ));
+                }
+            }
+            let width_px = state.width_px;
+            let height_px = state.height_px;
+            let source_layer = state.layers.get(layer).ok_or(EngineError::InvalidLayer)?;
+            if source_layer.layer.kind != LayerKind::VectorInk {
+                return Err(EngineError::InvalidCommand(
+                    "vector patches require a vector-ink layer".into(),
+                ));
+            }
+            // Rebuilding always discards candidate tiles before rasterizing the
+            // complete ordered vector set. Clone only authoritative vector
+            // geometry and layer metadata; copying the old sparse tile map here
+            // would add peak memory without contributing to the candidate.
+            let mut candidate = LayerState {
+                layer: source_layer.layer.clone(),
+                tiles: TileStore::default(),
+                vectors: source_layer.vectors.clone(),
+                bezier_paths: source_layer.bezier_paths.clone(),
+                vector_order: source_layer.vector_order.clone(),
+            };
+            for edit in edits {
+                match edit {
+                    VectorPatchEdit::Insert {
+                        object_id,
+                        position,
+                        object,
+                    } => {
+                        if candidate.vector_order.contains(object_id) {
+                            return Err(EngineError::InvalidCommand(
+                                "vector object ID already exists on this layer".into(),
+                            ));
+                        }
+                        ink_model::validate_vector_object(
+                            object,
+                            DocumentSpec {
+                                width_px,
+                                height_px,
+                                dpi: 1.0,
+                                color_space: ink_model::ColorSpace::Srgb,
+                                background: Rgba8::default(),
+                            },
+                        )
+                        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+                        let index = usize::try_from(*position).unwrap_or(usize::MAX);
+                        if index > candidate.vector_order.len() {
+                            return Err(EngineError::InvalidCommand(
+                                "vector insertion position is outside the layer order".into(),
+                            ));
+                        }
+                        insert_vector_object(&mut candidate, *object_id, object.clone(), index)?;
+                    }
+                    VectorPatchEdit::Replace { object_id, object } => {
+                        ink_model::validate_vector_object(
+                            object,
+                            DocumentSpec {
+                                width_px,
+                                height_px,
+                                dpi: 1.0,
+                                color_space: ink_model::ColorSpace::Srgb,
+                                background: Rgba8::default(),
+                            },
+                        )
+                        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+                        let index = candidate
+                            .vector_order
+                            .iter()
+                            .position(|candidate_id| candidate_id == object_id)
+                            .ok_or_else(|| {
+                                EngineError::InvalidCommand(
+                                    "vector object to replace does not exist".into(),
+                                )
+                            })?;
+                        remove_vector_object(&mut candidate, *object_id);
+                        insert_vector_object(&mut candidate, *object_id, object.clone(), index)?;
+                    }
+                    VectorPatchEdit::Remove { object_id } => {
+                        if !remove_vector_object(&mut candidate, *object_id) {
+                            return Err(EngineError::InvalidCommand(
+                                "vector object to remove does not exist".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            let mut dirty = state
+                .layers
+                .get(layer)
+                .ok_or(EngineError::InvalidLayer)?
+                .tiles
+                .coordinates()
+                .collect::<Vec<_>>();
+            dirty.extend(rebuild_vector_layer(&mut candidate, width_px, height_px)?);
+            dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
+            dirty.dedup();
+            let revision = state.revision.checked_add(1).ok_or_else(|| {
+                EngineError::InvalidCommand("document revision is exhausted".into())
+            })?;
+            state.layers.insert(*layer, candidate);
+            state.revision = revision;
+            state.events.push(EngineEvent::LayersChanged { revision });
+            if !dirty.is_empty() {
+                state.events.push(EngineEvent::TilesDirty {
+                    revision,
+                    tiles: dirty
+                        .into_iter()
+                        .map(|coordinate| TileDescriptor {
+                            layer: *layer,
+                            coordinate,
+                        })
+                        .collect(),
+                });
+            }
         }
         EditorCommand::BeginStroke {
             stroke,
@@ -3358,6 +3751,26 @@ pub(super) fn dispatch_state(
                         .compiled_brush
                         .as_ref()
                         .map_or(active.brush.id.0, |brush| brush.source_id.0),
+                    brush_revision: active
+                        .compiled_brush
+                        .as_ref()
+                        .map_or(0, |brush| brush.source_revision),
+                    brush_semantics: active
+                        .compiled_brush
+                        .as_ref()
+                        .map_or(0, |brush| brush.semantics.0),
+                    pulled_string: active
+                        .compiled_brush
+                        .as_ref()
+                        .is_some_and(|brush| brush.pulled_string),
+                    stabilizer_distance_px: active
+                        .compiled_brush
+                        .as_ref()
+                        .map_or(0.0, |brush| brush.stabilizer_distance_px),
+                    catch_up_on_end: active
+                        .compiled_brush
+                        .as_ref()
+                        .is_some_and(|brush| brush.catch_up_on_end),
                     samples: active
                         .samples
                         .iter()
@@ -3705,6 +4118,13 @@ pub(super) fn dispatch_state(
             });
         }
     }
+    // A successful canvas command establishes a new top-level history branch.
+    // Keep the session-scoped brush undo slot intact when command validation
+    // or candidate construction fails before publication.
+    if !matches!(command, EditorCommand::Undo | EditorCommand::Redo) {
+        state.brush_undo = None;
+        state.brush_redo = None;
+    }
     if let Some(before_layers) = before_layers {
         state.undo_states.push(before_layers);
         trim_history_snapshots(&mut state.undo_states);
@@ -3712,7 +4132,7 @@ pub(super) fn dispatch_state(
             state.redo_states.clear();
         }
     }
-    state.journal.push(encode_command(&command));
+    state.journal.push(journal_payload);
     match command {
         command @ EditorCommand::BeginStroke { .. } => {
             state.history.push_preserving_redo(Transaction {

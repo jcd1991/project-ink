@@ -8,8 +8,26 @@
 
 use ink_model::{
     BrushId, Id, LayerAdjustment, LayerBlendMode, LayerGroupMode, LayerId, LayerKind, Rgba8,
-    StrokeId,
+    StrokeId, VectorObject,
 };
+
+const MAX_VECTOR_PATCH_BYTES: usize = 256 * 1_024;
+const MAX_VECTOR_PATCH_EDITS: usize = 4_096;
+
+/// One ordered, resolved-geometry edit in an atomic vector patch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VectorPatchEdit {
+    /// Insert an object at an explicit layer order position.
+    Insert {
+        object_id: Id,
+        position: u32,
+        object: VectorObject,
+    },
+    /// Replace geometry/style for an existing ID without changing its order.
+    Replace { object_id: Id, object: VectorObject },
+    /// Remove one object by stable ID.
+    Remove { object_id: Id },
+}
 
 /// User-visible command IDs are represented by this stable enum.
 #[derive(Clone, Debug, PartialEq)]
@@ -292,6 +310,11 @@ pub enum EditorCommand {
         pressure: f32,
         tilt: f32,
     },
+    /// Apply resolved geometry edits atomically to one vector layer.
+    ApplyVectorPatch {
+        layer: LayerId,
+        edits: Vec<VectorPatchEdit>,
+    },
     BeginStroke {
         stroke: StrokeId,
         layer: LayerId,
@@ -311,13 +334,32 @@ fn append_id(bytes: &mut Vec<u8>, value: ink_model::Id) {
     bytes.extend_from_slice(&value.0.to_le_bytes());
 }
 
-/// Encode a command for the append-only journal. The tag and field order are
-/// part of the v1 compatibility contract; decoding is validated by the
-/// storage loader before a document is accepted.
+/// Encode a command for the append-only journal. Invalid vector patches
+/// produce an empty payload; engine code should use [`try_encode_command`] to
+/// receive a typed error before changing document state.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
+    try_encode_command(command).unwrap_or_default()
+}
+
+/// Fallibly encode one command, enforcing the vector-patch size and geometry
+/// bounds before allocating its journal payload.
+pub fn try_encode_command(command: &EditorCommand) -> Result<Vec<u8>, CommandEncodeError> {
+    let capacity = if let EditorCommand::ApplyVectorPatch { edits, .. } = command {
+        vector_patch_encoded_size(edits)?
+    } else {
+        0
+    };
     let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| CommandEncodeError::VectorPatchTooLarge)?;
+    Ok(encode_command_unchecked(command, bytes))
+}
+
+#[allow(clippy::too_many_lines)]
+fn encode_command_unchecked(command: &EditorCommand, mut bytes: Vec<u8>) -> Vec<u8> {
     match command {
         EditorCommand::AddLayer { parent, kind } => {
             bytes.push(1);
@@ -596,6 +638,42 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
                     bytes.extend_from_slice(&brightness.to_le_bytes());
                     bytes.extend_from_slice(&contrast.to_le_bytes());
                 }
+                LayerAdjustment::Levels {
+                    input_black,
+                    input_white,
+                    gamma_hundredths,
+                    output_black,
+                    output_white,
+                } => {
+                    bytes.push(1);
+                    bytes.extend([input_black, input_white]);
+                    bytes.extend_from_slice(&gamma_hundredths.to_le_bytes());
+                    bytes.extend([output_black, output_white]);
+                }
+                LayerAdjustment::Curves {
+                    master,
+                    red,
+                    green,
+                    blue,
+                } => {
+                    bytes.push(2);
+                    for curve in [master, red, green, blue] {
+                        bytes.push(curve.len);
+                        for point in curve.points {
+                            bytes.extend([point.x, point.y]);
+                        }
+                    }
+                }
+                LayerAdjustment::HueSaturation {
+                    hue_degrees,
+                    saturation,
+                    lightness,
+                } => {
+                    bytes.push(3);
+                    bytes.extend_from_slice(&hue_degrees.to_le_bytes());
+                    bytes.extend_from_slice(&saturation.to_le_bytes());
+                    bytes.extend_from_slice(&lightness.to_le_bytes());
+                }
             }
         }
         EditorCommand::TransformLayer {
@@ -797,6 +875,36 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
+        EditorCommand::ApplyVectorPatch { layer, edits } => {
+            bytes.push(52);
+            append_id(&mut bytes, *layer);
+            bytes.push(1); // vector_semantics
+            let count = u16::try_from(edits.len()).unwrap_or(u16::MAX);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for edit in edits.iter().take(usize::from(count)) {
+                match edit {
+                    VectorPatchEdit::Insert {
+                        object_id,
+                        position,
+                        object,
+                    } => {
+                        bytes.push(0);
+                        append_id(&mut bytes, *object_id);
+                        bytes.extend_from_slice(&position.to_le_bytes());
+                        append_vector_object(&mut bytes, object);
+                    }
+                    VectorPatchEdit::Replace { object_id, object } => {
+                        bytes.push(1);
+                        append_id(&mut bytes, *object_id);
+                        append_vector_object(&mut bytes, object);
+                    }
+                    VectorPatchEdit::Remove { object_id } => {
+                        bytes.push(2);
+                        append_id(&mut bytes, *object_id);
+                    }
+                }
+            }
+        }
         EditorCommand::BeginStroke {
             stroke,
             layer,
@@ -821,6 +929,208 @@ pub fn encode_command(command: &EditorCommand) -> Vec<u8> {
     bytes
 }
 
+fn append_vector_object(bytes: &mut Vec<u8>, object: &VectorObject) {
+    match object {
+        VectorObject::LegacyInk { stroke } => {
+            bytes.push(0);
+            append_vector_stroke(bytes, stroke);
+        }
+        VectorObject::BezierPath { path, source } => {
+            bytes.push(1);
+            append_optional_color(bytes, path.style.fill);
+            append_optional_color(bytes, path.style.stroke);
+            bytes.extend_from_slice(&path.style.stroke_width.to_le_bytes());
+            bytes.push(match path.style.cap {
+                ink_model::StrokeCap::Butt => 0,
+                ink_model::StrokeCap::Square => 1,
+                ink_model::StrokeCap::Round => 2,
+            });
+            bytes.push(match path.style.join {
+                ink_model::StrokeJoin::Miter => 0,
+                ink_model::StrokeJoin::Bevel => 1,
+                ink_model::StrokeJoin::Round => 2,
+            });
+            bytes.extend_from_slice(&path.style.miter_limit.to_le_bytes());
+            bytes.push(match path.style.fill_rule {
+                ink_model::FillRule::NonZero => 0,
+                ink_model::FillRule::EvenOdd => 1,
+            });
+            bytes.extend_from_slice(
+                &u16::try_from(path.subpaths.len())
+                    .unwrap_or(u16::MAX)
+                    .to_le_bytes(),
+            );
+            for subpath in &path.subpaths {
+                bytes.push(u8::from(subpath.closed));
+                bytes.extend_from_slice(
+                    &u16::try_from(subpath.anchors.len())
+                        .unwrap_or(u16::MAX)
+                        .to_le_bytes(),
+                );
+                for anchor in &subpath.anchors {
+                    for value in [
+                        anchor.x,
+                        anchor.y,
+                        anchor.incoming[0],
+                        anchor.incoming[1],
+                        anchor.outgoing[0],
+                        anchor.outgoing[1],
+                    ] {
+                        bytes.extend_from_slice(&value.to_le_bytes());
+                    }
+                    bytes.push(match anchor.kind {
+                        ink_model::AnchorKind::Corner => 0,
+                        ink_model::AnchorKind::Smooth => 1,
+                    });
+                }
+            }
+            match source {
+                None => bytes.push(0),
+                Some(source) => {
+                    bytes.push(1);
+                    append_vector_stroke(bytes, &source.legacy);
+                }
+            }
+        }
+    }
+}
+
+fn append_vector_stroke(bytes: &mut Vec<u8>, stroke: &ink_model::VectorStroke) {
+    bytes.push(u8::from(stroke.closed));
+    bytes.extend_from_slice(
+        &u16::try_from(stroke.points.len())
+            .unwrap_or(u16::MAX)
+            .to_le_bytes(),
+    );
+    for point in &stroke.points {
+        for value in [point.x, point.y, point.pressure, point.tilt] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn append_optional_color(bytes: &mut Vec<u8>, color: Option<Rgba8>) {
+    match color {
+        None => bytes.push(0),
+        Some(color) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
+    }
+}
+
+fn vector_patch_encoded_size(edits: &[VectorPatchEdit]) -> Result<usize, CommandEncodeError> {
+    if edits.is_empty() || edits.len() > MAX_VECTOR_PATCH_EDITS {
+        return Err(CommandEncodeError::InvalidVectorPatch);
+    }
+    let mut size = 1_usize + 16 + 1 + 2; // tag, layer ID, semantics, edit count
+    for edit in edits {
+        size = size
+            .checked_add(match edit {
+                VectorPatchEdit::Insert { object, .. } => {
+                    1 + 16 + 4 + vector_object_encoded_size(object)?
+                }
+                VectorPatchEdit::Replace { object, .. } => {
+                    1 + 16 + vector_object_encoded_size(object)?
+                }
+                VectorPatchEdit::Remove { .. } => 1 + 16,
+            })
+            .ok_or(CommandEncodeError::VectorPatchTooLarge)?;
+        if size > MAX_VECTOR_PATCH_BYTES {
+            return Err(CommandEncodeError::VectorPatchTooLarge);
+        }
+    }
+    Ok(size)
+}
+
+fn vector_object_encoded_size(object: &VectorObject) -> Result<usize, CommandEncodeError> {
+    match object {
+        VectorObject::LegacyInk { stroke } => 1_usize
+            .checked_add(vector_stroke_encoded_size(stroke)?)
+            .ok_or(CommandEncodeError::VectorPatchTooLarge),
+        VectorObject::BezierPath { path, source } => {
+            if path.subpaths.is_empty()
+                || path.subpaths.len() > 128
+                || !path.style.stroke_width.is_finite()
+                || !(0.0..=4096.0).contains(&path.style.stroke_width)
+                || !path.style.miter_limit.is_finite()
+                || !(1.0..=64.0).contains(&path.style.miter_limit)
+                || (path.style.fill.is_none() && path.style.stroke.is_none())
+            {
+                return Err(CommandEncodeError::InvalidVectorPatch);
+            }
+            let mut total_anchors = 0_usize;
+            let mut size: usize = 1
+                + 1
+                + path.style.fill.map_or(0, |_| 4)
+                + 1
+                + path.style.stroke.map_or(0, |_| 4)
+                + 8
+                + 1
+                + 1
+                + 8
+                + 1
+                + 2
+                + 1;
+            for subpath in &path.subpaths {
+                let minimum = if subpath.closed { 3 } else { 2 };
+                if subpath.anchors.len() < minimum {
+                    return Err(CommandEncodeError::InvalidVectorPatch);
+                }
+                total_anchors = total_anchors
+                    .checked_add(subpath.anchors.len())
+                    .ok_or(CommandEncodeError::VectorPatchTooLarge)?;
+                if total_anchors > 1_024
+                    || subpath.anchors.iter().any(|anchor| {
+                        [
+                            anchor.x,
+                            anchor.y,
+                            anchor.incoming[0],
+                            anchor.incoming[1],
+                            anchor.outgoing[0],
+                            anchor.outgoing[1],
+                        ]
+                        .iter()
+                        .any(|value| !value.is_finite())
+                    })
+                {
+                    return Err(CommandEncodeError::InvalidVectorPatch);
+                }
+                size = size
+                    .checked_add(1 + 2 + subpath.anchors.len() * (6 * 8 + 1))
+                    .ok_or(CommandEncodeError::VectorPatchTooLarge)?;
+            }
+            if let Some(source) = source {
+                size = size
+                    .checked_add(1 + vector_stroke_encoded_size(&source.legacy)?)
+                    .ok_or(CommandEncodeError::VectorPatchTooLarge)?;
+            }
+            Ok(size)
+        }
+    }
+}
+
+fn vector_stroke_encoded_size(
+    stroke: &ink_model::VectorStroke,
+) -> Result<usize, CommandEncodeError> {
+    if stroke.points.is_empty()
+        || stroke.points.len() > 8_192
+        || stroke.points.iter().any(|point| {
+            !point.x.is_finite()
+                || !point.y.is_finite()
+                || !point.pressure.is_finite()
+                || !point.tilt.is_finite()
+                || !(0.0..=1.0).contains(&point.pressure)
+        })
+    {
+        return Err(CommandEncodeError::InvalidVectorPatch);
+    }
+    1_usize
+        .checked_add(2)
+        .and_then(|header| header.checked_add(stroke.points.len().checked_mul(16)?))
+        .ok_or(CommandEncodeError::VectorPatchTooLarge)
+}
+
 /// Errors returned while decoding a v1 command-journal payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandDecodeError {
@@ -833,6 +1143,10 @@ pub enum CommandDecodeError {
     InvalidAdjustment(u8),
     InvalidUtf8,
     StringTooLong,
+    InvalidVectorPatch,
+    InvalidVectorObject(u8),
+    InvalidVectorStyle(u8),
+    VectorPatchTooLarge,
     InvalidFloat,
     TrailingBytes,
 }
@@ -851,6 +1165,14 @@ impl std::fmt::Display for CommandDecodeError {
             Self::InvalidAdjustment(kind) => write!(f, "invalid adjustment kind {kind}"),
             Self::InvalidUtf8 => f.write_str("command string is not valid UTF-8"),
             Self::StringTooLong => f.write_str("command string exceeds the safety limit"),
+            Self::InvalidVectorPatch => f.write_str("vector patch is malformed"),
+            Self::InvalidVectorObject(kind) => {
+                write!(f, "unknown vector object kind {kind}")
+            }
+            Self::InvalidVectorStyle(value) => {
+                write!(f, "unknown vector style value {value}")
+            }
+            Self::VectorPatchTooLarge => f.write_str("vector patch exceeds the safety limit"),
             Self::InvalidFloat => f.write_str("command contains a non-finite float"),
             Self::TrailingBytes => f.write_str("command journal payload has trailing bytes"),
         }
@@ -858,6 +1180,24 @@ impl std::fmt::Display for CommandDecodeError {
 }
 
 impl std::error::Error for CommandDecodeError {}
+
+/// Errors returned when a command cannot be encoded within the journal contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandEncodeError {
+    InvalidVectorPatch,
+    VectorPatchTooLarge,
+}
+
+impl std::fmt::Display for CommandEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidVectorPatch => f.write_str("vector patch is malformed"),
+            Self::VectorPatchTooLarge => f.write_str("vector patch exceeds the safety limit"),
+        }
+    }
+}
+
+impl std::error::Error for CommandEncodeError {}
 
 /// Decode one v1 journal payload and reject malformed or future data.
 #[allow(clippy::too_many_lines)]
@@ -1173,6 +1513,36 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
                     brightness: i16::from_le_bytes(read_u16(bytes, &mut cursor)?.to_le_bytes()),
                     contrast: i16::from_le_bytes(read_u16(bytes, &mut cursor)?.to_le_bytes()),
                 },
+                1 => LayerAdjustment::Levels {
+                    input_black: read_u8(bytes, &mut cursor)?,
+                    input_white: read_u8(bytes, &mut cursor)?,
+                    gamma_hundredths: read_u16(bytes, &mut cursor)?,
+                    output_black: read_u8(bytes, &mut cursor)?,
+                    output_white: read_u8(bytes, &mut cursor)?,
+                },
+                2 => {
+                    let mut read_curve =
+                        || -> Result<ink_model::AdjustmentCurve, CommandDecodeError> {
+                            let len = read_u8(bytes, &mut cursor)?;
+                            let mut points = [ink_model::AdjustmentCurvePoint::default(); 16];
+                            for point in &mut points {
+                                point.x = read_u8(bytes, &mut cursor)?;
+                                point.y = read_u8(bytes, &mut cursor)?;
+                            }
+                            Ok(ink_model::AdjustmentCurve { points, len })
+                        };
+                    LayerAdjustment::Curves {
+                        master: read_curve()?,
+                        red: read_curve()?,
+                        green: read_curve()?,
+                        blue: read_curve()?,
+                    }
+                }
+                3 => LayerAdjustment::HueSaturation {
+                    hue_degrees: i16::from_le_bytes(read_u16(bytes, &mut cursor)?.to_le_bytes()),
+                    saturation: i16::from_le_bytes(read_u16(bytes, &mut cursor)?.to_le_bytes()),
+                    lightness: i16::from_le_bytes(read_u16(bytes, &mut cursor)?.to_le_bytes()),
+                },
                 invalid => return Err(CommandDecodeError::InvalidAdjustment(invalid)),
             }
             .validate()
@@ -1326,6 +1696,43 @@ pub fn decode_command(bytes: &[u8]) -> Result<EditorCommand, CommandDecodeError>
             pressure: read_f32(bytes, &mut cursor)?,
             tilt: read_f32(bytes, &mut cursor)?,
         },
+        52 => {
+            if bytes.len() > MAX_VECTOR_PATCH_BYTES {
+                return Err(CommandDecodeError::VectorPatchTooLarge);
+            }
+            let layer = Id::from_u128(read_id(bytes, &mut cursor)?);
+            let semantics = read_u8(bytes, &mut cursor)?;
+            if semantics != 1 {
+                return Err(CommandDecodeError::InvalidVectorPatch);
+            }
+            let count = usize::from(read_u16(bytes, &mut cursor)?);
+            if count == 0 || count > MAX_VECTOR_PATCH_EDITS {
+                return Err(CommandDecodeError::InvalidVectorPatch);
+            }
+            let mut edits = Vec::new();
+            edits
+                .try_reserve(count)
+                .map_err(|_| CommandDecodeError::VectorPatchTooLarge)?;
+            for _ in 0..count {
+                let kind = read_u8(bytes, &mut cursor)?;
+                let object_id = Id::from_u128(read_id(bytes, &mut cursor)?);
+                let edit = match kind {
+                    0 => VectorPatchEdit::Insert {
+                        object_id,
+                        position: read_u32(bytes, &mut cursor)?,
+                        object: read_vector_object(bytes, &mut cursor)?,
+                    },
+                    1 => VectorPatchEdit::Replace {
+                        object_id,
+                        object: read_vector_object(bytes, &mut cursor)?,
+                    },
+                    2 => VectorPatchEdit::Remove { object_id },
+                    _ => return Err(CommandDecodeError::InvalidVectorPatch),
+                };
+                edits.push(edit);
+            }
+            EditorCommand::ApplyVectorPatch { layer, edits }
+        }
         6 => EditorCommand::BeginStroke {
             stroke: Id::from_u128(read_id(bytes, &mut cursor)?),
             layer: Id::from_u128(read_id(bytes, &mut cursor)?),
@@ -1419,6 +1826,20 @@ fn read_f32(bytes: &[u8], cursor: &mut usize) -> Result<f32, CommandDecodeError>
     }
 }
 
+fn read_f64(bytes: &[u8], cursor: &mut usize) -> Result<f64, CommandDecodeError> {
+    let end = cursor.checked_add(8).ok_or(CommandDecodeError::Truncated)?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or(CommandDecodeError::Truncated)?;
+    *cursor = end;
+    let value = f64::from_le_bytes(value.try_into().expect("slice length checked"));
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(CommandDecodeError::InvalidFloat)
+    }
+}
+
 fn read_id(bytes: &[u8], cursor: &mut usize) -> Result<u128, CommandDecodeError> {
     let end = cursor
         .checked_add(16)
@@ -1430,6 +1851,163 @@ fn read_id(bytes: &[u8], cursor: &mut usize) -> Result<u128, CommandDecodeError>
     Ok(u128::from_le_bytes(
         value.try_into().expect("slice length checked"),
     ))
+}
+
+fn read_vector_object(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<VectorObject, CommandDecodeError> {
+    match read_u8(bytes, cursor)? {
+        0 => Ok(VectorObject::LegacyInk {
+            stroke: read_vector_stroke(bytes, cursor)?,
+        }),
+        1 => {
+            let fill = read_optional_color(bytes, cursor)?;
+            let stroke = read_optional_color(bytes, cursor)?;
+            let stroke_width = read_f64(bytes, cursor)?;
+            let cap = match read_u8(bytes, cursor)? {
+                0 => ink_model::StrokeCap::Butt,
+                1 => ink_model::StrokeCap::Square,
+                2 => ink_model::StrokeCap::Round,
+                value => return Err(CommandDecodeError::InvalidVectorStyle(value)),
+            };
+            let join = match read_u8(bytes, cursor)? {
+                0 => ink_model::StrokeJoin::Miter,
+                1 => ink_model::StrokeJoin::Bevel,
+                2 => ink_model::StrokeJoin::Round,
+                value => return Err(CommandDecodeError::InvalidVectorStyle(value)),
+            };
+            let miter_limit = read_f64(bytes, cursor)?;
+            let fill_rule = match read_u8(bytes, cursor)? {
+                0 => ink_model::FillRule::NonZero,
+                1 => ink_model::FillRule::EvenOdd,
+                value => return Err(CommandDecodeError::InvalidVectorStyle(value)),
+            };
+            let subpath_count = usize::from(read_u16(bytes, cursor)?);
+            if subpath_count == 0 || subpath_count > 128 {
+                return Err(CommandDecodeError::InvalidVectorPatch);
+            }
+            let mut subpaths = Vec::new();
+            subpaths
+                .try_reserve_exact(subpath_count)
+                .map_err(|_| CommandDecodeError::VectorPatchTooLarge)?;
+            let mut total_anchors = 0_usize;
+            for _ in 0..subpath_count {
+                let closed = read_bool(bytes, cursor)?;
+                let anchor_count = usize::from(read_u16(bytes, cursor)?);
+                let minimum = if closed { 3 } else { 2 };
+                total_anchors = total_anchors
+                    .checked_add(anchor_count)
+                    .ok_or(CommandDecodeError::VectorPatchTooLarge)?;
+                if anchor_count < minimum || total_anchors > 1_024 {
+                    return Err(CommandDecodeError::InvalidVectorPatch);
+                }
+                let mut anchors = Vec::new();
+                anchors
+                    .try_reserve_exact(anchor_count)
+                    .map_err(|_| CommandDecodeError::VectorPatchTooLarge)?;
+                for _ in 0..anchor_count {
+                    let x = read_f64(bytes, cursor)?;
+                    let y = read_f64(bytes, cursor)?;
+                    let incoming = [read_f64(bytes, cursor)?, read_f64(bytes, cursor)?];
+                    let outgoing = [read_f64(bytes, cursor)?, read_f64(bytes, cursor)?];
+                    let kind = match read_u8(bytes, cursor)? {
+                        0 => ink_model::AnchorKind::Corner,
+                        1 => ink_model::AnchorKind::Smooth,
+                        value => return Err(CommandDecodeError::InvalidVectorStyle(value)),
+                    };
+                    anchors.push(ink_model::BezierAnchor {
+                        x,
+                        y,
+                        incoming,
+                        outgoing,
+                        kind,
+                    });
+                }
+                subpaths.push(ink_model::BezierSubpath { anchors, closed });
+            }
+            let source = match read_u8(bytes, cursor)? {
+                0 => None,
+                1 => Some(ink_model::VectorSourceArchive {
+                    legacy: read_vector_stroke(bytes, cursor)?,
+                }),
+                value => return Err(CommandDecodeError::InvalidFlag(value)),
+            };
+            if (fill.is_none() && stroke.is_none())
+                || !(0.0..=4096.0).contains(&stroke_width)
+                || !(1.0..=64.0).contains(&miter_limit)
+            {
+                return Err(CommandDecodeError::InvalidVectorPatch);
+            }
+            Ok(VectorObject::BezierPath {
+                path: ink_model::BezierPath {
+                    subpaths,
+                    style: ink_model::VectorStyle {
+                        fill,
+                        stroke,
+                        stroke_width,
+                        cap,
+                        join,
+                        miter_limit,
+                        fill_rule,
+                    },
+                },
+                source,
+            })
+        }
+        value => Err(CommandDecodeError::InvalidVectorObject(value)),
+    }
+}
+
+fn read_vector_stroke(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<ink_model::VectorStroke, CommandDecodeError> {
+    let closed = read_bool(bytes, cursor)?;
+    let point_count = usize::from(read_u16(bytes, cursor)?);
+    if point_count == 0 || point_count > 8_192 {
+        return Err(CommandDecodeError::InvalidVectorPatch);
+    }
+    let mut points = Vec::new();
+    points
+        .try_reserve_exact(point_count)
+        .map_err(|_| CommandDecodeError::VectorPatchTooLarge)?;
+    for _ in 0..point_count {
+        let point = ink_model::VectorPoint {
+            x: read_f32(bytes, cursor)?,
+            y: read_f32(bytes, cursor)?,
+            pressure: read_f32(bytes, cursor)?,
+            tilt: read_f32(bytes, cursor)?,
+        };
+        if !(0.0..=1.0).contains(&point.pressure) {
+            return Err(CommandDecodeError::InvalidVectorPatch);
+        }
+        points.push(point);
+    }
+    Ok(ink_model::VectorStroke { points, closed })
+}
+
+fn read_optional_color(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<Rgba8>, CommandDecodeError> {
+    match read_u8(bytes, cursor)? {
+        0 => Ok(None),
+        1 => {
+            let end = cursor.checked_add(4).ok_or(CommandDecodeError::Truncated)?;
+            let value = bytes
+                .get(*cursor..end)
+                .ok_or(CommandDecodeError::Truncated)?;
+            *cursor = end;
+            Ok(Some(Rgba8 {
+                r: value[0],
+                g: value[1],
+                b: value[2],
+                a: value[3],
+            }))
+        }
+        value => Err(CommandDecodeError::InvalidFlag(value)),
+    }
 }
 
 fn read_optional_id(bytes: &[u8], cursor: &mut usize) -> Result<Option<u128>, CommandDecodeError> {
@@ -1609,6 +2187,7 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     #[test]
     fn redo_is_cleared_after_new_command() {
         let layer = LayerId::from_u128(1);
@@ -1844,6 +2423,33 @@ mod tests {
                     contrast: 73,
                 },
             },
+            EditorCommand::SetLayerAdjustment {
+                layer: LayerId::from_u128(6),
+                adjustment: LayerAdjustment::Levels {
+                    input_black: 4,
+                    input_white: 247,
+                    gamma_hundredths: 125,
+                    output_black: 3,
+                    output_white: 250,
+                },
+            },
+            EditorCommand::SetLayerAdjustment {
+                layer: LayerId::from_u128(6),
+                adjustment: LayerAdjustment::Curves {
+                    master: ink_model::AdjustmentCurve::identity(),
+                    red: ink_model::AdjustmentCurve::identity(),
+                    green: ink_model::AdjustmentCurve::identity(),
+                    blue: ink_model::AdjustmentCurve::identity(),
+                },
+            },
+            EditorCommand::SetLayerAdjustment {
+                layer: LayerId::from_u128(6),
+                adjustment: LayerAdjustment::HueSaturation {
+                    hue_degrees: -45,
+                    saturation: 22,
+                    lightness: -12,
+                },
+            },
             EditorCommand::TransformLayer {
                 layer: LayerId::from_u128(6),
                 a: 1.0,
@@ -1955,6 +2561,77 @@ mod tests {
                 pressure: 0.75,
                 tilt: -0.25,
             },
+            EditorCommand::ApplyVectorPatch {
+                layer: LayerId::from_u128(77),
+                edits: vec![
+                    VectorPatchEdit::Insert {
+                        object_id: Id::from_u128(78),
+                        position: 2,
+                        object: VectorObject::LegacyInk {
+                            stroke: ink_model::VectorStroke {
+                                points: vec![ink_model::VectorPoint {
+                                    x: 1.0,
+                                    y: 2.0,
+                                    pressure: 0.5,
+                                    tilt: 0.0,
+                                }],
+                                closed: false,
+                            },
+                        },
+                    },
+                    VectorPatchEdit::Replace {
+                        object_id: Id::from_u128(79),
+                        object: VectorObject::BezierPath {
+                            path: ink_model::BezierPath {
+                                subpaths: vec![ink_model::BezierSubpath {
+                                    anchors: vec![
+                                        ink_model::BezierAnchor {
+                                            x: 0.0,
+                                            y: 0.0,
+                                            incoming: [0.0, 0.0],
+                                            outgoing: [0.0, 0.0],
+                                            kind: ink_model::AnchorKind::Corner,
+                                        },
+                                        ink_model::BezierAnchor {
+                                            x: 10.0,
+                                            y: 0.0,
+                                            incoming: [10.0, 0.0],
+                                            outgoing: [10.0, 0.0],
+                                            kind: ink_model::AnchorKind::Corner,
+                                        },
+                                        ink_model::BezierAnchor {
+                                            x: 5.0,
+                                            y: 10.0,
+                                            incoming: [5.0, 10.0],
+                                            outgoing: [5.0, 10.0],
+                                            kind: ink_model::AnchorKind::Corner,
+                                        },
+                                    ],
+                                    closed: true,
+                                }],
+                                style: ink_model::VectorStyle {
+                                    fill: Some(Rgba8 {
+                                        r: 10,
+                                        g: 20,
+                                        b: 30,
+                                        a: 255,
+                                    }),
+                                    stroke: None,
+                                    stroke_width: 0.0,
+                                    cap: ink_model::StrokeCap::Round,
+                                    join: ink_model::StrokeJoin::Round,
+                                    miter_limit: 4.0,
+                                    fill_rule: ink_model::FillRule::NonZero,
+                                },
+                            },
+                            source: None,
+                        },
+                    },
+                    VectorPatchEdit::Remove {
+                        object_id: Id::from_u128(80),
+                    },
+                ],
+            },
             EditorCommand::BeginStroke {
                 stroke: StrokeId::from_u128(7),
                 layer: LayerId::from_u128(8),
@@ -1972,6 +2649,202 @@ mod tests {
         for command in commands {
             assert_eq!(decode_command(&encode_command(&command)), Ok(command));
         }
+    }
+
+    #[test]
+    fn vector_patch_uses_versioned_little_endian_payload_and_rejects_oversize() {
+        let layer = LayerId::from_u128(77);
+        let make_stroke = || VectorObject::LegacyInk {
+            stroke: ink_model::VectorStroke {
+                points: (0..8_192)
+                    .map(|_| ink_model::VectorPoint {
+                        x: 0.0,
+                        y: 2.0,
+                        pressure: 0.5,
+                        tilt: 0.0,
+                    })
+                    .collect(),
+                closed: false,
+            },
+        };
+        let single = EditorCommand::ApplyVectorPatch {
+            layer,
+            edits: vec![VectorPatchEdit::Insert {
+                object_id: Id::from_u128(78),
+                position: 0,
+                object: make_stroke(),
+            }],
+        };
+        let encoded = try_encode_command(&single).expect("bounded vector patch");
+        let EditorCommand::ApplyVectorPatch { edits, .. } = &single else {
+            unreachable!("fixture is a vector patch");
+        };
+        assert_eq!(vector_patch_encoded_size(edits), Ok(encoded.len()));
+        assert_eq!(encoded[0], 52);
+        assert_eq!(encoded[17], 1, "vector semantics version");
+        assert_eq!(decode_command(&encoded), Ok(single));
+
+        let oversized = EditorCommand::ApplyVectorPatch {
+            layer,
+            edits: vec![
+                VectorPatchEdit::Insert {
+                    object_id: Id::from_u128(79),
+                    position: 0,
+                    object: make_stroke(),
+                },
+                VectorPatchEdit::Insert {
+                    object_id: Id::from_u128(80),
+                    position: 1,
+                    object: make_stroke(),
+                },
+            ],
+        };
+        assert_eq!(
+            try_encode_command(&oversized),
+            Err(CommandEncodeError::VectorPatchTooLarge)
+        );
+        assert!(encode_command(&oversized).is_empty());
+    }
+
+    fn generated_path(x: i16, y: i16, width: u8, alpha: u8) -> VectorObject {
+        let legacy_x = f32::from(x);
+        let legacy_y = f32::from(y);
+        let x = f64::from(x);
+        let y = f64::from(y);
+        VectorObject::BezierPath {
+            path: ink_model::BezierPath {
+                subpaths: vec![ink_model::BezierSubpath {
+                    anchors: vec![
+                        ink_model::BezierAnchor {
+                            x,
+                            y,
+                            incoming: [x, y],
+                            outgoing: [x, y],
+                            kind: ink_model::AnchorKind::Corner,
+                        },
+                        ink_model::BezierAnchor {
+                            x: x + 20.0,
+                            y,
+                            incoming: [x + 20.0, y],
+                            outgoing: [x + 20.0, y],
+                            kind: ink_model::AnchorKind::Smooth,
+                        },
+                        ink_model::BezierAnchor {
+                            x: x + 10.0,
+                            y: y + 20.0,
+                            incoming: [x + 10.0, y + 20.0],
+                            outgoing: [x + 10.0, y + 20.0],
+                            kind: ink_model::AnchorKind::Corner,
+                        },
+                    ],
+                    closed: true,
+                }],
+                style: ink_model::VectorStyle {
+                    fill: Some(ink_model::Rgba8 {
+                        r: 17,
+                        g: 63,
+                        b: 201,
+                        a: alpha,
+                    }),
+                    stroke: None,
+                    stroke_width: f64::from(width),
+                    cap: ink_model::StrokeCap::Round,
+                    join: ink_model::StrokeJoin::Bevel,
+                    miter_limit: 4.0,
+                    fill_rule: ink_model::FillRule::EvenOdd,
+                },
+            },
+            source: Some(ink_model::VectorSourceArchive {
+                legacy: ink_model::VectorStroke {
+                    points: vec![
+                        ink_model::VectorPoint {
+                            x: legacy_x,
+                            y: legacy_y,
+                            pressure: 0.25,
+                            tilt: -0.5,
+                        },
+                        ink_model::VectorPoint {
+                            x: legacy_x + 20.0,
+                            y: legacy_y + 20.0,
+                            pressure: 1.0,
+                            tilt: 0.5,
+                        },
+                    ],
+                    closed: false,
+                },
+            }),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn generated_bezier_patch_round_trips_through_tag_52(
+            x in -500_i16..500,
+            y in -500_i16..500,
+            width in 0_u8..32,
+            alpha in any::<u8>(),
+            insertion_position in 0_u32..128,
+        ) {
+            let command = EditorCommand::ApplyVectorPatch {
+                layer: LayerId::from_u128(77),
+                edits: vec![
+                    VectorPatchEdit::Insert {
+                        object_id: Id::from_u128(78),
+                        position: insertion_position,
+                        object: generated_path(x, y, width, alpha),
+                    },
+                    VectorPatchEdit::Remove {
+                        object_id: Id::from_u128(79),
+                    },
+                ],
+            };
+            let encoded = try_encode_command(&command).expect("generated patch fits codec limits");
+            prop_assert_eq!(encoded.first(), Some(&52));
+            prop_assert_eq!(decode_command(&encoded), Ok(command));
+        }
+    }
+
+    #[test]
+    fn vector_patch_decoder_rejects_unknown_semantics_before_reading_edits() {
+        let mut encoded = encode_command(&EditorCommand::ApplyVectorPatch {
+            layer: LayerId::from_u128(77),
+            edits: vec![VectorPatchEdit::Remove {
+                object_id: Id::from_u128(78),
+            }],
+        });
+        encoded[17] = 2;
+        assert_eq!(
+            decode_command(&encoded),
+            Err(CommandDecodeError::InvalidVectorPatch)
+        );
+    }
+
+    #[test]
+    fn vector_patch_decoder_rejects_unknown_object_tag() {
+        let mut encoded = encode_command(&EditorCommand::ApplyVectorPatch {
+            layer: LayerId::from_u128(77),
+            edits: vec![VectorPatchEdit::Replace {
+                object_id: Id::from_u128(78),
+                object: VectorObject::LegacyInk {
+                    stroke: ink_model::VectorStroke {
+                        points: vec![ink_model::VectorPoint {
+                            x: 1.0,
+                            y: 2.0,
+                            pressure: 0.5,
+                            tilt: 0.0,
+                        }],
+                        closed: false,
+                    },
+                },
+            }],
+        });
+        encoded[37] = 255;
+        assert_eq!(
+            decode_command(&encoded),
+            Err(CommandDecodeError::InvalidVectorObject(255))
+        );
     }
 
     #[test]
@@ -2006,6 +2879,17 @@ mod tests {
         assert_eq!(
             decode_command(&invalid_utf8),
             Err(CommandDecodeError::InvalidUtf8)
+        );
+
+        let mut invalid_vector_edit = vec![52];
+        invalid_vector_edit.extend_from_slice(&[0; 16]);
+        invalid_vector_edit.push(1); // vector_semantics
+        invalid_vector_edit.extend_from_slice(&1_u16.to_le_bytes());
+        invalid_vector_edit.push(9);
+        invalid_vector_edit.extend_from_slice(&[0; 16]);
+        assert_eq!(
+            decode_command(&invalid_vector_edit),
+            Err(CommandDecodeError::InvalidVectorPatch)
         );
     }
 

@@ -10,6 +10,12 @@ pub(super) struct LayerState {
     pub(super) layer: Layer,
     pub(super) tiles: TileStore,
     pub(super) vectors: Vec<(ink_model::StrokeId, VectorStroke)>,
+    pub(super) bezier_paths: Vec<(
+        ink_model::StrokeId,
+        ink_model::BezierPath,
+        Option<ink_model::VectorSourceArchive>,
+    )>,
+    pub(super) vector_order: Vec<ink_model::StrokeId>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +119,9 @@ pub(super) struct BrushDraftSettings {
     pub(super) rotation_jitter: f32,
     pub(super) smudge: f32,
     pub(super) wetness: f32,
+    pub(super) pulled_string: bool,
+    pub(super) stabilizer_distance_px: f32,
+    pub(super) catch_up_on_end: bool,
     pub(super) pressure_curve_points: Vec<f32>,
 }
 
@@ -217,6 +226,10 @@ pub(super) struct EngineState {
     /// one ordinary command to history and cancel restores the original value.
     pub(super) opacity_edit: Option<LayerOpacityEdit>,
     pub(super) next_opacity_edit: u64,
+    /// In-flight adjustment preview. The original is restored before the
+    /// final command enters history or when the preview is canceled.
+    pub(super) adjustment_edit: Option<LayerAdjustmentEdit>,
+    pub(super) next_adjustment_edit: u64,
     /// Rust-generated ephemeral dabs shared with an optional GPU preview.
     /// If the optional preview queue is saturated, the CPU document continues
     /// without interruption and this counter records that the preview should
@@ -236,4 +249,11 @@ pub(super) struct LayerOpacityEdit {
     pub(super) id: u64,
     pub(super) layer: LayerId,
     pub(super) original: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LayerAdjustmentEdit {
+    pub(super) id: u64,
+    pub(super) layer: LayerId,
+    pub(super) original: ink_model::LayerAdjustment,
 }

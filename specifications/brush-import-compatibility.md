@@ -37,8 +37,8 @@ The UI shows the tier before the user saves the converted preset. Tier B and C r
 | Krita bundle | `.bundle` | Required | B/C | Import contained `.kpp` presets through the same bounded validation path; unsupported resource kinds are reported and never extracted to the filesystem. |
 | MyPaint brush | `.myb` | After Krita | B/C | Parse the documented JSON settings directly. Do not link `libmypaint` into the runtime. |
 | Photoshop brush | `.abr` | Experimental | C | Tip/resources and a conservative settings subset only. Never promise Photoshop-equivalent rendering. |
-| Clip Studio Paint | `.sut`, `.tos` | Guided recreation by default | D | Add a decoder only after format and redistribution review. If a safe decoder exists, label results experimental and C at best until compatibility fixtures prove more. |
-| Procreate | `.brush`, `.brushset`, `.brushlibrary` | Guided recreation by default | D | Add a decoder only after format and redistribution review. The official import feature does not constitute a public file-format contract. |
+| SUT/TOS archives | `.sut`, `.tos` | Guided recreation by default | D | No metadata decoder is registered. Reuse only safe, ordinary image resources; require format and redistribution review before adding a decoder. |
+| Brush archives | `.brush`, `.brushset`, `.brushlibrary` | Guided recreation by default | D | No settings decoder is registered. Reuse only bounded, ordinary image resources; require format and redistribution review before adding a decoder. |
 | Images | PNG, JPEG, WebP | Required | C/D | Create a brush tip, grain, or reference image after explicit user choice. |
 
 Phase 2 does not import executable plugins, scripts, SVG filters, shader code, or source-application automation. Brush archives cannot request network access or reference files outside their own archive.
@@ -170,20 +170,17 @@ Project Ink does not use MyPaint's renderer and must not claim pixel parity. Set
 
 ## Photoshop `.abr` mapping
 
-ABR support is explicitly experimental because the format is not publicly specified as a stable interoperability contract and implementations commonly support only subsets.
+ABR support is explicitly experimental because the format is not publicly specified as a stable interoperability contract and implementations commonly support only subsets. Project Ink pins the MIT-licensed PhotoCraft parser at commit `5ecc860ac1abf8fa7e3f218c0474cdcce49fa6c7`; parsing and conversion live in `ink-brush`, outside the engine.
 
-The first implementation may recover brush-tip images and well-understood scalar settings. It must:
+The current bounded importer handles legacy v1/v2 computed and sampled tips, plus sectioned v6+ sampled data and brush preset descriptors exposed by the pinned parser. It maps diameter, hardness, roundness, angle, spacing, and sampled coverage into Ink's existing tip/preset model. Sixteen-bit sampled coverage is reduced to eight-bit. Converted presets remain **Approximate, Tier C** and carry a renderer-parity warning. Unsupported descriptor settings are listed by source key; tips without a usable descriptor are reported as omitted. Source identity is hash-checked before the entire selected report is registered as one library transaction.
 
-- use a clean-room or appropriately licensed parser;
-- keep parsing separate from engine code;
-- require version-specific fixtures;
-- reject unknown records safely;
-- label converted presets C unless a compatibility suite justifies B;
-- avoid using application trademarks in the saved Project Ink preset name unless the user entered them.
+Limits apply before reading the source and while converting resources: the source is bounded by the existing 256 MiB brush-import cap, each decoded tip by the existing resource/dimension limits, at most 256 reports are produced, and cumulative converted resource bytes are bounded. Parsing warnings and unsupported records appear in the report. Cancellation or any conversion, source-hash, preset-validation, or library-budget failure registers nothing.
 
-## Clip Studio Paint `.sut` and `.tos`
+Version-specific fixtures cover v1/v2 computed and sampled tips, v6 sampled data/settings, detection, coverage polarity, and Tier C labeling. Extend fixtures for malformed/truncated records, cumulative resource limits, and additional v6+ descriptor variants as parser support is expanded. Do not add a source application's name to the saved Project Ink preset unless the user entered it.
 
-Clip Studio exposes a rich brush model including brush tips, spraying, stroke behavior, texture, dual brushes, watercolor edges, correction, and input dynamics. However, supported import/export does not by itself provide a stable, public decoding contract for third-party applications.
+## SUT and TOS archive files
+
+These archives can contain brush tips, textures, stroke settings, and other resources, but the formats do not provide a stable public decoding contract for third-party applications.
 
 Phase 2 therefore ships a guided recreation path:
 
@@ -200,17 +197,17 @@ An experimental `.sut` or `.tos` decoder may be added only after:
 - proof that the decoder does not bypass encryption, licensing, or marketplace controls;
 - UI language that distinguishes conversion from exact compatibility.
 
-For `.sut`, Project Ink may reuse a referenced ordinary PNG material thumbnail as a low-resolution guided tip or texture when the SQLite reference and TAR member can be matched without decoding proprietary payloads. It must not decrypt, decode, or bypass Clip Studio's opaque C2F material format. A thumbnail is an approximation, not the source material. Extracted user-provided assets stay inside that user's document/library; Project Ink must never redistribute proprietary marketplace brush resources without permission.
+For `.sut`, Project Ink may reuse a referenced ordinary PNG material thumbnail as a low-resolution guided tip or texture when the SQLite reference and TAR member can be matched without decoding protected payloads. It must not decrypt, decode, or bypass an opaque material format. A thumbnail is an approximation, not the source material. Extracted user-provided assets stay inside that user's document/library; Project Ink must never redistribute marketplace brush resources without permission.
 
-## Procreate `.brush`, `.brushset`, and `.brushlibrary`
+## Brush archive files
 
-Procreate's Brush Studio documents the user-facing behavior categories, including stroke path, stabilization, taper, shape, grain, rendering, wet mix, color dynamics, Apple Pencil response, and dual brushes. Those categories are valuable mapping guidance, but they do not make the files a stable public interchange format.
+These archives may describe stroke path, stabilization, taper, shape, grain, rendering, wet mix, color dynamics, stylus response, and combined brushes. Those settings are useful mapping concepts, but the archive contents do not provide a stable public interchange format.
 
-Phase 2 uses guided recreation rather than source-setting conversion. For a user-selected `.brush` archive, the importer may reuse ordinary `Shape.png` and `Grain.png` members after bounded ZIP and image validation. It normalizes monochrome shape luminance into tip coverage and applies Project Ink grain defaults. Brush Studio settings remain uninterpreted, and the result is marked recreated.
+Phase 2 uses guided recreation rather than source-setting conversion. For a user-selected `.brush` archive, the importer may reuse ordinary `Shape.png` and `Grain.png` members after bounded ZIP and image validation. It normalizes monochrome shape luminance into tip coverage and applies Project Ink grain defaults. Archive settings remain uninterpreted, and the result is marked recreated.
 
 When a guided report includes supported image resources, the report offers an explicit **Create from extracted images** action. This is a user-confirmed creation of a new Project Ink brush, not automatic conversion or installation. The report identifies source settings and rendering behavior that were not carried across.
 
-An experimental decoder has the same prerequisites as the Clip Studio decoder. It must additionally handle unknown keyed-archive classes as inert data, never instantiate source-named runtime classes, and enforce object-graph depth and object-count limits.
+An experimental decoder must handle unknown keyed-archive classes as inert data, never instantiate archive-named runtime classes, and enforce object-graph depth and object-count limits. It also requires legal and license review, independent parser fuzzing, bounded resource handling, and validation against multiple format versions.
 
 ## Brush Recreation Assistant
 
@@ -269,10 +266,3 @@ Fixtures copied from commercial brush marketplaces are forbidden unless their li
 - Krita paint preset structure: <https://docs.krita.org/en/reference_manual/resource_management/paintoppresets.html>
 - Krita FAQ on Photoshop brush support: <https://docs.krita.org/en/KritaFAQ.html#can-krita-load-photoshop-brushes>
 - MyPaint brush settings: <https://github.com/mypaint/libmypaint/blob/master/brushsettings.json>
-- Clip Studio brush customization: <https://help.clip-studio.com/en-us/manual_en/240_brushes/Customizing_brush_tools.htm>
-- Clip Studio supported brush files: <https://support.clip-studio.com/en-us/faq/articles/20200233>
-- Procreate Brush Studio: <https://help.procreate.com/procreate/handbook/brushes/brush-studio>
-- Procreate Brush Studio settings: <https://help.procreate.com/procreate/handbook/brushes/brush-studio-settings>
-- Procreate Dual Brush: <https://help.procreate.com/procreate/handbook/brushes/dual-brush>
-- Procreate brush import and sharing: <https://help.procreate.com/procreate/handbook/brushes/brushes-share>
-- VAMPBYTE Clip Studio brush guide supplied by the project owner: <https://www.patreon.com/vampbyte/posts/clip-studio-31820359>

@@ -10,13 +10,16 @@ effects. It also defines the native `.inkbrush` and `.inkbrushpack` formats.
 External-format conversion policy is specified in
 [`brush-import-compatibility.md`](brush-import-compatibility.md).
 
+Format-3 pulled-string compatibility is specified below. Format-2 presets and
+evaluator semantics remain unchanged.
+
 ## Product goals
 
 The Phase 2 brush system must:
 
 - Feel responsive on iPad, Android tablets and phones, and desktop tablets.
-- Cover the daily illustration range of Clip Studio Paint, Krita, Procreate,
-  and similar professional tools without copying their UI or proprietary data.
+- Cover a broad range of illustration workflows without copying another
+  application's interface or proprietary data.
 - Let artists duplicate, edit, preview, tag, favorite, import, and export
   brushes without an account or network connection.
 - Keep every preset declarative. A brush or brush pack may never contain
@@ -195,13 +198,20 @@ first confirmed move, then gives the start sample the pressure from the
 earliest confirmed measured move. A contact that ends without moving preserves
 its initial pressure and remains a tap.
 
-Every pressure-bound built-in brush defers its first dab until movement or a
-stationary tap is confirmed, then ramps dab radius and opacity by confirmed
-travel distance over one base brush diameter. Motion is detected before
-spacing resampling, so a short first segment cannot jump to a full-size,
-fully opaque dab; stationary taps keep their normal mark. Technical Pen's
-pressure-size binding reaches +100% diameter, with a wider size response
-through the measured light-force range and continued growth at firmer pressure.
+Every built-in brush now has a stylus-pressure binding and defers its first dab
+until movement or a stationary tap is confirmed, then ramps dab radius and
+opacity by confirmed travel distance over one base brush diameter. Motion is
+detected before spacing resampling, so a short first segment cannot jump to a
+full-size, fully opaque dab; stationary taps keep their normal mark. Technical Pen
+revision 4 maps pressure directly to its preset diameter, with a visible 12%
+minimum and a full-size response at maximum force. The response is tuned
+across the S23 Ultra's measured light-to-firm normalized pressure range.
+Revision 5 sets the built-in Technical Pen's default diameter to 12 document
+pixels, matching the editor's initial brush-size projection. Existing
+serialized presets retain their captured brush data; the brush evaluator
+semantics remain 2000. Opaque Round and Marker advance to preset revision 2;
+Ink Spatter and Ribbon Chain advance to revision 3 for their pressure and
+visible-mark updates. Existing saved overrides keep their captured settings.
 
 ## Parameter bindings
 
@@ -218,22 +228,24 @@ pressure size and response-curve controls tune each brush independently.
 
 The same low-force-friendly pressure curve is used by built-in bindings; the
 binding amount and target vary by brush. `+N%` means the parameter reaches up to
-`1 + N%` of its unpressured value at maximum curve output. Fixed-pressure
-brushes deliberately omit a pressure binding.
+`1 + N%` of its unpressured value at maximum curve output. Each built-in
+changes at least one visible output property under stylus pressure. User-created
+and imported brushes retain their own saved dynamics and can be tuned in the
+brush editor.
 
 | Built-in brush | Default size (canvas px) | Pressure response |
 | --- | ---: | --- |
-| Technical Pen | 4 | Diameter +100%; wider light-force range; extended firm ramp |
+| Technical Pen | 12 | Diameter +100%; wider light-force range; extended firm ramp |
 | HB Sketch Pencil | 6 | Diameter +55%; opacity +35% |
-| Opaque Round | 24 | Fixed |
+| Opaque Round | 24 | Diameter +80% |
 | Soft Airbrush | 80 | Opacity +85% |
-| Marker | 14 | Fixed |
+| Marker | 14 | Diameter +55%; opacity +30% |
 | G-Pen | 10 | Diameter +85% |
 | Dry Gouache | 28 | Diameter +25%; opacity +35% |
 | Digital Watercolor Wash | 42 | Opacity +45% |
 | Watercolor Blender | 38 | Diameter +20%; opacity +40% |
-| Ink Spatter | 30 | Diameter +45% |
-| Ribbon Chain | 16 | Fixed |
+| Ink Spatter | 30 | Diameter +45%; opacity +80%; darker, larger particles |
+| Ribbon Chain | 16 | Width +65%; alternating repeated links |
 | Acrylic Rake | 30 | Diameter +45% |
 | Soft Graphite | 8 | Diameter +62%; opacity +35% |
 | Charcoal | 18 | Diameter +62%; opacity +40% |
@@ -332,6 +344,24 @@ Stationary deposition is generated at a bounded frequency from monotonic input
 time. It stops immediately on pointer up/cancel and may never run from a wall
 clock after the stroke has ended.
 
+### Format-3 pulled-string stabilizer
+
+Pulled-string is an optional position conditioner selected per brush preset.
+Its serialized contract is `format_version: 3`, `engine_semantics: 2001`,
+`stabilizer: PulledString`, `distance_px: 0..=100`, and
+`catch_up_on_end: bool`. It runs before the existing distance resampler and
+keeps constant-size state per active stroke. Confirmed input order determines
+the result independent of packet chunk boundaries. It changes only position;
+pressure, tilt, azimuth, twist, timestamps, and sequence remain the input
+values used by the existing evaluator. Predicted samples are preview-only.
+
+With pulled-string selected, legacy positional smoothing/streamline filtering
+is bypassed. Zero distance follows the unconditioned position path. On
+pointer-up, `catch_up_on_end` emits the final confirmed endpoint; pointer-cancel
+emits no catch-up. Brush settings and semantics are captured by the compiled
+brush at stroke start. Format-2 brushes retain semantics 2000 and their legacy
+output exactly.
+
 ## Tip engines
 
 ### Stamp
@@ -373,6 +403,8 @@ Configurable properties:
 
 Particle generation is capped before allocating. High-density spray presets
 degrade by deterministic thinning, never by allocating an unbounded list.
+The built-in Ink Spatter uses 12 larger particles per dab and stronger base and
+pressure opacity so marks remain dark enough to read as ink.
 
 ### Ribbon
 
@@ -388,6 +420,10 @@ Configurable properties:
 - sequence and mirroring modes;
 - corner join and end-cap behavior;
 - optional colorization of grayscale source art.
+
+Ribbon Chain revision 3 emits alternating slanted elliptical links at its
+configured repeat spacing and does not add a continuous pen stroke beneath
+them. Older revision-2 ribbon presets retain their continuous-dab evaluator.
 
 ### Bristle
 
@@ -939,19 +975,9 @@ the renderer architecture.
 
 ## Research basis
 
-This design is informed by, but does not copy, the feature groupings described
-by the official Krita brush-engine documentation, Clip Studio Paint's official
-brush customization manual, and Procreate's official Brush Studio handbook:
+This design is informed by brush-engine concepts documented by Krita and by
+common digital-art brush controls. It does not copy another application's UI
+or proprietary data:
 
 - https://docs.krita.org/en/reference_manual/brushes/brush_engines.html
 - https://docs.krita.org/en/reference_manual/brushes.html
-- https://help.clip-studio.com/en-us/manual_en/240_brushes/Customizing_brush_tools.htm
-- https://help.procreate.com/procreate/handbook/brushes/brush-studio
-- https://help.procreate.com/procreate/handbook/brushes/brush-studio-settings
-- https://help.procreate.com/procreate/handbook/brushes/dual-brush
-
-The supplied VAMPBYTE guide is useful as an artist-oriented description of
-Clip Studio Paint behavior, but the official Clip Studio manual remains the
-normative feature reference:
-
-- https://www.patreon.com/vampbyte/posts/clip-studio-31820359

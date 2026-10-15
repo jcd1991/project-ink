@@ -76,6 +76,184 @@ impl BrightnessContrast {
 pub enum AdjustmentError {
     BrightnessOutOfRange,
     ContrastOutOfRange,
+    InvalidParameters,
+}
+
+/// Three channel lookup tables compiled once before raster tile evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RgbAdjustmentLut {
+    red: [u8; 256],
+    green: [u8; 256],
+    blue: [u8; 256],
+}
+
+impl RgbAdjustmentLut {
+    /// Compile piecewise-linear master and per-channel integer curves.
+    pub fn from_curves(
+        master: &[(u8, u8)],
+        red: &[(u8, u8)],
+        green: &[(u8, u8)],
+        blue: &[(u8, u8)],
+    ) -> Result<Self, AdjustmentError> {
+        let master_lut = curve_lut(master)?;
+        let apply_channel = |channel: &[(u8, u8)]| -> Result<[u8; 256], AdjustmentError> {
+            let channel_lut = curve_lut(channel)?;
+            let mut result = [0; 256];
+            for value in 0..=255 {
+                result[value] = channel_lut[usize::from(master_lut[value])];
+            }
+            Ok(result)
+        };
+        Ok(Self {
+            red: apply_channel(red)?,
+            green: apply_channel(green)?,
+            blue: apply_channel(blue)?,
+        })
+    }
+
+    /// Compile a Levels transform to a bounded 256-entry RGB table.
+    pub fn from_levels(
+        input_black: u8,
+        input_white: u8,
+        gamma_hundredths: u16,
+        output_black: u8,
+        output_white: u8,
+    ) -> Result<Self, AdjustmentError> {
+        if input_black >= input_white
+            || !(10..=1000).contains(&gamma_hundredths)
+            || output_black > output_white
+        {
+            return Err(AdjustmentError::InvalidParameters);
+        }
+        let mut table = [0; 256];
+        let gamma = f64::from(gamma_hundredths) / 100.0;
+        for input in 0_u8..=u8::MAX {
+            let normalized = ((f64::from(input) - f64::from(input_black))
+                / f64::from(input_white - input_black))
+            .clamp(0.0, 1.0);
+            let corrected = normalized.powf(1.0 / gamma);
+            let mapped =
+                f64::from(output_black) + corrected * f64::from(output_white - output_black);
+            table[usize::from(input)] = rounded_f64_to_u8(mapped);
+        }
+        Ok(Self {
+            red: table,
+            green: table,
+            blue: table,
+        })
+    }
+
+    /// Apply to straight RGBA8, preserving the exact alpha byte.
+    #[must_use]
+    pub fn apply(&self, pixel: [u8; 4]) -> [u8; 4] {
+        [
+            self.red[usize::from(pixel[0])],
+            self.green[usize::from(pixel[1])],
+            self.blue[usize::from(pixel[2])],
+            pixel[3],
+        ]
+    }
+}
+
+fn curve_lut(points: &[(u8, u8)]) -> Result<[u8; 256], AdjustmentError> {
+    if !(2..=16).contains(&points.len())
+        || points[0].0 != 0
+        || points[points.len() - 1].0 != 255
+        || points.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+    {
+        return Err(AdjustmentError::InvalidParameters);
+    }
+    let mut table = [0; 256];
+    let mut segment = 0;
+    for value in 0_u8..=u8::MAX {
+        while segment + 1 < points.len() - 1 && value > points[segment + 1].0 {
+            segment += 1;
+        }
+        let (x0, y0) = points[segment];
+        let (x1, y1) = points[segment + 1];
+        let t = f32::from(value - x0) / f32::from(x1 - x0);
+        table[usize::from(value)] =
+            rounded_f32_to_u8(f32::from(y0) + (f32::from(y1) - f32::from(y0)) * t);
+    }
+    Ok(table)
+}
+
+// Inputs are clamped to the full 8-bit output range before conversion.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn rounded_f64_to_u8(value: f64) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+// Inputs are clamped to the full 8-bit output range before conversion.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn rounded_f32_to_u8(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+/// Apply bounded HSL hue/saturation/lightness controls to straight RGBA8.
+/// Identity settings return the input bytes exactly and alpha is unchanged.
+#[allow(
+    clippy::float_cmp,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn hue_saturation(
+    pixel: [u8; 4],
+    hue_degrees: i16,
+    saturation: i16,
+    lightness: i16,
+) -> Result<[u8; 4], AdjustmentError> {
+    if !(-180..=180).contains(&hue_degrees)
+        || !(-100..=100).contains(&saturation)
+        || !(-100..=100).contains(&lightness)
+    {
+        return Err(AdjustmentError::InvalidParameters);
+    }
+    if hue_degrees == 0 && saturation == 0 && lightness == 0 {
+        return Ok(pixel);
+    }
+    let red_value = f32::from(pixel[0]) / 255.0;
+    let green_value = f32::from(pixel[1]) / 255.0;
+    let blue_value = f32::from(pixel[2]) / 255.0;
+    let max = red_value.max(green_value).max(blue_value);
+    let min = red_value.min(green_value).min(blue_value);
+    let delta = max - min;
+    let mut hue = if delta == 0.0 {
+        0.0
+    // `max` is selected directly from these exact channel values.
+    } else if max == red_value {
+        60.0 * ((green_value - blue_value) / delta).rem_euclid(6.0)
+    } else if max == green_value {
+        60.0 * ((blue_value - red_value) / delta + 2.0)
+    } else {
+        60.0 * ((red_value - green_value) / delta + 4.0)
+    };
+    let mut sat = if delta == 0.0 {
+        0.0
+    } else {
+        delta / (1.0 - (2.0 * f32::midpoint(max, min) - 1.0).abs())
+    };
+    let mut light = f32::midpoint(max, min);
+    hue = (hue + f32::from(hue_degrees)).rem_euclid(360.0);
+    sat = (sat * (1.0 + f32::from(saturation) / 100.0)).clamp(0.0, 1.0);
+    light = (light + f32::from(lightness) / 100.0).clamp(0.0, 1.0);
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let intermediate = chroma * (1.0 - ((hue / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match hue {
+        hue if hue < 60.0 => (chroma, intermediate, 0.0),
+        hue if hue < 120.0 => (intermediate, chroma, 0.0),
+        hue if hue < 180.0 => (0.0, chroma, intermediate),
+        hue if hue < 240.0 => (0.0, intermediate, chroma),
+        hue if hue < 300.0 => (intermediate, 0.0, chroma),
+        _ => (chroma, 0.0, intermediate),
+    };
+    let offset = light - chroma * 0.5;
+    Ok([
+        rounded_f32_to_u8((r1 + offset) * 255.0),
+        rounded_f32_to_u8((g1 + offset) * 255.0),
+        rounded_f32_to_u8((b1 + offset) * 255.0),
+        pixel[3],
+    ])
 }
 
 /// Composite straight RGBA8 pixels with deterministic integer arithmetic.
@@ -284,6 +462,33 @@ mod tests {
             }
             .validate(),
             Err(AdjustmentError::ContrastOutOfRange)
+        );
+    }
+
+    #[test]
+    fn levels_and_curves_luts_preserve_identity_bytes_and_alpha() {
+        let levels = RgbAdjustmentLut::from_levels(0, 255, 100, 0, 255).expect("identity levels");
+        let identity = [(0, 0), (255, 255)];
+        let curves = RgbAdjustmentLut::from_curves(&identity, &identity, &identity, &identity)
+            .expect("identity curves");
+        let pixel = [37, 129, 244, 91];
+        assert_eq!(levels.apply(pixel), pixel);
+        assert_eq!(curves.apply(pixel), pixel);
+
+        let inverted = [(0, 255), (255, 0)];
+        let curve = RgbAdjustmentLut::from_curves(&identity, &inverted, &identity, &identity)
+            .expect("channel curve");
+        assert_eq!(curve.apply(pixel), [218, 129, 244, 91]);
+    }
+
+    #[test]
+    fn hue_saturation_identity_and_invalid_settings_are_exact() {
+        let pixel = [40, 130, 220, 73];
+        assert_eq!(hue_saturation(pixel, 0, 0, 0).expect("identity"), pixel);
+        assert_eq!(hue_saturation(pixel, 30, 25, -10).unwrap()[3], pixel[3]);
+        assert_eq!(
+            hue_saturation(pixel, 181, 0, 0),
+            Err(AdjustmentError::InvalidParameters)
         );
     }
 }

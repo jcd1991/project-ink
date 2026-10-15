@@ -2,6 +2,7 @@ use super::*;
 use ink_input::{DeviceKind, Phase, PointerSample};
 use ink_live_render::{GpuLiveSurface, LiveSurfaceConfig};
 use ink_model::{ColorSpace, DocumentSpec, Rgba8};
+use proptest::prelude::*;
 
 #[test]
 fn applied_panel_frames_are_separate_layer_content_and_clear_undoably() {
@@ -226,6 +227,9 @@ fn brush_editor_draft_preview_changes_and_cancel_restores_original() {
             0.0,
             0.0,
             0.0,
+            false,
+            0.0,
+            false,
             &[0.0, 0.0, 1.0, 1.0],
         )
         .expect("update draft");
@@ -362,8 +366,8 @@ fn legacy_pressure_opacity_is_not_multiplied_by_preset_opacity_twice() {
 fn original_builtin_ids_use_their_v2_pressure_profiles() {
     for brush_id in 1..=5_u128 {
         let spec = DocumentSpec {
-            width_px: 64,
-            height_px: 64,
+            width_px: 256,
+            height_px: 256,
             dpi: 144.0,
             color_space: ColorSpace::Srgb,
             background: Rgba8::default(),
@@ -412,6 +416,28 @@ fn opacity_only_builtin_brushes_project_their_pressure_curve_for_preview() {
     assert!((airbrush.pressure_opacity - 0.85).abs() < f32::EPSILON);
     assert_eq!(airbrush.pressure_curve_points.get(2), Some(&0.003));
     assert_eq!(airbrush.pressure_curve_points.get(3), Some(&0.005));
+}
+
+#[test]
+fn technical_pen_summary_projects_replace_diameter_pressure_for_live_preview() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let doc = Document::new(DocumentId::from_u128(107), spec).expect("valid document");
+    let technical_pen = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == BrushId::from_u128(1))
+        .expect("Technical Pen summary");
+
+    assert!(technical_pen.pressure_size_replace);
+    assert!((technical_pen.pressure_size - 1.0).abs() < f32::EPSILON);
+    assert_eq!(technical_pen.pressure_curve_points.first(), Some(&0.0));
+    assert_eq!(technical_pen.pressure_curve_points.get(1), Some(&0.12));
 }
 
 #[test]
@@ -861,6 +887,48 @@ fn committed_composite_tile_matches_visible_layer_and_background() {
 }
 
 #[test]
+fn composite_snapshot_reuses_plan_across_requested_tiles_without_changing_pixels() {
+    let spec = DocumentSpec {
+        width_px: 512,
+        height_px: 256,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(9_031), spec).expect("valid doc");
+    let lower = doc.layers()[0].id;
+    let upper = doc
+        .add_layer(LayerKind::Raster)
+        .expect("upper raster layer");
+    for (stroke_number, layer, x) in [(9_032, lower, 24.0), (9_033, upper, 280.0)] {
+        let stroke = ink_model::StrokeId::from_u128(stroke_number);
+        doc.dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer,
+            brush: BrushPreset::starters()[0].id,
+        })
+        .expect("begin stroke");
+        doc.push_pointer_packet(&ink_test_support::one_sample(x, 24.0, 1.0))
+            .expect("sample stroke");
+        doc.dispatch(EditorCommand::EndStroke { stroke })
+            .expect("commit stroke");
+    }
+
+    let coordinates = [TileCoord { x: 1, y: 0 }, TileCoord { x: 0, y: 0 }];
+    let snapshot = doc.capture_composite_tile_snapshot(&coordinates);
+    let batch = snapshot.read_tiles(&coordinates).expect("batch composite");
+    assert_eq!(batch.len(), coordinates.len());
+    for (index, coordinate) in coordinates.iter().copied().enumerate() {
+        assert_eq!(
+            batch[index],
+            doc.read_composite_tile(coordinate)
+                .expect("single tile composite"),
+            "batched tile {coordinate:?} must preserve the single-tile output"
+        );
+    }
+}
+
+#[test]
 fn adjustment_layer_changes_composite_without_mutating_raster_source() {
     let spec = DocumentSpec {
         width_px: 64,
@@ -953,6 +1021,190 @@ fn adjustment_layer_changes_composite_without_mutating_raster_source() {
     );
     reopened.close();
     std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn assert_adjustment_exports_match_composite(
+    document: &Document,
+    directory: &std::path::Path,
+    name: &str,
+) {
+    let png_path = directory.join(format!("{name}.png"));
+    let psd_path = directory.join(format!("{name}.psd"));
+    document
+        .export(&png_path, ink_export::ExportFormat::Png)
+        .expect("export adjustment PNG");
+    document
+        .export(&psd_path, ink_export::ExportFormat::Psd)
+        .expect("export adjustment flattened PSD");
+    let (png_width, png_height, png_pixels) =
+        ink_export::decode_png_rgba8(&std::fs::read(&png_path).expect("read adjustment PNG"))
+            .expect("decode adjustment PNG");
+    let (psd_width, psd_height, psd_pixels) =
+        ink_export::decode_psd(&std::fs::read(&psd_path).expect("read adjustment PSD"))
+            .expect("decode adjustment PSD");
+    assert_eq!((png_width, png_height), (64, 64));
+    assert_eq!((psd_width, psd_height), (64, 64));
+    assert_eq!(png_pixels, psd_pixels, "PNG and PSD exports diverged");
+
+    let composite = document
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("read adjustment composite");
+    for y in 0..64_usize {
+        for x in 0..64_usize {
+            let source = (y * 256 + x) * 4;
+            let destination = (y * 64 + x) * 4;
+            let alpha = u32::from(composite[source + 3]).max(1);
+            let expected = [
+                (u32::from(composite[source + 2]) * 255 / alpha).min(255) as u8,
+                (u32::from(composite[source + 1]) * 255 / alpha).min(255) as u8,
+                (u32::from(composite[source]) * 255 / alpha).min(255) as u8,
+                composite[source + 3],
+            ];
+            assert_eq!(
+                &png_pixels[destination..destination + 4],
+                &expected,
+                "PNG export differs from compositor at ({x}, {y})"
+            );
+        }
+    }
+}
+
+fn adjustment_export_fixture() -> (Document, LayerId) {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc = Document::new(DocumentId::from_u128(90_103), spec).expect("valid doc");
+    let raster = doc.layers()[0].id;
+    {
+        let mut state = lock_recover(&doc.state);
+        state
+            .layers
+            .get_mut(&raster)
+            .expect("base raster")
+            .tiles
+            .set_pixel(
+                12,
+                18,
+                Rgba8 {
+                    r: 40,
+                    g: 128,
+                    b: 220,
+                    a: 255,
+                },
+            );
+        state
+            .layers
+            .get_mut(&raster)
+            .expect("base raster")
+            .tiles
+            .set_pixel(
+                13,
+                18,
+                Rgba8 {
+                    r: 60,
+                    g: 110,
+                    b: 180,
+                    a: 128,
+                },
+            );
+    }
+    let adjustment = doc.add_layer(LayerKind::Adjustment).expect("adjustment");
+    (doc, adjustment)
+}
+
+fn adjustment_export_directory(name: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-adjustment-export-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create export fixture directory");
+    root
+}
+
+#[test]
+fn curves_adjustment_exports_match_composite() {
+    let (mut doc, adjustment) = adjustment_export_fixture();
+    let identity = ink_model::AdjustmentCurve::identity();
+    let mut reversed = identity;
+    reversed.points[0].y = 255;
+    reversed.points[1].y = 0;
+    doc.dispatch(EditorCommand::SetLayerAdjustment {
+        layer: adjustment,
+        adjustment: ink_model::LayerAdjustment::Curves {
+            master: reversed,
+            red: identity,
+            green: identity,
+            blue: identity,
+        },
+    })
+    .expect("set curves");
+    let offset = ((18 * 256 + 12) * 4) as usize;
+    let composite = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("curved composite");
+    assert_eq!(&composite[offset..offset + 4], &[35, 127, 215, 255]);
+    assert_eq!(composite[offset + 4 + 3], 128, "Curves must preserve alpha");
+    let root = adjustment_export_directory("curves");
+    assert_adjustment_exports_match_composite(&doc, &root, "curves");
+    std::fs::remove_dir_all(root).expect("cleanup Curves exports");
+}
+
+#[test]
+fn levels_adjustment_exports_match_composite() {
+    let (mut doc, adjustment) = adjustment_export_fixture();
+    doc.dispatch(EditorCommand::SetLayerAdjustment {
+        layer: adjustment,
+        adjustment: ink_model::LayerAdjustment::Levels {
+            input_black: 0,
+            input_white: 255,
+            gamma_hundredths: 200,
+            output_black: 0,
+            output_white: 255,
+        },
+    })
+    .expect("set levels");
+    let offset = ((18 * 256 + 12) * 4) as usize;
+    let levels = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("levels composite");
+    assert_eq!(&levels[offset..offset + 4], &[237, 181, 101, 255]);
+    assert_eq!(levels[offset + 4 + 3], 128, "Levels must preserve alpha");
+    let root = adjustment_export_directory("levels");
+    assert_adjustment_exports_match_composite(&doc, &root, "levels");
+    std::fs::remove_dir_all(root).expect("cleanup Levels exports");
+}
+
+#[test]
+fn hue_saturation_adjustment_exports_match_composite() {
+    let (mut doc, adjustment) = adjustment_export_fixture();
+    doc.dispatch(EditorCommand::SetLayerAdjustment {
+        layer: adjustment,
+        adjustment: ink_model::LayerAdjustment::HueSaturation {
+            hue_degrees: 120,
+            saturation: 0,
+            lightness: 0,
+        },
+    })
+    .expect("set hue");
+    let offset = ((18 * 256 + 12) * 4) as usize;
+    let hue = doc
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("hue composite");
+    assert_eq!(&hue[offset..offset + 4], &[128, 40, 220, 255]);
+    assert_eq!(hue[offset + 3], 255);
+    assert_eq!(
+        hue[offset + 4 + 3],
+        128,
+        "Hue/Saturation must preserve alpha"
+    );
+    let root = adjustment_export_directory("hue-saturation");
+    assert_adjustment_exports_match_composite(&doc, &root, "hue-saturation");
+    std::fs::remove_dir_all(root).expect("cleanup Hue/Saturation exports");
 }
 
 #[test]
@@ -2581,15 +2833,15 @@ fn legacy_prediction_cost_stays_local_after_a_long_confirmed_stroke() {
     })
     .expect("begin stroke");
 
-    for index in 0..512 {
-        let x = 32.0 + index as f32 * 2.0;
+    for index in 0..1024 {
+        let x = 32.0 + index as f32 * 1.5;
         doc.push_pointer_packet(&ink_test_support::one_sample(x, 64.0, 0.6))
             .expect("confirmed input");
     }
     let confirmed_dabs = doc.drain_live_dabs(65_536).expect("flush confirmed path");
     assert!(confirmed_dabs.len() > 1_000);
 
-    let mut predicted = ink_test_support::one_sample(1058.0, 64.0, 0.6);
+    let mut predicted = ink_test_support::one_sample(1568.0, 64.0, 0.6);
     predicted[8..10].copy_from_slice(&flags::PREDICTED.to_le_bytes());
     doc.push_pointer_packet(&predicted)
         .expect("predicted endpoint");
@@ -5160,8 +5412,7 @@ fn new_sparse_mask_reveals_by_default_and_inverts_coverage_without_tile_expansio
     );
 }
 
-#[test]
-fn white_mask_brush_reveals_pixels_hidden_by_black_brush() {
+fn mask_brush_test_document(document_id: u128) -> (Document, LayerId, LayerId, BrushId, Vec<u8>) {
     let spec = DocumentSpec {
         width_px: 64,
         height_px: 64,
@@ -5169,82 +5420,154 @@ fn white_mask_brush_reveals_pixels_hidden_by_black_brush() {
         color_space: ColorSpace::Srgb,
         background: Rgba8::default(),
     };
-    let mut doc = Document::new(DocumentId::from_u128(0x5a52), spec).expect("document");
-    let owner = doc.layers()[0].id;
-    doc.fill_region(
-        owner,
-        0,
-        0,
-        Rgba8 {
-            r: 70,
-            g: 80,
-            b: 90,
-            a: 255,
-        },
-        0,
-        0,
-    )
-    .expect("fill owner");
-    let mask = doc.add_layer(LayerKind::Mask).expect("new mask");
+    let mut document = Document::new(DocumentId::from_u128(document_id), spec).expect("document");
+    let owner = document.layers()[0].id;
+    document
+        .fill_region(
+            owner,
+            0,
+            0,
+            Rgba8 {
+                r: 70,
+                g: 80,
+                b: 90,
+                a: 255,
+            },
+            0,
+            0,
+        )
+        .expect("fill owner");
+    let original_owner_tile = document
+        .read_tile(owner, TileCoord { x: 0, y: 0 })
+        .expect("read unmasked owner");
+    let mask = document.add_layer(LayerKind::Mask).expect("new mask");
     let brush = BrushPreset::starters()[0].id;
-    doc.update_brush_color(
-        brush,
-        Rgba8 {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 255,
-        },
-    )
-    .expect("choose black mask color");
-    let paint = |doc: &mut Document, stroke_id: u128| {
-        let stroke = ink_model::StrokeId::from_u128(stroke_id);
-        doc.dispatch(EditorCommand::BeginStroke {
+    document
+        .update_brush_color(
+            brush,
+            Rgba8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        )
+        .expect("choose black mask color");
+    (document, owner, mask, brush, original_owner_tile)
+}
+
+fn paint_mask_brush(document: &mut Document, mask: LayerId, brush: BrushId, stroke_id: u128) {
+    let stroke = ink_model::StrokeId::from_u128(stroke_id);
+    document
+        .dispatch(EditorCommand::BeginStroke {
             stroke,
             layer: mask,
             brush,
         })
         .expect("begin mask stroke");
-        doc.push_pointer_packet(&ink_test_support::one_sample(16.0, 16.0, 1.0))
-            .expect("mask dab");
-        doc.dispatch(EditorCommand::EndStroke { stroke })
-            .expect("commit mask stroke");
-    };
-    paint(&mut doc, 0x5a53);
-    let hidden = Tile::from_bytes(
-        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
-            .expect("black mask composite"),
+    document
+        .push_pointer_packet(&ink_test_support::one_sample(16.0, 16.0, 1.0))
+        .expect("mask dab");
+    document
+        .dispatch(EditorCommand::EndStroke { stroke })
+        .expect("commit mask stroke");
+}
+
+fn mask_composite_alpha(document: &Document, owner: LayerId) -> u8 {
+    Tile::from_bytes(
+        document
+            .read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("read mask composite"),
     )
-    .expect("valid hidden tile")
+    .expect("valid mask composite")
     .pixel_rgba(16, 16)
-    .a;
+    .a
+}
+
+#[test]
+fn black_mask_brush_hides_pixels_and_undo_redo_restores_coverage() {
+    let (mut document, owner, mask, brush, _) = mask_brush_test_document(0x5a52);
+    paint_mask_brush(&mut document, mask, brush, 0x5a53);
+    let hidden = mask_composite_alpha(&document, owner);
     assert!(
         hidden < 255,
         "black mask brush should hide part of the owner"
     );
 
-    doc.update_brush_color(
-        brush,
-        Rgba8 {
-            r: 255,
-            g: 255,
-            b: 255,
-            a: 255,
-        },
-    )
-    .expect("choose white mask color");
-    paint(&mut doc, 0x5a54);
-    let revealed = Tile::from_bytes(
-        doc.read_tile(owner, TileCoord { x: 0, y: 0 })
-            .expect("white mask composite"),
-    )
-    .expect("valid revealed tile")
-    .pixel_rgba(16, 16)
-    .a;
+    document
+        .dispatch(EditorCommand::Undo)
+        .expect("undo black mask stroke");
+    assert_eq!(
+        mask_composite_alpha(&document, owner),
+        255,
+        "undo should restore the mask's reveal-all state"
+    );
+
+    document
+        .dispatch(EditorCommand::Redo)
+        .expect("redo black mask stroke");
+    assert_eq!(
+        mask_composite_alpha(&document, owner),
+        hidden,
+        "redo should restore the mask's hidden coverage"
+    );
+}
+
+#[test]
+fn white_mask_brush_reveals_hidden_pixels_and_survives_reopen() {
+    let (mut document, owner, mask, brush, original_owner_tile) = mask_brush_test_document(0x5a54);
+    paint_mask_brush(&mut document, mask, brush, 0x5a55);
+    let hidden = mask_composite_alpha(&document, owner);
+
+    document
+        .update_brush_color(
+            brush,
+            Rgba8 {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
+        )
+        .expect("choose white mask color");
+    paint_mask_brush(&mut document, mask, brush, 0x5a56);
+    let revealed = mask_composite_alpha(&document, owner);
     assert!(
         revealed > hidden,
         "white mask brush should reveal prior coverage"
     );
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-mask-paint-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("mask.inkproj");
+    document.save_as(&path).expect("save painted mask");
+    let mut reopened = Document::open(&path).expect("reopen painted mask");
+    assert_eq!(
+        mask_composite_alpha(&reopened, owner),
+        revealed,
+        "save/reopen should preserve mask coverage"
+    );
+    reopened
+        .dispatch(EditorCommand::SetMaskEnabled {
+            mask,
+            enabled: false,
+        })
+        .expect("disable mask for base-pixel comparison");
+    assert_eq!(
+        reopened
+            .read_tile(owner, TileCoord { x: 0, y: 0 })
+            .expect("read owner without mask"),
+        original_owner_tile,
+        "painting a mask must not change the owner's raster pixels"
+    );
+    std::fs::remove_dir_all(root).expect("cleanup temporary project");
 }
 
 #[test]
@@ -5896,6 +6219,220 @@ fn imported_tip_resource_renders_exports_and_reopens() {
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
+fn write_sampled_abr_fixture(path: &std::path::Path) {
+    use photocraft_psd::abr::{LegacyBrush, LegacyTip};
+    let brush = LegacyBrush {
+        name: "Sampled Leaf".into(),
+        spacing: 25,
+        anti_alias: true,
+        tip: LegacyTip::Sampled(photocraft_psd::abr::AbrSample {
+            id: String::new(),
+            width: 2,
+            height: 1,
+            depth: 8,
+            data: vec![0, 255],
+        }),
+    };
+    std::fs::write(
+        path,
+        photocraft_psd::abr::write_v12(2, &[brush], true).expect("ABR fixture"),
+    )
+    .expect("write ABR fixture");
+}
+
+#[test]
+fn imported_abr_tip_renders_and_survives_project_reopen() {
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-engine-abr-reopen-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let abr_path = root.join("sample.abr");
+    write_sampled_abr_fixture(&abr_path);
+
+    let spec = DocumentSpec {
+        width_px: 256,
+        height_px: 256,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document = Document::new(DocumentId::from_u128(0xAB21), spec).expect("create document");
+    let source_hash = ink_brush::inspect_brush_import(&abr_path)
+        .expect("inspect ABR")
+        .source_sha256;
+    let imported = document
+        .import_photoshop_abr_verified(&abr_path, Some(source_hash))
+        .expect("install sampled ABR tip");
+    assert_eq!(imported.len(), 1);
+    assert_eq!(document.snapshot().resources.len(), 1);
+    let imported_presets = document
+        .snapshot()
+        .brushes
+        .iter()
+        .map(|bytes| {
+            serde_json::from_slice::<ink_brush::BrushPresetV2>(bytes)
+                .expect("deserialize imported brush metadata")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        imported_presets
+            .iter()
+            .find(|preset| preset.id == imported[0])
+            .expect("imported brush preset")
+            .metadata
+            .tags
+            .iter()
+            .any(|tag| tag == "source-file:sample")
+    );
+
+    let layer = document.layers()[0].id;
+    let stroke = ink_model::StrokeId::from_u128(0xAB22);
+    document
+        .dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer,
+            brush: imported[0],
+        })
+        .expect("begin ABR brush stroke");
+    document
+        .push_pointer_packet(&ink_test_support::one_sample(64.0, 64.0, 1.0))
+        .expect("ABR brush sample");
+    document
+        .dispatch(EditorCommand::EndStroke { stroke })
+        .expect("finish ABR brush stroke");
+    let before_save = document
+        .read_tile(layer, TileCoord { x: 0, y: 0 })
+        .expect("ABR brush pixels");
+    assert!(before_save.iter().any(|byte| *byte != 0));
+
+    let project_path = root.join("abr.inkproj");
+    document.save_as(&project_path).expect("save project");
+    drop(document);
+    let reopened = Document::open(&project_path).expect("reopen project");
+    let reopened_snapshot = reopened.snapshot();
+    assert_eq!(reopened_snapshot.resources.len(), 1);
+    assert_eq!(reopened_snapshot.brushes.len(), 1);
+    let reopened_presets = reopened_snapshot
+        .brushes
+        .iter()
+        .map(|bytes| {
+            serde_json::from_slice::<ink_brush::BrushPresetV2>(bytes)
+                .expect("deserialize reopened brush metadata")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        reopened_presets[0]
+            .metadata
+            .tags
+            .iter()
+            .any(|tag| tag == "source-file:sample")
+    );
+    assert_eq!(
+        reopened
+            .read_tile(reopened.layers()[0].id, TileCoord { x: 0, y: 0 })
+            .expect("reopened ABR brush pixels"),
+        before_save
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn imported_abr_pressure_bindings_survive_project_reopen() {
+    use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-engine-abr-pressure-reopen-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let percent = |value| Value::UnitFloat {
+        unit: *b"#Prc",
+        value,
+    };
+    let size_dynamics = Descriptor::new("sizeDynamics")
+        .with("bVTy", Value::Integer(2))
+        .with("fStp", Value::Integer(0))
+        .with("jitter", percent(0.0))
+        .with("Mnm ", percent(25.0));
+    let brush = Descriptor::new("computedBrush")
+        .with("Spcn", Value::Double(25.0))
+        .with("Dmtr", Value::Double(18.0))
+        .with("Hrdn", Value::Double(90.0))
+        .with("Rndn", Value::Double(100.0))
+        .with("Angl", Value::Double(0.0))
+        .with("useTipDynamics", Value::Boolean(true))
+        .with("minimumDiameter", percent(25.0))
+        .with("szVr", Value::Descriptor(size_dynamics));
+    let preset = Descriptor::new("brushPreset")
+        .with("Nm  ", Value::Text(UnicodeString::new_nul("Pressure Ink")))
+        .with("Brsh", Value::Descriptor(brush));
+    let abr_path = root.join("pressure.abr");
+    std::fs::write(
+        &abr_path,
+        photocraft_psd::abr::write_v6(1, &[], &[], &[preset], true).expect("ABR pressure fixture"),
+    )
+    .expect("write ABR pressure fixture");
+
+    let spec = DocumentSpec {
+        width_px: 128,
+        height_px: 128,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document = Document::new(DocumentId::from_u128(0xAB23), spec).expect("create document");
+    let source_hash = ink_brush::inspect_brush_import(&abr_path)
+        .expect("inspect ABR")
+        .source_sha256;
+    let imported = document
+        .import_photoshop_abr_verified(&abr_path, Some(source_hash))
+        .expect("install pressure brush");
+    assert_eq!(imported.len(), 1);
+    let imported_brush = document
+        .snapshot()
+        .brushes
+        .iter()
+        .map(|bytes| {
+            serde_json::from_slice::<ink_brush::BrushPresetV2>(bytes)
+                .expect("deserialize imported pressure brush")
+        })
+        .find(|brush| brush.id == imported[0])
+        .expect("imported pressure brush");
+    assert_eq!(imported_brush.dynamics.len(), 1);
+    assert_eq!(
+        imported_brush.dynamics[0].sensor,
+        ink_brush::SensorId::Pressure
+    );
+    assert_eq!(
+        imported_brush.dynamics[0].target,
+        ink_brush::ParameterId::Diameter
+    );
+
+    let project_path = root.join("pressure.inkproj");
+    document
+        .save_as(&project_path)
+        .expect("save pressure brush project");
+    drop(document);
+    let reopened = Document::open(&project_path).expect("reopen pressure project");
+    let reopened_brush = reopened
+        .snapshot()
+        .brushes
+        .iter()
+        .map(|bytes| {
+            serde_json::from_slice::<ink_brush::BrushPresetV2>(bytes)
+                .expect("deserialize reopened pressure brush")
+        })
+        .find(|brush| brush.id == imported[0])
+        .expect("reopened imported pressure brush");
+    assert_eq!(reopened_brush.dynamics, imported_brush.dynamics);
+    drop(reopened);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
 #[test]
 fn brush_drafts_are_transactional_and_cancel_without_installing() {
     let spec = DocumentSpec {
@@ -5924,6 +6461,9 @@ fn brush_drafts_are_transactional_and_cancel_without_installing() {
         0.1,
         0.15,
         0.3,
+        false,
+        0.0,
+        false,
         &[0.0, 0.0, 0.4, 0.3, 1.0, 1.0],
     )
     .expect("update draft");
@@ -5952,6 +6492,9 @@ fn brush_drafts_are_transactional_and_cancel_without_installing() {
         0.1,
         0.15,
         0.3,
+        false,
+        0.0,
+        false,
         &[0.0, 0.0, 0.4, 0.3, 1.0, 1.0],
     )
     .expect("update committed draft");
@@ -6026,6 +6569,9 @@ fn committed_brush_draft_changes_the_rendered_stroke() {
         settings.rotation_jitter,
         settings.smudge,
         settings.wetness,
+        settings.pulled_string,
+        settings.stabilizer_distance_px,
+        settings.catch_up_on_end,
         &settings.pressure_curve_points,
     )
     .expect("update diameter draft");
@@ -6074,6 +6620,9 @@ fn edited_custom_brush_and_stroke_survive_document_reopen() {
         settings.rotation_jitter,
         settings.smudge,
         settings.wetness,
+        settings.pulled_string,
+        settings.stabilizer_distance_px,
+        settings.catch_up_on_end,
         &settings.pressure_curve_points,
     )
     .expect("update draft size");
@@ -6155,6 +6704,9 @@ fn edited_brush_export_import_changes_stroke_and_survives_reopen() {
             settings.rotation_jitter,
             settings.smudge,
             settings.wetness,
+            settings.pulled_string,
+            settings.stabilizer_distance_px,
+            settings.catch_up_on_end,
             &settings.pressure_curve_points,
         )
         .expect("update custom brush diameter");
@@ -6294,6 +6846,11 @@ fn full_time_lapse_recording_never_rejects_a_committed_drawing_stroke() {
                 revision: 0,
                 layer: 0,
                 brush: 0,
+                brush_revision: 0,
+                brush_semantics: 0,
+                pulled_string: false,
+                stabilizer_distance_px: 0.0,
+                catch_up_on_end: false,
                 samples: Vec::new(),
             })
             .collect();
@@ -6607,6 +7164,218 @@ fn layer_panel_state_is_validated_not_undoable_and_persisted_per_page() {
     let reopened = Document::open(&path).expect("reopen panel state");
     assert_eq!(reopened.layer_panel_state(), expected);
     std::fs::remove_dir_all(path).expect("cleanup");
+}
+
+#[test]
+fn adjustment_preview_cancel_restores_committed_state_without_history() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document = Document::new(DocumentId::from_u128(0xAD01), spec).expect("create document");
+    let layer = document
+        .add_layer(LayerKind::Adjustment)
+        .expect("add adjustment layer");
+    let original = document
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == layer)
+        .and_then(|candidate| candidate.adjustment)
+        .expect("default adjustment");
+    let history_before = document.history_snapshot(50).expect("history").cursor;
+
+    let canceled = document
+        .begin_layer_adjustment_edit(layer)
+        .expect("begin canceled edit");
+    let preview = ink_model::LayerAdjustment::Levels {
+        input_black: 8,
+        input_white: 240,
+        gamma_hundredths: 125,
+        output_black: 0,
+        output_white: 255,
+    };
+    document
+        .update_layer_adjustment_edit(canceled, preview)
+        .expect("preview Levels");
+    assert_eq!(
+        document
+            .layers()
+            .into_iter()
+            .find(|candidate| candidate.id == layer)
+            .and_then(|candidate| candidate.adjustment),
+        Some(preview)
+    );
+    assert_eq!(
+        document
+            .history_snapshot(50)
+            .expect("preview history")
+            .cursor,
+        history_before,
+        "preview frames do not enter history"
+    );
+    document
+        .cancel_layer_adjustment_edit(canceled)
+        .expect("cancel adjustment");
+    assert_eq!(
+        document
+            .layers()
+            .into_iter()
+            .find(|candidate| candidate.id == layer)
+            .and_then(|candidate| candidate.adjustment),
+        Some(original)
+    );
+}
+
+#[test]
+fn committed_adjustment_is_one_history_item_and_reopens() {
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-adjustment-commit-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document = Document::new(DocumentId::from_u128(0xAD02), spec).expect("create document");
+    let layer = document
+        .add_layer(LayerKind::Adjustment)
+        .expect("add adjustment layer");
+    let original = document
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == layer)
+        .and_then(|candidate| candidate.adjustment)
+        .expect("default adjustment");
+    let history_before = document.history_snapshot(50).expect("history").cursor;
+    let committed = document
+        .begin_layer_adjustment_edit(layer)
+        .expect("begin committed edit");
+    let hue = ink_model::LayerAdjustment::HueSaturation {
+        hue_degrees: 30,
+        saturation: 20,
+        lightness: -5,
+    };
+    document
+        .update_layer_adjustment_edit(committed, hue)
+        .expect("preview hue and saturation");
+    document
+        .commit_layer_adjustment_edit(committed)
+        .expect("commit adjustment");
+    assert_eq!(
+        document.history_snapshot(50).expect("history").cursor,
+        history_before + 1
+    );
+    document
+        .dispatch(EditorCommand::Undo)
+        .expect("undo adjustment");
+    assert_eq!(
+        document
+            .layers()
+            .into_iter()
+            .find(|candidate| candidate.id == layer)
+            .and_then(|candidate| candidate.adjustment),
+        Some(original)
+    );
+    document
+        .dispatch(EditorCommand::Redo)
+        .expect("redo adjustment");
+    let path = root.join("adjustment.inkproj");
+    document.save_as(&path).expect("save adjustment project");
+    drop(document);
+    let reopened = Document::open(&path).expect("reopen adjustment project");
+    assert_eq!(
+        reopened
+            .layers()
+            .into_iter()
+            .find(|candidate| candidate.id == layer)
+            .and_then(|candidate| candidate.adjustment),
+        Some(hue)
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn adjustment_layer_survives_backup_recovery_with_identical_composite() {
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-adjustment-recovery-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let project_path = root.join("adjustment.inkproj");
+    let recovered_path = root.join("recovered.inkproj");
+    let mut document = Document::new(
+        DocumentId::from_u128(0xAD03),
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("create document");
+    let layer = document
+        .add_layer(LayerKind::Adjustment)
+        .expect("add adjustment layer");
+    let levels = ink_model::LayerAdjustment::Levels {
+        input_black: 12,
+        input_white: 240,
+        gamma_hundredths: 125,
+        output_black: 4,
+        output_white: 250,
+    };
+    document
+        .dispatch(EditorCommand::SetLayerAdjustment {
+            layer,
+            adjustment: levels,
+        })
+        .expect("set Levels");
+    let expected_composite = document
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("read committed adjustment composite");
+    document.save_as(&project_path).expect("first checkpoint");
+    document
+        .save_as(&project_path)
+        .expect("publish checkpoint with a recovery backup");
+
+    let manifest_path = project_path.join("manifest.json");
+    let mut corrupted_manifest = std::fs::read(&manifest_path).expect("read manifest");
+    corrupted_manifest[0] ^= 0xff;
+    std::fs::write(&manifest_path, &corrupted_manifest).expect("corrupt current checkpoint");
+    ink_storage::recover_project(&project_path, &recovered_path)
+        .expect("recover last valid checkpoint");
+    assert_eq!(
+        std::fs::read(&manifest_path).expect("read unchanged damaged source"),
+        corrupted_manifest
+    );
+
+    let snapshot = ink_storage::load_project(&recovered_path).expect("load recovered snapshot");
+    let recovered = Document::from_snapshot(snapshot).expect("bind recovered document");
+    let recovered_adjustment = recovered
+        .layers()
+        .into_iter()
+        .find(|candidate| candidate.id == layer)
+        .and_then(|candidate| candidate.adjustment);
+    assert_eq!(recovered_adjustment, Some(levels));
+    assert_eq!(
+        recovered
+            .read_composite_tile(TileCoord { x: 0, y: 0 })
+            .expect("read recovered composite"),
+        expected_composite
+    );
+    drop(recovered);
+    drop(document);
+    std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
@@ -7367,6 +8136,351 @@ fn vector_intersection_erase_is_undoable_at_engine_boundary() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // End-to-end checkpoint, recovery, render, and history contract.
+fn bezier_patch_renders_undoes_and_survives_format8_reopen() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document =
+        Document::new(DocumentId::from_u128(0x5645_4354_4f52), spec).expect("document");
+    document
+        .dispatch(EditorCommand::AddLayer {
+            parent: None,
+            kind: LayerKind::VectorInk,
+        })
+        .expect("vector layer");
+    let layer = document.layers()[1].id;
+    let id = StrokeId::from_u128(0x9001);
+    let archived_stroke = ink_model::VectorStroke {
+        points: vec![
+            ink_model::VectorPoint {
+                x: 8.0,
+                y: 8.0,
+                pressure: 0.2,
+                tilt: -0.1,
+            },
+            ink_model::VectorPoint {
+                x: 32.0,
+                y: 32.0,
+                pressure: 0.8,
+                tilt: 0.3,
+            },
+        ],
+        closed: false,
+    };
+    let point = |x, y| ink_model::BezierAnchor {
+        x,
+        y,
+        incoming: [x, y],
+        outgoing: [x, y],
+        kind: ink_model::AnchorKind::Corner,
+    };
+    let object = ink_model::VectorObject::BezierPath {
+        path: ink_model::BezierPath {
+            subpaths: vec![
+                ink_model::BezierSubpath {
+                    anchors: vec![
+                        point(8.0, 8.0),
+                        point(32.0, 8.0),
+                        point(32.0, 32.0),
+                        point(8.0, 32.0),
+                    ],
+                    closed: true,
+                },
+                ink_model::BezierSubpath {
+                    anchors: vec![point(44.0, 8.0), point(52.0, 8.0)],
+                    closed: false,
+                },
+            ],
+            style: ink_model::VectorStyle {
+                fill: Some(Rgba8 {
+                    r: 32,
+                    g: 96,
+                    b: 224,
+                    a: 255,
+                }),
+                stroke: None,
+                stroke_width: 0.0,
+                cap: ink_model::StrokeCap::Butt,
+                join: ink_model::StrokeJoin::Miter,
+                miter_limit: 4.0,
+                fill_rule: ink_model::FillRule::NonZero,
+            },
+        },
+        source: Some(ink_model::VectorSourceArchive {
+            legacy: archived_stroke.clone(),
+        }),
+    };
+    document
+        .dispatch(EditorCommand::ApplyVectorPatch {
+            layer,
+            edits: vec![VectorPatchEdit::Insert {
+                object_id: id,
+                position: 0,
+                object,
+            }],
+        })
+        .expect("apply Bézier path");
+    let detail = document
+        .vector_object_detail(layer, id)
+        .expect("vector detail")
+        .expect("inserted path detail");
+    assert_eq!(detail.6, vec![0, 4]);
+    assert_eq!(detail.7, vec![true, false]);
+    let tile = document
+        .read_tile(layer, TileCoord { x: 0, y: 0 })
+        .expect("path tile");
+    let alpha_at = |x: usize, y: usize, bytes: &[u8]| bytes[(y * 256 + x) * 4 + 3];
+    assert!(alpha_at(16, 16, &tile) > 0);
+    assert_eq!(alpha_at(40, 40, &tile), 0);
+
+    let before_failed_patch = document.snapshot();
+    assert!(
+        document
+            .dispatch(EditorCommand::ApplyVectorPatch {
+                layer,
+                edits: vec![
+                    VectorPatchEdit::Remove { object_id: id },
+                    VectorPatchEdit::Remove {
+                        object_id: StrokeId::from_u128(0x9002),
+                    },
+                ],
+            })
+            .is_err()
+    );
+    assert_eq!(document.snapshot(), before_failed_patch);
+    assert!(matches!(
+        document.set_vector_point(layer, id, 0, 10.0, 10.0, 0.5, 0.0),
+        Err(EngineError::InvalidCommand(message))
+            if message.contains("unsupported for Bézier paths")
+    ));
+    assert_eq!(document.snapshot(), before_failed_patch);
+
+    let snapshot = document.snapshot();
+    assert_eq!(snapshot.vectors.len(), 1);
+    let directory =
+        std::env::temp_dir().join(format!("project-ink-bezier-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let project_path = directory.join("vector.inkproj");
+    ink_storage::save_project(&project_path, &snapshot).expect("save format 8");
+    let reopened_snapshot = ink_storage::load_project(&project_path).expect("load format 8");
+    assert_eq!(reopened_snapshot.vectors.len(), 1);
+    assert!(matches!(
+        serde_json::from_slice::<ink_model::VectorObject>(&reopened_snapshot.vectors[0].bytes),
+        Ok(ink_model::VectorObject::BezierPath {
+            source: Some(ink_model::VectorSourceArchive { legacy }),
+            ..
+        }) if legacy == archived_stroke
+    ));
+    let reopened = Document::from_snapshot(reopened_snapshot).expect("reopen engine");
+    let reopened_tile = reopened
+        .read_tile(layer, TileCoord { x: 0, y: 0 })
+        .expect("reopened path tile");
+    assert_eq!(reopened_tile, tile);
+    ink_storage::save_project(&project_path, &snapshot).expect("publish recoverable checkpoint");
+    let vector_sidecar = project_path.join("vectors.json.zst");
+    let mut corrupt_sidecar = std::fs::read(&vector_sidecar).expect("read vector sidecar");
+    corrupt_sidecar[0] ^= 0xff;
+    std::fs::write(&vector_sidecar, &corrupt_sidecar).expect("corrupt primary vector sidecar");
+    let recovered_path = directory.join("recovered.inkproj");
+    ink_storage::recover_project(&project_path, &recovered_path).expect("recover backup copy");
+    assert_eq!(
+        std::fs::read(&vector_sidecar).expect("read unchanged corrupt source"),
+        corrupt_sidecar
+    );
+    let recovered_snapshot = ink_storage::load_project(&recovered_path).expect("load recovery");
+    assert!(matches!(
+        serde_json::from_slice::<ink_model::VectorObject>(&recovered_snapshot.vectors[0].bytes),
+        Ok(ink_model::VectorObject::BezierPath {
+            source: Some(ink_model::VectorSourceArchive { legacy }),
+            ..
+        }) if legacy == archived_stroke
+    ));
+    let recovered = Document::from_snapshot(recovered_snapshot).expect("bind recovery");
+    assert_eq!(
+        recovered
+            .read_tile(layer, TileCoord { x: 0, y: 0 })
+            .expect("recovered path tile"),
+        tile
+    );
+    std::fs::remove_dir_all(directory).expect("cleanup");
+
+    document
+        .dispatch(EditorCommand::Undo)
+        .expect("undo path insert");
+    assert!(document.snapshot().vectors.is_empty());
+    assert!(
+        !document
+            .layer_has_allocated_tiles(layer)
+            .expect("empty vector layer")
+    );
+    document
+        .dispatch(EditorCommand::Redo)
+        .expect("redo path insert");
+    assert_eq!(document.snapshot().vectors.len(), 1);
+}
+
+fn generated_patch_path(offset: i16, alpha: u8) -> ink_model::VectorObject {
+    let x = 32.0 + f64::from(offset);
+    let y = 32.0 + f64::from(offset);
+    let anchor = |x, y| ink_model::BezierAnchor {
+        x,
+        y,
+        incoming: [x, y],
+        outgoing: [x, y],
+        kind: ink_model::AnchorKind::Corner,
+    };
+    ink_model::VectorObject::BezierPath {
+        path: ink_model::BezierPath {
+            subpaths: vec![ink_model::BezierSubpath {
+                anchors: vec![anchor(x, y), anchor(x + 8.0, y), anchor(x + 4.0, y + 8.0)],
+                closed: true,
+            }],
+            style: ink_model::VectorStyle {
+                fill: Some(Rgba8 {
+                    r: 40,
+                    g: 80,
+                    b: 120,
+                    a: alpha,
+                }),
+                stroke: None,
+                stroke_width: 0.0,
+                cap: ink_model::StrokeCap::Butt,
+                join: ink_model::StrokeJoin::Miter,
+                miter_limit: 4.0,
+                fill_rule: ink_model::FillRule::EvenOdd,
+            },
+        },
+        source: None,
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn generated_tag_52_patches_replay_and_undo_losslessly(
+        offset in -20_i16..20,
+        alpha in any::<u8>(),
+        offset_two in -20_i16..20,
+    ) {
+        let spec = DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        };
+        let mut document = Document::new(DocumentId::from_u128(0x5052_4f50), spec)
+            .expect("property document");
+        document.dispatch(EditorCommand::AddLayer {
+            parent: None,
+            kind: LayerKind::VectorInk,
+        }).expect("add vector layer");
+        let layer = document.layers()[1].id;
+        let first = ink_model::Id::from_u128(0x7001);
+        let removed = ink_model::Id::from_u128(0x7002);
+        let retained = ink_model::Id::from_u128(0x7003);
+        document.dispatch(EditorCommand::ApplyVectorPatch {
+            layer,
+            edits: vec![
+                VectorPatchEdit::Insert { object_id: first, position: 0, object: generated_patch_path(offset, alpha) },
+                VectorPatchEdit::Insert { object_id: removed, position: 1, object: generated_patch_path(offset_two, 255 - alpha) },
+            ],
+        }).expect("seed property objects");
+        document.dispatch(EditorCommand::ApplyVectorPatch {
+            layer,
+            edits: vec![
+                VectorPatchEdit::Replace { object_id: first, object: generated_patch_path(offset_two, alpha) },
+                VectorPatchEdit::Insert { object_id: retained, position: 1, object: generated_patch_path(-offset_two, alpha / 2) },
+                VectorPatchEdit::Remove { object_id: removed },
+            ],
+        }).expect("apply property patch");
+        let expected = document.snapshot();
+        let reopened = Document::from_snapshot(expected.clone()).expect("replay journal");
+        prop_assert_eq!(&reopened.snapshot().vectors, &expected.vectors);
+        prop_assert_eq!(
+            reopened.vector_object_summaries(layer, 0, 64).expect("ordered summaries")
+                .iter().map(|item| item.0).collect::<Vec<_>>(),
+            vec![ink_model::StrokeId::from_u128(first.0), ink_model::StrokeId::from_u128(retained.0)],
+        );
+        document.dispatch(EditorCommand::Undo).expect("undo one patch");
+        prop_assert_eq!(
+            document.vector_object_summaries(layer, 0, 64).expect("undo summaries")
+                .iter().map(|item| item.0).collect::<Vec<_>>(),
+            vec![ink_model::StrokeId::from_u128(first.0), ink_model::StrokeId::from_u128(removed.0)],
+        );
+        document.dispatch(EditorCommand::Redo).expect("redo one patch");
+        prop_assert_eq!(&document.snapshot().vectors, &expected.vectors);
+    }
+}
+
+#[test]
+fn oversized_vector_patch_is_rejected_before_document_mutation() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document =
+        Document::new(DocumentId::from_u128(0x0056_4543_544f_5252), spec).expect("document");
+    document
+        .dispatch(EditorCommand::AddLayer {
+            parent: None,
+            kind: LayerKind::VectorInk,
+        })
+        .expect("vector layer");
+    let layer = document.layers()[1].id;
+    let make_stroke = || ink_model::VectorObject::LegacyInk {
+        stroke: ink_model::VectorStroke {
+            points: vec![
+                ink_model::VectorPoint {
+                    x: 8.0,
+                    y: 8.0,
+                    pressure: 0.5,
+                    tilt: 0.0,
+                };
+                8_192
+            ],
+            closed: false,
+        },
+    };
+    let before_snapshot = document.snapshot();
+    let before_history = document.history_snapshot(128).expect("history before");
+    let before_revision = document.revision();
+    let result = document.dispatch(EditorCommand::ApplyVectorPatch {
+        layer,
+        edits: vec![
+            VectorPatchEdit::Insert {
+                object_id: StrokeId::from_u128(0x9101),
+                position: 0,
+                object: make_stroke(),
+            },
+            VectorPatchEdit::Insert {
+                object_id: StrokeId::from_u128(0x9102),
+                position: 1,
+                object: make_stroke(),
+            },
+        ],
+    });
+    assert!(
+        matches!(result, Err(EngineError::InvalidCommand(message)) if message.contains("encoding failed"))
+    );
+    assert_eq!(document.revision(), before_revision);
+    assert_eq!(document.snapshot(), before_snapshot);
+    assert_eq!(
+        document.history_snapshot(128).expect("history after"),
+        before_history
+    );
+}
+
+#[test]
 fn single_point_vector_stroke_rasterizes_and_resource_cache_evicts_lru() {
     let spec = DocumentSpec {
         width_px: 256,
@@ -7743,6 +8857,53 @@ fn brush_library_edit_uses_shared_undo_redo_commands() {
 }
 
 #[test]
+fn rejected_vector_patch_preserves_pending_brush_undo() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc =
+        Document::new(DocumentId::from_u128(0x5645_4354_554e_444f), spec).expect("valid doc");
+    doc.dispatch(EditorCommand::AddLayer {
+        parent: None,
+        kind: LayerKind::VectorInk,
+    })
+    .expect("vector layer");
+    let layer = doc.layers()[1].id;
+    doc.update_brush_color(
+        BrushId::from_u128(1),
+        Rgba8 {
+            r: 240,
+            g: 80,
+            b: 32,
+            a: 255,
+        },
+    )
+    .expect("brush edit");
+    assert_eq!(doc.snapshot().brushes.len(), 1);
+
+    assert!(
+        doc.dispatch(EditorCommand::ApplyVectorPatch {
+            layer,
+            edits: vec![VectorPatchEdit::Remove {
+                object_id: StrokeId::from_u128(0x9001),
+            }],
+        })
+        .is_err()
+    );
+    assert_eq!(doc.snapshot().brushes.len(), 1);
+    assert!(doc.layers().iter().any(|item| item.id == layer));
+
+    doc.dispatch(EditorCommand::Undo)
+        .expect("failed vector patch must preserve the brush undo");
+    assert!(doc.snapshot().brushes.is_empty());
+    assert!(doc.layers().iter().any(|item| item.id == layer));
+}
+
+#[test]
 fn comic_structure_survives_native_checkpoint_and_reopen() {
     let spec = DocumentSpec {
         width_px: 256,
@@ -7847,4 +9008,509 @@ fn history_projection_reports_when_storage_dropped_oversized_undo_sidecar() {
         .navigate_history(0)
         .expect("undo retained latest state");
     assert_eq!(reopened.layers().len(), 2);
+}
+
+#[test]
+fn editable_psd_candidate_clips_offsets_and_converts_rgba_once() {
+    let imported = ink_export::PsdEditableImport {
+        width: 1,
+        height: 1,
+        layers: vec![
+            ink_export::PsdEditableLayer {
+                source_index: 0,
+                parent_index: None,
+                name: "Folder".into(),
+                depth: 0,
+                is_group: true,
+                left: 0,
+                top: 0,
+                width: 0,
+                height: 0,
+                visible: true,
+                opacity: 255,
+                blend_mode: "pass".into(),
+                alpha_locked: false,
+                whole_layer_locked: false,
+                clipping: false,
+                rgba: Vec::new(),
+                mask: None,
+            },
+            ink_export::PsdEditableLayer {
+                source_index: 1,
+                parent_index: Some(0),
+                name: "Ink".into(),
+                depth: 1,
+                is_group: false,
+                left: -1,
+                top: 0,
+                width: 2,
+                height: 1,
+                visible: true,
+                opacity: 255,
+                blend_mode: "norm".into(),
+                alpha_locked: true,
+                whole_layer_locked: true,
+                clipping: false,
+                rgba: vec![255, 0, 0, 255, 20, 40, 200, 128],
+                mask: Some(ink_export::PsdEditableMask {
+                    enabled: true,
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    samples: vec![255],
+                    default_value: 0,
+                }),
+            },
+        ],
+    };
+    let document = Document::from_editable_psd(DocumentId::from_u128(200), &imported)
+        .expect("construct editable candidate");
+    let snapshot = document.snapshot();
+    assert_eq!(snapshot.layers.len(), 3);
+    let folder = &snapshot.layers[0];
+    let ink = &snapshot.layers[1];
+    let mask = &snapshot.layers[2];
+    assert_eq!(ink.parent, Some(folder.id));
+    assert!(ink.alpha_lock && ink.locked);
+    assert_eq!(mask.mask_owner, Some(ink.id));
+    assert!(mask.mask_stencil);
+    assert_eq!(snapshot.tiles.len(), 2);
+    let ink_tile = snapshot
+        .tiles
+        .iter()
+        .find(|tile| tile.layer == ink.id)
+        .expect("clipped ink tile");
+    // Straight RGBA (20,40,200,128) becomes premultiplied BGRA once.
+    assert_eq!(&ink_tile.bytes[0..4], &[100, 20, 10, 128]);
+    assert_eq!(snapshot.layer_panel_state.primary_layer, Some(ink.id));
+    let reopened = Document::from_snapshot(snapshot.clone()).expect("reopen PSD candidate");
+    let reopened_snapshot = reopened.snapshot();
+    assert_eq!(reopened_snapshot.layers, snapshot.layers);
+    assert_eq!(reopened_snapshot.tiles, snapshot.tiles);
+    assert_eq!(
+        reopened_snapshot.layer_panel_state,
+        snapshot.layer_panel_state
+    );
+}
+
+#[test]
+fn editable_psd_candidate_preserves_disabled_mask_and_reveal_default_after_reopen() {
+    let imported = ink_export::PsdEditableImport {
+        width: 1,
+        height: 1,
+        layers: vec![ink_export::PsdEditableLayer {
+            source_index: 0,
+            parent_index: None,
+            name: "Masked ink".into(),
+            depth: 0,
+            is_group: false,
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            visible: true,
+            opacity: 255,
+            blend_mode: "norm".into(),
+            alpha_locked: false,
+            whole_layer_locked: false,
+            clipping: false,
+            rgba: vec![80, 120, 200, 255],
+            mask: Some(ink_export::PsdEditableMask {
+                enabled: false,
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+                samples: vec![0],
+                default_value: 255,
+            }),
+        }],
+    };
+    let document = Document::from_editable_psd(DocumentId::from_u128(202), &imported)
+        .expect("construct editable candidate");
+    let layers = document.layers();
+    let owner = layers
+        .iter()
+        .find(|layer| layer.kind == LayerKind::Raster)
+        .expect("raster owner");
+    let mask = layers
+        .iter()
+        .find(|layer| layer.kind == LayerKind::Mask)
+        .expect("mask layer");
+    assert_eq!(mask.mask_owner, Some(owner.id));
+    assert!(!mask.mask_enabled);
+    assert!(
+        !mask.mask_stencil,
+        "default-255 masks use hidden-coverage storage"
+    );
+    let composite = document
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("composite with disabled mask");
+    assert_eq!(&composite[..4], &[200, 120, 80, 255]);
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-psd-mask-default-reopen-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("candidate.inkproj");
+    document.save_as(&path).expect("save imported candidate");
+    drop(document);
+    let reopened = Document::open(&path).expect("reopen imported candidate");
+    let reopened_mask = reopened
+        .layers()
+        .into_iter()
+        .find(|layer| layer.kind == LayerKind::Mask)
+        .expect("reopened mask");
+    assert_eq!(reopened_mask.mask_owner, Some(owner.id));
+    assert!(!reopened_mask.mask_enabled);
+    assert!(!reopened_mask.mask_stencil);
+    assert_eq!(
+        reopened
+            .read_composite_tile(TileCoord { x: 0, y: 0 })
+            .expect("reopened composite")[..4],
+        [200, 120, 80, 255]
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(root).expect("cleanup PSD mask fixture");
+}
+
+#[test]
+fn editable_psd_candidate_rejects_non_parent_first_hierarchy_before_open() {
+    let imported = ink_export::PsdEditableImport {
+        width: 1,
+        height: 1,
+        layers: vec![ink_export::PsdEditableLayer {
+            source_index: 0,
+            parent_index: Some(0),
+            name: "Cycle".into(),
+            depth: 1,
+            is_group: true,
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+            visible: true,
+            opacity: 255,
+            blend_mode: "pass".into(),
+            alpha_locked: false,
+            whole_layer_locked: false,
+            clipping: false,
+            rgba: Vec::new(),
+            mask: None,
+        }],
+    };
+    assert!(Document::from_editable_psd(DocumentId::from_u128(201), &imported).is_err());
+}
+
+#[test]
+fn editable_psd_export_round_trips_raster_and_merged_pixels() {
+    let mut document = Document::new(
+        DocumentId::from_u128(0x5053_4445_5850_4f52),
+        DocumentSpec {
+            width_px: 256,
+            height_px: 256,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let raster = document.layers()[0].id;
+    let stroke = StrokeId::from_u128(0x5053_4445_5850_4f52);
+    document
+        .dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer: raster,
+            brush: BrushId::from_u128(1),
+        })
+        .expect("begin raster stroke");
+    document
+        .push_pointer_packet(&ink_test_support::one_sample(32.0, 32.0, 1.0))
+        .expect("queue raster sample");
+    document
+        .dispatch(EditorCommand::EndStroke { stroke })
+        .expect("commit raster stroke");
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-editable-psd-export-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("layered.psd");
+    document
+        .export_editable_psd(&path)
+        .expect("editable PSD export");
+    let bytes = std::fs::read(&path).expect("PSD bytes");
+    let inspection = ink_export::inspect_psd(&bytes).expect("inspect PSD");
+    assert!(inspection.editable_import_available);
+    assert_eq!(inspection.layers.len(), 1);
+    let decoded = ink_export::decode_psd_editable(&bytes).expect("editable decode");
+    assert_eq!(decoded.layers.len(), 1);
+    let (_, _, merged) = ink_export::decode_psd(&bytes).expect("merged composite");
+    let premultiplied = document
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("authoritative composite tile");
+    let mut expected = vec![0; 256 * 256 * 4];
+    for pixel in 0..256 * 256 {
+        let source_offset = pixel * 4;
+        let alpha = u32::from(premultiplied[source_offset + 3]);
+        expected[source_offset] = unpremultiply_channel(premultiplied[source_offset + 2], alpha);
+        expected[source_offset + 1] =
+            unpremultiply_channel(premultiplied[source_offset + 1], alpha);
+        expected[source_offset + 2] = unpremultiply_channel(premultiplied[source_offset], alpha);
+        expected[source_offset + 3] = premultiplied[source_offset + 3];
+    }
+    assert!(
+        merged.iter().any(|byte| *byte != 0),
+        "PSD composite is empty"
+    );
+    assert!(
+        expected.iter().any(|byte| *byte != 0),
+        "document composite is empty"
+    );
+    let first_mismatch = merged
+        .iter()
+        .zip(&expected)
+        .position(|(actual, expected)| actual != expected);
+    assert!(
+        first_mismatch.is_none(),
+        "PSD composite mismatch at {:?}: actual {:?}, expected {:?}",
+        first_mismatch,
+        first_mismatch.map(|index| &merged[index..index + 4]),
+        first_mismatch.map(|index| &expected[index..index + 4]),
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn pulled_string_brush_draft_persists_reopens_and_undoes_as_one_edit() {
+    let spec = DocumentSpec {
+        width_px: 128,
+        height_px: 128,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut document =
+        Document::new(DocumentId::from_u128(0x5055_4c4c), spec).expect("new document");
+    let brush_id = BrushId::from_u128(6);
+    let brush = document
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush_id)
+        .expect("built-in brush");
+    let draft = document.begin_brush_draft(brush_id).expect("begin draft");
+    document
+        .update_brush_draft(
+            draft,
+            brush.diameter_px,
+            brush.opacity,
+            brush.spacing,
+            brush.smoothing,
+            brush.pressure_size,
+            brush.pressure_opacity,
+            0.5,
+            brush.hardness,
+            brush.texture_scale,
+            brush.scatter,
+            brush.rotation_jitter,
+            brush.smudge,
+            brush.wetness,
+            true,
+            24.0,
+            true,
+            &brush.pressure_curve_points,
+        )
+        .expect("preview pulled-string settings");
+    document.commit_brush_draft(draft).expect("commit draft");
+
+    let committed = document
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush_id)
+        .expect("committed brush");
+    assert!(committed.pulled_string);
+    assert!((committed.stabilizer_distance_px - 24.0).abs() < f32::EPSILON);
+    assert!(committed.catch_up_on_end);
+    document
+        .dispatch(EditorCommand::Undo)
+        .expect("undo stabilizer edit");
+    let undone = document
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush_id)
+        .expect("undone brush");
+    assert!(!undone.pulled_string);
+    assert!(undone.stabilizer_distance_px.abs() < f32::EPSILON);
+    document
+        .dispatch(EditorCommand::Redo)
+        .expect("redo stabilizer edit");
+    assert!(
+        document
+            .brush_summaries()
+            .into_iter()
+            .find(|summary| summary.id == brush_id)
+            .expect("redone brush")
+            .pulled_string
+    );
+
+    let snapshot = document.snapshot();
+    let preset: ink_brush::BrushPresetV2 =
+        serde_json::from_slice(&snapshot.brushes[0]).expect("serialized format-3 brush");
+    assert_eq!(preset.format_version, 3);
+    assert_eq!(preset.engine_semantics.0, ink_brush::CPU_BRUSH_V3);
+    let reopened = Document::from_snapshot(snapshot).expect("reopen brush document");
+    let persisted = reopened
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush_id)
+        .expect("reopened brush");
+    assert!((persisted.stabilizer_distance_px - 24.0).abs() < f32::EPSILON);
+    assert!(persisted.pulled_string);
+}
+
+#[test]
+fn pulled_string_stroke_reopens_and_replays_with_captured_brush_semantics() {
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-pulled-string-replay-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("pulled-string.inkproj");
+    let mut document = Document::new(
+        DocumentId::from_u128(0x5055_4c4c_5250),
+        DocumentSpec {
+            width_px: 256,
+            height_px: 256,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("create document");
+    let layer = document.layers()[0].id;
+    let brush_id = BrushId::from_u128(6);
+    configure_replay_test_pulled_string_brush(&mut document, brush_id);
+    draw_replay_test_pulled_string_stroke(&mut document, layer, brush_id);
+    let time_lapse = document.time_lapse();
+    let recorded_stroke = time_lapse.strokes.last().expect("recorded stroke");
+    assert_eq!(recorded_stroke.brush, brush_id.0);
+    assert_eq!(recorded_stroke.brush_revision, 1);
+    assert_eq!(recorded_stroke.brush_semantics, ink_brush::CPU_BRUSH_V3);
+    assert!(recorded_stroke.pulled_string);
+    assert_eq!(
+        recorded_stroke.stabilizer_distance_px.to_bits(),
+        24.0_f32.to_bits()
+    );
+    assert!(recorded_stroke.catch_up_on_end);
+    let committed = document
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("committed composite");
+    assert!(committed.iter().any(|channel| *channel != 0));
+    document.save_as(&path).expect("save pulled-string stroke");
+    drop(document);
+
+    let mut reopened = Document::open(&path).expect("reopen pulled-string stroke");
+    let replayed = reopened
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("reopened composite");
+    assert_eq!(replayed, committed, "reopen changed committed pixels");
+    reopened
+        .dispatch(EditorCommand::Undo)
+        .expect("undo persisted pulled-string stroke");
+    let undone = reopened
+        .read_composite_tile(TileCoord { x: 0, y: 0 })
+        .expect("undone composite");
+    assert!(undone.iter().all(|channel| *channel == 0));
+    reopened
+        .dispatch(EditorCommand::Redo)
+        .expect("redo persisted pulled-string stroke");
+    assert_eq!(
+        reopened
+            .read_composite_tile(TileCoord { x: 0, y: 0 })
+            .expect("redone composite"),
+        committed,
+        "redo changed pixels produced by the captured brush semantics"
+    );
+    reopened.close();
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn configure_replay_test_pulled_string_brush(document: &mut Document, brush_id: BrushId) {
+    let brush = document
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush_id)
+        .expect("built-in brush");
+    let draft = document.begin_brush_draft(brush_id).expect("begin draft");
+    document
+        .update_brush_draft(
+            draft,
+            brush.diameter_px,
+            brush.opacity,
+            brush.spacing,
+            brush.smoothing,
+            brush.pressure_size,
+            brush.pressure_opacity,
+            0.5,
+            brush.hardness,
+            brush.texture_scale,
+            brush.scatter,
+            brush.rotation_jitter,
+            brush.smudge,
+            brush.wetness,
+            true,
+            24.0,
+            true,
+            &brush.pressure_curve_points,
+        )
+        .expect("set pulled-string settings");
+    document
+        .commit_brush_draft(draft)
+        .expect("commit brush draft");
+}
+
+fn draw_replay_test_pulled_string_stroke(document: &mut Document, layer: LayerId, brush: BrushId) {
+    let stroke = StrokeId::from_u128(0x5055_4c4c_5253);
+    document
+        .dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer,
+            brush,
+        })
+        .expect("begin pulled-string stroke");
+    let points = [(48.0, 72.0), (88.0, 88.0), (128.0, 112.0), (176.0, 136.0)];
+    for (sequence, (x, y)) in points.into_iter().enumerate() {
+        let sample = ink_input::PointerSample {
+            pointer_id: 1,
+            flags: 0,
+            device_kind: ink_input::DeviceKind::Stylus,
+            phase: if sequence == 0 {
+                ink_input::Phase::Down
+            } else {
+                ink_input::Phase::Move
+            },
+            canvas_x: x,
+            canvas_y: y,
+            pressure: u16::MAX,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            azimuth: 0.0,
+            twist: 0.0,
+            timestamp_ns: u64::try_from(sequence + 1).expect("sample timestamp fits u64"),
+            sequence: u32::try_from(sequence + 1).expect("sample sequence fits u32"),
+        };
+        let packet = ink_test_support::pointer_packet(&[sample]);
+        document
+            .push_pointer_packet(&packet)
+            .expect("queue pulled-string stroke sample");
+    }
+    document
+        .dispatch(EditorCommand::EndStroke { stroke })
+        .expect("commit pulled-string stroke");
 }

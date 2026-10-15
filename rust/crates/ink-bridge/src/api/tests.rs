@@ -5,6 +5,54 @@ fn assert_f32_near(actual: f32, expected: f32) {
     assert!((actual - expected).abs() < f32::EPSILON);
 }
 
+fn preserve_psd_export_for_external_oracle(path: &std::path::Path, name: &str) {
+    let Some(directory) = std::env::var_os("PROJECT_INK_PSD_ORACLE_DIR") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).expect("create external PSD oracle directory");
+    std::fs::copy(path, directory.join(name)).expect("preserve PSD export for external oracle");
+}
+
+fn assert_composite_matches_rgba_oracle(
+    document: &DocumentHandle,
+    width: u32,
+    height: u32,
+    oracle: &[u8],
+    label: &str,
+) {
+    for tile_y in 0..2 {
+        for tile_x in 0..3 {
+            let tile =
+                read_composite_tile(document, tile_x, tile_y).expect("read composite oracle tile");
+            let start_x = (tile_x as usize) * 256;
+            let start_y = (tile_y as usize) * 256;
+            let end_x = (start_x + 256).min(width as usize);
+            let end_y = (start_y + 256).min(height as usize);
+            for y in start_y..end_y {
+                for x in start_x..end_x {
+                    let tile_offset = ((y - start_y) * 256 + (x - start_x)) * 4;
+                    let oracle_offset = (y * width as usize + x) * 4;
+                    let [red, green, blue, alpha] = oracle[oracle_offset..oracle_offset + 4]
+                        .try_into()
+                        .expect("RGBA oracle pixel");
+                    let expected_bgra = [
+                        ((u16::from(blue) * u16::from(alpha) + 127) / 255) as u8,
+                        ((u16::from(green) * u16::from(alpha) + 127) / 255) as u8,
+                        ((u16::from(red) * u16::from(alpha) + 127) / 255) as u8,
+                        alpha,
+                    ];
+                    assert_eq!(
+                        &tile[tile_offset..tile_offset + 4],
+                        &expected_bgra,
+                        "{label} composite at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn panel_frame_layer_round_trips_clear_and_undo_through_bridge() {
     let mut handle = create_document(
@@ -36,6 +84,392 @@ fn panel_frame_layer_round_trips_clear_and_undo_through_bridge() {
     undo(&mut handle).expect("undo clear");
     let restored = read_tile(&handle, frame_layer, 0, 0).expect("undo restores frame");
     assert!(restored[(20 * 256 + 8) * 4 + 3] > 0);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exercises conversion, path edit, restoration, stale work, and history together.
+fn vector_candidate_preview_apply_cancel_and_stale_revision_are_safe() {
+    let mut handle = create_default_document(0xCA11, 64, 64, 144.0).expect("document");
+    let layer = add_layer(&mut handle, 1).expect("vector layer");
+    add_vector_stroke(
+        &mut handle,
+        layer,
+        vec![
+            8.0, 8.0, 0.2, 0.0, 16.0, 10.0, 0.4, 0.1, 24.0, 16.0, 0.8, 0.0, 32.0, 24.0, 0.6, -0.1,
+        ],
+        false,
+    )
+    .expect("legacy vector stroke");
+    let source_id = vector_stroke_summaries(&handle, layer)
+        .expect("vector summaries")
+        .first()
+        .expect("one stroke")
+        .id;
+    assert_eq!(
+        hit_test_vector_object(&handle, layer, 16.0, 10.0, 1.0).expect("vector hit-test"),
+        Some(source_id)
+    );
+    let before = document(&handle).expect("document").snapshot();
+
+    let candidate =
+        preview_vector_curve_fit(&mut handle, layer, source_id, 1.0).expect("fit preview");
+    assert!(candidate.matched);
+    assert!(!candidate.geometry.is_empty());
+    assert!(candidate.notice.contains("uniform-width"));
+    assert_eq!(document(&handle).expect("document").snapshot(), before);
+    apply_vector_candidate(&mut handle, candidate.token).expect("apply preview");
+    let objects = vector_object_summaries(&handle, layer, 0, 64).expect("mixed object page");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].kind, "BezierPath");
+    assert!(objects[0].has_source_archive);
+    assert!(objects[0].geometry.is_empty());
+    assert_eq!(objects[0].point_count, 2);
+    assert!(vector_object_summaries(&handle, layer, 0, 65).is_err());
+    let selected_detail = vector_object_detail(&handle, layer, source_id)
+        .expect("selected object detail")
+        .expect("object exists");
+    for anchor in selected_detail.geometry.as_chunks::<6>().0 {
+        for (x, y) in [
+            (anchor[0], anchor[1]),
+            (anchor[2], anchor[3]),
+            (anchor[4], anchor[5]),
+        ] {
+            assert!(f64::from(objects[0].min_x) <= x);
+            assert!(f64::from(objects[0].min_y) <= y);
+            assert!(f64::from(objects[0].max_x) >= x);
+            assert!(f64::from(objects[0].max_y) >= y);
+        }
+    }
+    let path_before_edit = selected_detail.geometry;
+    let revision_before_edit = document(&handle).expect("document").snapshot().revision;
+    let edit_preview = preview_vector_anchor_move(&mut handle, layer, source_id, 0, 0, 1.0, 0.0)
+        .expect("anchor move preview");
+    assert_eq!(
+        document(&handle).expect("document").snapshot().revision,
+        revision_before_edit
+    );
+    apply_vector_candidate(&mut handle, edit_preview.token).expect("apply anchor move");
+    let moved = vector_object_detail(&handle, layer, source_id)
+        .expect("moved path detail")
+        .expect("object exists");
+    assert!((moved.geometry[0] - (path_before_edit[0] + 1.0)).abs() < f64::EPSILON);
+    restore_vector_original_ink(&mut handle, layer, source_id).expect("restore source ink");
+    let restored = vector_object_summaries(&handle, layer, 0, 64).expect("restored objects");
+    assert_eq!(restored[0].kind, "LegacyInk");
+    assert_eq!(
+        vector_object_detail(&handle, layer, source_id)
+            .expect("restored detail")
+            .expect("object exists")
+            .points,
+        vector_stroke_summaries(&handle, layer).expect("restored stroke")[0].points
+    );
+    assert_eq!(
+        document(&handle)
+            .expect("document")
+            .snapshot()
+            .vectors
+            .len(),
+        1
+    );
+    undo(&mut handle).expect("undo restore");
+    assert_eq!(
+        vector_object_summaries(&handle, layer, 0, 64).expect("restored conversion")[0].kind,
+        "BezierPath"
+    );
+    undo(&mut handle).expect("undo anchor move");
+    assert_eq!(
+        vector_object_detail(&handle, layer, source_id)
+            .expect("original conversion detail")
+            .expect("object exists")
+            .geometry,
+        path_before_edit
+    );
+    undo(&mut handle).expect("undo conversion");
+    let after_undo = document(&handle).expect("document").snapshot();
+    assert_eq!(after_undo.layers, before.layers);
+    assert_eq!(after_undo.tiles, before.tiles);
+    assert_eq!(after_undo.vectors, before.vectors);
+
+    let pending =
+        preview_vector_curve_fit(&mut handle, layer, source_id, 1.0).expect("second fit preview");
+    add_vector_stroke(&mut handle, layer, vec![40.0, 4.0, 1.0, 0.0], false)
+        .expect("intervening edit");
+    assert!(apply_vector_candidate(&mut handle, pending.token).is_err());
+    cancel_vector_candidate(&mut handle, pending.token).expect("idempotent cancel");
+
+    let no_match_stroke = add_vector_stroke(
+        &mut handle,
+        layer,
+        vec![
+            2.0, 40.0, 1.0, 0.0, 4.0, 46.0, 1.0, 0.0, 8.0, 40.0, 1.0, 0.0, 10.0, 46.0, 1.0, 0.0,
+            14.0, 40.0, 1.0, 0.0,
+        ],
+        false,
+    )
+    .expect("scribble");
+    let no_match_id = vector_stroke_summaries(&handle, layer)
+        .expect("summaries")
+        .last()
+        .expect("new stroke")
+        .id;
+    let before_no_match = document(&handle).expect("document").snapshot();
+    let no_match = preview_vector_shape(&mut handle, layer, no_match_id)
+        .expect("no-match result is not a mutation");
+    assert!(!no_match.matched);
+    assert_eq!(no_match.token, 0);
+    assert_eq!(no_match.kind, "NoMatch");
+    assert_eq!(
+        document(&handle).expect("document").snapshot(),
+        before_no_match
+    );
+
+    let tap_stroke = add_vector_stroke(&mut handle, layer, vec![48.0, 48.0, 0.7, 0.0], false)
+        .expect("one-sample tap stroke");
+    let tap_id = vector_stroke_summaries(&handle, layer)
+        .expect("summaries")
+        .last()
+        .expect("tap stroke")
+        .id;
+    let before_tap_preview = document(&handle).expect("document").snapshot();
+    let tap = preview_vector_shape(&mut handle, layer, tap_id)
+        .expect("tap is an ordinary no-match result");
+    assert!(!tap.matched);
+    assert_eq!(tap.token, 0);
+    assert_eq!(tap.kind, "NoMatch");
+    assert_eq!(
+        document(&handle).expect("document").snapshot(),
+        before_tap_preview
+    );
+    let _ = (no_match_stroke, tap_stroke);
+}
+
+#[test]
+fn recognized_rectangle_constraint_keeps_preview_token_and_original_archive() {
+    let mut handle = create_default_document(0xCA13, 64, 64, 144.0).expect("document");
+    let layer = add_layer(&mut handle, 1).expect("vector layer");
+    add_vector_stroke(
+        &mut handle,
+        layer,
+        vec![
+            8.0, 8.0, 0.7, 0.0, 48.0, 8.0, 0.7, 0.0, 48.0, 28.0, 0.7, 0.0, 8.0, 28.0, 0.7, 0.0,
+            8.0, 8.0, 0.7, 0.0,
+        ],
+        false,
+    )
+    .expect("rectangle ink");
+    let id = vector_stroke_summaries(&handle, layer).expect("summary")[0].id;
+    let before = document(&handle).expect("document").snapshot();
+    let recognized = preview_vector_shape(&mut handle, layer, id).expect("recognition preview");
+    assert_eq!(recognized.kind, "Rectangle");
+    assert!(preview_vector_shape_constraint(&mut handle, recognized.token, 1).is_err());
+    let square = preview_vector_shape_constraint(&mut handle, recognized.token, 0)
+        .expect("square constraint preview");
+    assert_eq!(square.token, recognized.token);
+    assert_eq!(square.kind, "Square");
+    assert_eq!(document(&handle).expect("document").snapshot(), before);
+    apply_vector_candidate(&mut handle, square.token).expect("apply constrained shape");
+    let object = vector_object_summaries(&handle, layer, 0, 64).expect("objects")[0].clone();
+    assert!(object.has_source_archive);
+    let detail = vector_object_detail(&handle, layer, object.id)
+        .expect("detail")
+        .expect("path");
+    let anchors = detail
+        .geometry
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .collect::<Vec<_>>();
+    let length = |a: &[f64], b: &[f64]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    assert!((length(anchors[0], anchors[1]) - length(anchors[1], anchors[2])).abs() < 1e-8);
+    assert!(preview_vector_shape_constraint(&mut handle, square.token, 1).is_err());
+}
+
+#[test]
+fn legacy_vector_translation_previews_exact_samples_and_applies_once() {
+    let mut handle = create_default_document(0xCA14, 64, 64, 144.0).expect("document");
+    let layer = add_layer(&mut handle, 1).expect("vector layer");
+    add_vector_stroke(
+        &mut handle,
+        layer,
+        vec![8.0, 9.0, 0.25, -0.2, 20.0, 24.0, 0.9, 0.4],
+        false,
+    )
+    .expect("legacy stroke");
+    let id = vector_stroke_summaries(&handle, layer).expect("strokes")[0].id;
+    let original = vector_object_detail(&handle, layer, id)
+        .expect("original detail")
+        .expect("legacy object");
+    let revision = document(&handle).expect("document").revision();
+
+    let preview = preview_vector_legacy_translation(&mut handle, layer, id, 5.0, -3.0)
+        .expect("legacy transform preview");
+    assert!(preview.matched);
+    assert_eq!(preview.kind, "LegacyInk");
+    assert_eq!(
+        preview.points,
+        vec![
+            13.0,
+            6.0,
+            f64::from(0.25_f32),
+            f64::from(-0.2_f32),
+            25.0,
+            21.0,
+            f64::from(0.9_f32),
+            f64::from(0.4_f32),
+        ]
+    );
+    assert_eq!(document(&handle).expect("document").revision(), revision);
+    apply_vector_candidate(&mut handle, preview.token).expect("apply once");
+    let moved = vector_object_detail(&handle, layer, id)
+        .expect("moved detail")
+        .expect("legacy object");
+    assert_eq!(
+        moved.points,
+        preview
+            .points
+            .iter()
+            .map(|value| *value as f32)
+            .collect::<Vec<_>>()
+    );
+    undo(&mut handle).expect("undo translation");
+    assert_eq!(
+        vector_object_detail(&handle, layer, id)
+            .expect("restored detail")
+            .expect("legacy object")
+            .points,
+        original.points
+    );
+}
+
+#[test]
+fn failed_vector_preview_retires_the_previous_candidate_without_mutation() {
+    let mut handle = create_default_document(0xCA15, 64, 64, 144.0).expect("document");
+    let layer = add_layer(&mut handle, 1).expect("vector layer");
+    add_vector_stroke(
+        &mut handle,
+        layer,
+        vec![8.0, 8.0, 0.5, 0.0, 24.0, 24.0, 0.5, 0.0],
+        false,
+    )
+    .expect("legacy stroke");
+    let id = vector_stroke_summaries(&handle, layer).expect("strokes")[0].id;
+    let original = vector_object_detail(&handle, layer, id)
+        .expect("original detail")
+        .expect("legacy object");
+    let candidate = preview_vector_shape(&mut handle, layer, id).expect("shape candidate");
+    assert!(candidate.matched);
+
+    assert!(preview_vector_legacy_translation(&mut handle, layer, id, 1_000.0, 0.0).is_err());
+    assert!(apply_vector_candidate(&mut handle, candidate.token).is_err());
+    assert_eq!(
+        vector_object_detail(&handle, layer, id)
+            .expect("detail after rejected preview")
+            .expect("legacy object after rejected preview"),
+        original
+    );
+}
+
+#[test]
+fn vector_repeat_inserts_materialized_paths_as_one_undoable_patch() {
+    let mut handle = create_default_document(0xCA16, 64, 64, 144.0).expect("document");
+    let layer = add_layer(&mut handle, 1).expect("vector layer");
+    let object_id = 0xCA16_u128;
+    let anchor = |x, y| ink_model::BezierAnchor {
+        x,
+        y,
+        incoming: [x, y],
+        outgoing: [x, y],
+        kind: ink_model::AnchorKind::Corner,
+    };
+    document_mut(&mut handle)
+        .expect("document")
+        .dispatch(EditorCommand::ApplyVectorPatch {
+            layer: ink_model::LayerId::from_u128(layer),
+            edits: vec![ink_command::VectorPatchEdit::Insert {
+                object_id: ink_model::Id::from_u128(object_id),
+                position: 0,
+                object: ink_model::VectorObject::BezierPath {
+                    path: ink_model::BezierPath {
+                        subpaths: vec![ink_model::BezierSubpath {
+                            anchors: vec![anchor(8.0, 8.0), anchor(24.0, 8.0)],
+                            closed: false,
+                        }],
+                        style: ink_model::VectorStyle {
+                            fill: None,
+                            stroke: Some(Rgba8 {
+                                r: 20,
+                                g: 40,
+                                b: 80,
+                                a: 255,
+                            }),
+                            stroke_width: 2.0,
+                            cap: ink_model::StrokeCap::Round,
+                            join: ink_model::StrokeJoin::Round,
+                            miter_limit: 4.0,
+                            fill_rule: ink_model::FillRule::NonZero,
+                        },
+                    },
+                    source: None,
+                },
+            }],
+        })
+        .expect("insert path fixture");
+
+    let ids = repeat_vector_path(
+        &mut handle,
+        layer,
+        object_id,
+        VectorRepeatRequest {
+            mode: VectorRepeatMode::Grid,
+            copies: 8,
+            columns: 2,
+            rows: 2,
+            spacing_x: 20.0,
+            spacing_y: 20.0,
+            step_degrees: 45.0,
+            scale_per_copy: 1.0,
+        },
+    )
+    .expect("grid repeat");
+    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        vector_object_summaries(&handle, layer, 0, 64)
+            .expect("paths")
+            .len(),
+        4
+    );
+    undo(&mut handle).expect("undo all copies once");
+    assert_eq!(
+        vector_object_summaries(&handle, layer, 0, 64)
+            .expect("source path")
+            .len(),
+        1
+    );
+    redo(&mut handle).expect("redo all copies once");
+    assert_eq!(
+        vector_object_summaries(&handle, layer, 0, 64)
+            .expect("restored copies")
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn vector_hit_test_selects_topmost_matching_object() {
+    let mut handle = create_default_document(0xCA12, 64, 64, 144.0).expect("document");
+    let layer = add_layer(&mut handle, 1).expect("vector layer");
+    let points = vec![8.0, 8.0, 0.8, 0.0, 24.0, 8.0, 0.8, 0.0];
+    add_vector_stroke(&mut handle, layer, points.clone(), false).expect("back stroke");
+    add_vector_stroke(&mut handle, layer, points, false).expect("front stroke");
+    let topmost = vector_stroke_summaries(&handle, layer)
+        .expect("vector summaries")
+        .last()
+        .expect("front stroke")
+        .id;
+    assert_eq!(
+        hit_test_vector_object(&handle, layer, 16.0, 8.0, 0.25).expect("hit-test"),
+        Some(topmost)
+    );
 }
 
 #[test]
@@ -346,6 +780,61 @@ fn custom_brush_rename_is_projected_and_undoable_through_bridge() {
             .expect("brush projection after redo")
             .into_iter()
             .any(|brush| brush.id == duplicate && brush.name == "Ink Manga Pen")
+    );
+}
+
+#[test]
+fn pulled_string_brush_settings_round_trip_through_bridge_draft() {
+    let mut handle = create_default_document(0x3389, 64, 64, 144.0).expect("document");
+    let duplicate = duplicate_brush(&mut handle, 6).expect("duplicate G-Pen");
+    let draft = begin_brush_draft(&mut handle, duplicate).expect("begin brush draft");
+    update_brush_draft(
+        &mut handle,
+        draft,
+        12.0,
+        1.0,
+        0.1,
+        0.0,
+        0.0,
+        0.0,
+        0.5,
+        0.75,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        true,
+        24.0,
+        true,
+        vec![],
+    )
+    .expect("update stabilizer draft");
+    commit_brush_draft(&mut handle, draft).expect("commit stabilizer draft");
+
+    let committed = brushes(&handle)
+        .expect("brush projection")
+        .into_iter()
+        .find(|brush| brush.id == duplicate)
+        .expect("edited brush");
+    assert!(committed.pulled_string);
+    assert_f32_near(committed.stabilizer_distance_px, 24.0);
+    assert!(committed.catch_up_on_end);
+    undo(&mut handle).expect("undo draft edit");
+    let undone = brushes(&handle)
+        .expect("brush projection after undo")
+        .into_iter()
+        .find(|brush| brush.id == duplicate)
+        .expect("undone brush");
+    assert!(!undone.pulled_string);
+    redo(&mut handle).expect("redo draft edit");
+    assert!(
+        brushes(&handle)
+            .expect("brush projection after redo")
+            .into_iter()
+            .find(|brush| brush.id == duplicate)
+            .expect("redone brush")
+            .pulled_string
     );
 }
 
@@ -1160,23 +1649,73 @@ fn adjustment_settings_are_projected_validated_and_undoable() {
     assert_eq!(summary.parent, Some(group));
     assert_eq!(summary.adjustment_brightness, 32);
     assert_eq!(summary.adjustment_contrast, -18);
-    assert!(set_layer_brightness_contrast(&mut handle, adjustment_layer, 101, 0).is_err());
-    undo(&mut handle).expect("undo adjustment edit");
+
+    let preview = ink_model::LayerAdjustment::Levels {
+        input_black: 8,
+        input_white: 240,
+        gamma_hundredths: 125,
+        output_black: 0,
+        output_white: 255,
+    };
+    let edit = begin_layer_adjustment_edit(&mut handle, adjustment_layer)
+        .expect("begin adjustment preview");
+    update_layer_adjustment_edit(
+        &mut handle,
+        edit,
+        serde_json::to_string(&preview).expect("encode adjustment"),
+    )
+    .expect("preview Levels");
     let summary = layer_summaries(&handle)
-        .expect("undo projection")
+        .expect("preview projection")
         .into_iter()
         .find(|layer| layer.id == adjustment_layer)
-        .expect("adjustment layer remains");
-    assert_eq!(summary.adjustment_brightness, 0);
-    assert_eq!(summary.adjustment_contrast, 0);
-    redo(&mut handle).expect("redo adjustment edit");
+        .expect("adjustment preview");
+    assert_eq!(
+        summary.adjustment_json,
+        Some(serde_json::to_string(&preview).unwrap())
+    );
+    cancel_layer_adjustment_edit(&mut handle, edit).expect("cancel preview");
     let summary = layer_summaries(&handle)
-        .expect("redo projection")
+        .expect("canceled projection")
         .into_iter()
         .find(|layer| layer.id == adjustment_layer)
-        .expect("adjustment layer remains");
+        .expect("adjustment after cancellation");
     assert_eq!(summary.adjustment_brightness, 32);
     assert_eq!(summary.adjustment_contrast, -18);
+
+    let edit = begin_layer_adjustment_edit(&mut handle, adjustment_layer)
+        .expect("begin committed adjustment edit");
+    let hue = ink_model::LayerAdjustment::HueSaturation {
+        hue_degrees: 45,
+        saturation: -25,
+        lightness: 10,
+    };
+    update_layer_adjustment_edit(
+        &mut handle,
+        edit,
+        serde_json::to_string(&hue).expect("encode hue adjustment"),
+    )
+    .expect("preview Hue and Saturation");
+    commit_layer_adjustment_edit(&mut handle, edit).expect("commit adjustment draft");
+    undo(&mut handle).expect("undo adjustment draft");
+    let summary = layer_summaries(&handle)
+        .expect("undone draft projection")
+        .into_iter()
+        .find(|layer| layer.id == adjustment_layer)
+        .expect("adjustment after draft undo");
+    assert_eq!(summary.adjustment_brightness, 32);
+    assert_eq!(summary.adjustment_contrast, -18);
+    redo(&mut handle).expect("redo adjustment draft");
+    let summary = layer_summaries(&handle)
+        .expect("redone draft projection")
+        .into_iter()
+        .find(|layer| layer.id == adjustment_layer)
+        .expect("adjustment after draft redo");
+    assert_eq!(
+        summary.adjustment_json,
+        Some(serde_json::to_string(&hue).unwrap())
+    );
+    assert!(set_layer_brightness_contrast(&mut handle, adjustment_layer, 101, 0).is_err());
     close_document(&mut handle).expect("close document");
 }
 
@@ -1902,9 +2441,16 @@ fn studio_batch_page_export_contains_painted_art_and_survives_reopen() {
     push_pointer_packet(&mut page, &packet).expect("stroke sample");
     end_stroke(&mut page).expect("end stroke");
 
+    assert!(
+        studio_batch_export_pages(&project, first_export.to_string_lossy().into_owned(), false)
+            .is_err(),
+        "warning-bearing exports require explicit confirmation"
+    );
+    let acknowledged_warnings = studio_comic_render_warnings(&project).expect("render warnings");
+    assert!(!acknowledged_warnings.is_empty());
     assert_eq!(
-        studio_batch_export_pages(&project, first_export.to_string_lossy().into_owned())
-            .expect("PNG export"),
+        studio_batch_export_pages(&project, first_export.to_string_lossy().into_owned(), true,)
+            .expect("confirmed PNG export"),
         2
     );
     let painted = std::fs::read(first_export.join("page-0001.png")).expect("painted PNG");
@@ -1918,10 +2464,11 @@ fn studio_batch_page_export_contains_painted_art_and_survives_reopen() {
     assert!(composite_svg.contains("data:image/png;base64,"));
     assert!(composite_svg.contains("Hello &amp;"));
     assert!(composite_svg.contains("goodbye"));
-    assert!(composite_svg.contains("<tspan x="));
+    assert!(composite_svg.contains("<path d=\""));
     assert!(composite_svg.contains("data-balloon-shape=\"oval\""));
     assert!(
-        studio_batch_export_pages(&project, first_export.to_string_lossy().into_owned()).is_err()
+        studio_batch_export_pages(&project, first_export.to_string_lossy().into_owned(), true,)
+            .is_err()
     );
     assert_eq!(
         painted,
@@ -1933,7 +2480,12 @@ fn studio_batch_page_export_contains_painted_art_and_survives_reopen() {
     let protected = blocked_export.join("page-0002.png");
     std::fs::write(&protected, b"keep-existing-output").expect("existing page output");
     assert!(
-        studio_batch_export_pages(&project, blocked_export.to_string_lossy().into_owned()).is_err()
+        studio_batch_export_pages(
+            &project,
+            blocked_export.to_string_lossy().into_owned(),
+            true
+        )
+        .is_err()
     );
     assert!(!blocked_export.join("page-0001.png").exists());
     assert_eq!(
@@ -1946,8 +2498,12 @@ fn studio_batch_page_export_contains_painted_art_and_survives_reopen() {
     let mut reopened = open_studio_project(project_path.to_string_lossy().into_owned())
         .expect("reopen comic project");
     assert_eq!(
-        studio_batch_export_pages(&reopened, second_export.to_string_lossy().into_owned())
-            .expect("reopened PNG export"),
+        studio_batch_export_pages(
+            &reopened,
+            second_export.to_string_lossy().into_owned(),
+            true
+        )
+        .expect("reopened PNG export"),
         2
     );
     assert_eq!(
@@ -2352,6 +2908,91 @@ fn staged_brush_import_revalidates_and_can_be_discarded() {
 }
 
 #[test]
+fn abr_import_installs_all_reported_brushes_only_for_the_inspected_source() {
+    use photocraft_psd::abr::{LegacyBrush, LegacyTip};
+
+    let path =
+        std::env::temp_dir().join(format!("project-ink-bridge-abr-{}.abr", std::process::id()));
+    let presets = vec![
+        LegacyBrush {
+            name: "Computed Tip".into(),
+            spacing: 25,
+            anti_alias: true,
+            tip: LegacyTip::Computed {
+                diameter: 16,
+                hardness: 80,
+                angle: 0,
+                roundness: 100,
+            },
+        },
+        LegacyBrush {
+            name: "Sampled Tip".into(),
+            spacing: 35,
+            anti_alias: true,
+            tip: LegacyTip::Sampled(photocraft_psd::abr::AbrSample {
+                id: String::new(),
+                width: 2,
+                height: 1,
+                depth: 8,
+                data: vec![0, 255],
+            }),
+        },
+    ];
+    std::fs::write(
+        &path,
+        photocraft_psd::abr::write_v12(2, &presets, true).expect("ABR fixture"),
+    )
+    .expect("write ABR fixture");
+
+    let mut handle = create_document(
+        0xAB20,
+        DocumentSpec {
+            width_px: 64,
+            height_px: 64,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        },
+    )
+    .expect("document");
+    let report =
+        convert_brush_import(path.to_string_lossy().into_owned()).expect("convert ABR report");
+    assert_eq!(report.source_format, "PhotoshopAbr");
+    assert_eq!(report.fidelity, "Approximate");
+    assert_eq!(report.brush_count, 2);
+    let before = brushes(&handle).expect("initial brush library").len();
+
+    let mut wrong_hash = report.source_sha256.clone();
+    wrong_hash[0] ^= 0x80;
+    assert!(import_photoshop_abr_verified(
+        &mut handle,
+        path.to_string_lossy().into_owned(),
+        wrong_hash,
+    )
+    .is_err());
+    assert_eq!(
+        brushes(&handle)
+            .expect("library after rejected import")
+            .len(),
+        before
+    );
+
+    let ids = import_photoshop_abr_verified(
+        &mut handle,
+        path.to_string_lossy().into_owned(),
+        report.source_sha256,
+    )
+    .expect("transactional ABR install");
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(
+        brushes(&handle).expect("installed library").len(),
+        before + 2
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn illustration_panel_project_shares_document_and_orders_undo_with_canvas_edits() {
     let mut document = create_document(
         0x9911,
@@ -2620,6 +3261,521 @@ fn psd_open_rejects_symlink_sources_before_reading() {
 
     assert!(open_document(alias.to_string_lossy().into_owned()).is_err());
     std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn psd_inspection_reports_flattened_choice_without_opening_a_document() {
+    use photocraft_psd::{LayerSpec, PixelData, PsdBuilder};
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-psd-inspect-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("layered.psd");
+    let pixels = vec![255, 0, 0, 255];
+    let mut builder = PsdBuilder::new(1, 1);
+    builder.push_layer(LayerSpec::new(
+        "Ink",
+        0,
+        0,
+        1,
+        1,
+        PixelData::Rgba8(pixels.clone()),
+    ));
+    builder.composite(PixelData::Rgba8(pixels));
+    std::fs::write(&path, builder.to_bytes().expect("PSD bytes")).expect("write PSD");
+
+    let inspection = inspect_psd_import(path.to_string_lossy().into_owned()).expect("inspect PSD");
+    assert_eq!((inspection.width_px, inspection.height_px), (1, 1));
+    assert_eq!(inspection.layer_count, 1);
+    assert!(inspection.flattened_import_available);
+    assert!(inspection.editable_import_available);
+    assert!(inspection.incompatibilities.is_empty());
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn photoshop_authored_psd_flattened_import_matches_embedded_composite_oracle() {
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-psd-oracle-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("baseline-layer-copy.psd");
+    let source = include_bytes!("../../../../testdata/photocraft-psd/baseline-layer-copy.psd");
+    let expected = include_bytes!("../../../../testdata/photocraft-psd/baseline-layer-copy.rgba");
+    std::fs::write(&path, source).expect("write Photoshop PSD oracle");
+
+    let inspection = inspect_psd_import(path.to_string_lossy().into_owned())
+        .expect("inspect Photoshop PSD oracle");
+    assert!(!inspection.editable_import_available);
+    assert!(inspection.flattened_import_available);
+    let mut imported = open_document(path.to_string_lossy().into_owned())
+        .expect("open explicit flattened Photoshop source");
+    let tile = read_composite_tile(&imported, 0, 0).expect("read imported composite");
+    for y in 0..96_usize {
+        for x in 0..96_usize {
+            let source_offset = (y * 96 + x) * 4;
+            let tile_offset = (y * 256 + x) * 4;
+            let [red, green, blue, alpha] = expected[source_offset..source_offset + 4] else {
+                unreachable!("the oracle has an RGBA pixel")
+            };
+            let premultiply = |channel: u8| {
+                u8::try_from((u16::from(channel) * u16::from(alpha) + 127) / 255)
+                    .expect("premultiplied channel remains a byte")
+            };
+            assert_eq!(
+                &tile[tile_offset..tile_offset + 4],
+                &[
+                    premultiply(blue),
+                    premultiply(green),
+                    premultiply(red),
+                    alpha
+                ],
+                "pixel ({x}, {y}) differs from Photoshop's embedded composite"
+            );
+        }
+    }
+
+    close_document(&mut imported).expect("close imported PSD");
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn editable_psd_open_builds_a_separate_layered_candidate() {
+    use photocraft_psd::{LayerSpec, PixelData, PsdBuilder};
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-psd-editable-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let path = root.join("layered.psd");
+    let mut builder = PsdBuilder::new(2, 1);
+    builder.push_layer(LayerSpec::new(
+        "Ink",
+        -1,
+        0,
+        2,
+        1,
+        PixelData::Rgba8(vec![255, 0, 0, 255, 20, 40, 200, 128]),
+    ));
+    std::fs::write(&path, builder.to_bytes().expect("PSD bytes")).expect("write PSD");
+
+    let active = create_default_document(0x0050_5344, 64, 64, 144.0).expect("active document");
+    let handle =
+        open_editable_psd(&active, path.to_string_lossy().into_owned()).expect("editable PSD");
+    let layers = layer_summaries(&handle).expect("candidate layer summary");
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].name, "Ink");
+    let tile = read_tile(&handle, layers[0].id, 0, 0).expect("candidate raster tile");
+    assert_eq!(&tile[0..4], &[100, 20, 10, 128]);
+    let mut handle = handle;
+    close_document(&mut handle).expect("close candidate");
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn solid_color_fill_import_shows_logical_count_and_survives_save_reopen() {
+    use photocraft_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
+    use photocraft_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder, TaggedBlock};
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-psd-solid-fill-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let source_path = root.join("solid-fill.psd");
+    let project_path = root.join("solid-fill.inkproj");
+
+    let color = Descriptor::new("RGBC")
+        .with("Rd  ", Value::Double(40.0))
+        .with("Grn ", Value::Double(100.0))
+        .with("Bl  ", Value::Double(220.0));
+    let fill_descriptor = Descriptor::new("null").with("Clr ", Value::Descriptor(color));
+    let fill_block = TaggedBlock::new(
+        *b"SoCo",
+        VersionedDescriptor::new(fill_descriptor).to_bytes(),
+    );
+    let mut fill = LayerSpec::new(
+        "Solid fill",
+        0,
+        0,
+        2,
+        1,
+        PixelData::Rgba8(vec![0, 0, 0, 255, 0, 0, 0, 128]),
+    );
+    fill.fill_opacity = Some(128);
+    fill.extra_blocks.push(fill_block);
+    let mut builder = PsdBuilder::new(2, 1);
+    builder.begin_group(GroupSpec::new("Folder"));
+    builder.push_layer(fill);
+    builder.end_group().expect("close folder");
+    builder.composite(PixelData::Rgba8(vec![20, 50, 110, 128, 10, 25, 55, 64]));
+    std::fs::write(&source_path, builder.to_bytes().expect("PSD bytes")).expect("write PSD");
+
+    let inspection = inspect_psd_import(source_path.to_string_lossy().into_owned())
+        .expect("inspect solid fill PSD");
+    assert_eq!(
+        inspection.layer_count, 2,
+        "folder plus fill layer; divider excluded"
+    );
+    assert!(inspection.editable_import_available);
+    assert!(
+        inspection
+            .supported_features
+            .iter()
+            .any(|feature| { feature.contains("fill color is baked into pixels") })
+    );
+
+    let mut active = create_default_document(0x534f_434f, 64, 64, 144.0).expect("active document");
+    let mut candidate = open_editable_psd(&active, source_path.to_string_lossy().into_owned())
+        .expect("import solid fill as editable raster");
+    let imported = layer_summaries(&candidate).expect("imported layers");
+    assert_eq!(imported.len(), 2);
+    let fill_layer = imported
+        .iter()
+        .find(|layer| layer.name == "Solid fill")
+        .expect("converted fill layer");
+    let fill_id = fill_layer.id;
+    let fill_tile = read_tile(&candidate, fill_id, 0, 0).expect("converted fill pixels");
+    assert_eq!(&fill_tile[..4], &[110, 50, 20, 128]);
+    assert_eq!(&fill_tile[4..8], &[55, 25, 10, 64]);
+
+    save_document(&candidate, project_path.to_string_lossy().into_owned())
+        .expect("save converted fill project");
+    close_document(&mut candidate).expect("close candidate");
+    let mut reopened = open_document(project_path.to_string_lossy().into_owned())
+        .expect("reopen converted fill project");
+    let reopened_layers = layer_summaries(&reopened).expect("reopened layers");
+    assert_eq!(
+        reopened_layers
+            .iter()
+            .map(|layer| layer.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Folder", "Solid fill"]
+    );
+    let reopened_fill = reopened_layers
+        .iter()
+        .find(|layer| layer.name == "Solid fill")
+        .expect("reopened converted fill layer");
+    let reopened_tile =
+        read_tile(&reopened, reopened_fill.id, 0, 0).expect("reopened converted fill pixels");
+    assert_eq!(&reopened_tile[..8], &fill_tile[..8]);
+
+    close_document(&mut active).expect("close active document");
+    close_document(&mut reopened).expect("close reopened document");
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn independently_authored_editable_psd_survives_candidate_save_and_reopen() {
+    const SOURCE: &[u8] =
+        include_bytes!("../../../../testdata/pine-and-birch-psd/sample-design-640x480.psd");
+    const ORACLE_PNG: &[u8] =
+        include_bytes!("../../../../testdata/pine-and-birch-psd/sample-design-640x480.oracle.png");
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-external-editable-psd-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let source_path = root.join("external.psd");
+    let project_path = root.join("imported.inkproj");
+    let round_trip_path = root.join("round-trip.psd");
+    std::fs::write(&source_path, SOURCE).expect("write external PSD fixture");
+
+    let mut active = create_default_document(0x4550_5344, 64, 64, 144.0).expect("active document");
+    let mut candidate = open_editable_psd(&active, source_path.to_string_lossy().into_owned())
+        .expect("open external PSD as editable candidate");
+    let expected_names = ["Background", "Navy Circle", "Pine Bar", "Birch Band"];
+    let layers = layer_summaries(&candidate).expect("candidate layers");
+    assert_eq!(layers.len(), expected_names.len());
+    for (layer, expected_name) in layers.iter().zip(expected_names) {
+        assert_eq!(layer.name, expected_name);
+    }
+
+    save_document(&candidate, project_path.to_string_lossy().into_owned())
+        .expect("save editable import");
+    close_document(&mut candidate).expect("close candidate");
+    let mut reopened = open_document(project_path.to_string_lossy().into_owned())
+        .expect("reopen saved editable import");
+    let reopened_layers = layer_summaries(&reopened).expect("reopened layers");
+    assert_eq!(
+        reopened_layers
+            .iter()
+            .map(|layer| layer.name.as_str())
+            .collect::<Vec<_>>(),
+        expected_names
+    );
+
+    let (oracle_width, oracle_height, oracle) =
+        ink_export::decode_png_rgba8(ORACLE_PNG).expect("decode external composite oracle");
+    assert_eq!((oracle_width, oracle_height), (640, 480));
+    let tiles = (0_u32..2)
+        .flat_map(|tile_y| (0_u32..3).map(move |tile_x| (tile_x, tile_y)))
+        .map(|(tile_x, tile_y)| {
+            read_composite_tile(&reopened, tile_x as i32, tile_y as i32)
+                .map(|tile| ((tile_x, tile_y), tile))
+                .expect("read reopened composite tile")
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for y in 0..oracle_height as usize {
+        for x in 0..oracle_width as usize {
+            let tile_x = (x / 256) as u32;
+            let tile_y = (y / 256) as u32;
+            let tile = &tiles[&(tile_x, tile_y)];
+            let local_offset = ((y % 256) * 256 + (x % 256)) * 4;
+            let oracle_offset = (y * oracle_width as usize + x) * 4;
+            let [red, green, blue, alpha] = oracle[oracle_offset..oracle_offset + 4]
+                .try_into()
+                .expect("RGBA oracle pixel");
+            let pixel = &tile[local_offset..local_offset + 4];
+            let expected_bgra = [
+                ((u16::from(blue) * u16::from(alpha) + 127) / 255) as u8,
+                ((u16::from(green) * u16::from(alpha) + 127) / 255) as u8,
+                ((u16::from(red) * u16::from(alpha) + 127) / 255) as u8,
+                alpha,
+            ];
+            assert_eq!(pixel, expected_bgra, "pixel ({x}, {y}) after reopen");
+        }
+    }
+
+    export_editable_psd(&reopened, round_trip_path.to_string_lossy().into_owned())
+        .expect("export editable PSD");
+    let exported_bytes = std::fs::read(&round_trip_path).expect("read editable PSD export");
+    let exported_layers =
+        ink_export::decode_psd_editable(&exported_bytes).expect("decode exported editable PSD");
+    assert_eq!(
+        exported_layers
+            .layers
+            .iter()
+            .map(|layer| layer.name.as_str())
+            .collect::<Vec<_>>(),
+        expected_names
+    );
+    let (export_width, export_height, exported_composite) =
+        ink_export::decode_psd(&exported_bytes).expect("decode exported merged composite");
+    assert_eq!((export_width, export_height), (oracle_width, oracle_height));
+    assert_eq!(
+        exported_composite, oracle,
+        "editable PSD export must preserve independent merged pixels"
+    );
+
+    close_document(&mut active).expect("close active document");
+    close_document(&mut reopened).expect("close reopened document");
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn photoshop_group_and_clipping_psd_matches_independent_rendered_oracle() {
+    const SOURCE: &[u8] = include_bytes!(
+        "../../../../testdata/psd-tools-conformance/group-clipping/group-clipping.psd"
+    );
+    const ORACLE_PNG: &[u8] = include_bytes!(
+        "../../../../testdata/psd-tools-conformance/group-clipping/group-clipping-photoshop.png"
+    );
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-photoshop-group-clipping-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let source_path = root.join("group-clipping.psd");
+    let round_trip_path = root.join("group-clipping-round-trip.psd");
+    std::fs::write(&source_path, SOURCE).expect("write Photoshop fixture");
+
+    let decoded = ink_export::decode_psd_editable(SOURCE).expect("decode editable groups");
+    assert_eq!((decoded.width, decoded.height), (627, 510));
+    let group = decoded
+        .layers
+        .iter()
+        .find(|layer| layer.name == "clipping")
+        .expect("clipping group");
+    assert!(group.is_group);
+    let blue = decoded
+        .layers
+        .iter()
+        .find(|layer| layer.name == "blue")
+        .expect("clipped blue layer");
+    assert_eq!(blue.parent_index, Some(group.source_index));
+    assert!(blue.clipping);
+    assert_eq!((blue.left, blue.top), (175, 80));
+
+    let mut active = create_default_document(0x4752_5053, 64, 64, 144.0).expect("active document");
+    let mut imported = open_editable_psd(&active, source_path.to_string_lossy().into_owned())
+        .expect("open Photoshop PSD as editable candidate");
+    let summaries = layer_summaries(&imported).expect("imported layer summaries");
+    let imported_group = summaries
+        .iter()
+        .find(|layer| layer.name == "clipping")
+        .expect("imported clipping group");
+    let imported_blue = summaries
+        .iter()
+        .find(|layer| layer.name == "blue")
+        .expect("imported blue layer");
+    assert_eq!(imported_blue.parent, Some(imported_group.id));
+    assert!(imported_blue.clipping);
+
+    let (oracle_width, oracle_height, oracle) =
+        ink_export::decode_png_rgba8(ORACLE_PNG).expect("decode Photoshop render oracle");
+    assert_eq!((oracle_width, oracle_height), (627, 510));
+    assert_composite_matches_rgba_oracle(
+        &imported,
+        oracle_width,
+        oracle_height,
+        &oracle,
+        "group/clipping",
+    );
+
+    export_editable_psd(&imported, round_trip_path.to_string_lossy().into_owned())
+        .expect("export supported Photoshop hierarchy");
+    preserve_psd_export_for_external_oracle(&round_trip_path, "group-clipping-export.psd");
+    let exported_bytes = std::fs::read(&round_trip_path).expect("read exported Photoshop PSD");
+    let exported_layers =
+        ink_export::decode_psd_editable(&exported_bytes).expect("decode exported hierarchy");
+    let exported_group = exported_layers
+        .layers
+        .iter()
+        .find(|layer| layer.name == "clipping")
+        .expect("exported clipping group");
+    assert!(exported_group.is_group);
+    let exported_blue = exported_layers
+        .layers
+        .iter()
+        .find(|layer| layer.name == "blue")
+        .expect("exported clipped raster");
+    assert_eq!(
+        exported_blue.parent_index,
+        Some(exported_group.source_index)
+    );
+    assert!(exported_blue.clipping);
+    assert_eq!((exported_blue.left, exported_blue.top), (175, 80));
+    let (export_width, export_height, exported_composite) =
+        ink_export::decode_psd(&exported_bytes).expect("decode exported composite");
+    assert_eq!((export_width, export_height), (oracle_width, oracle_height));
+    assert_eq!(
+        exported_composite, oracle,
+        "Photoshop group/clipping PSD export must match the independent render"
+    );
+
+    close_document(&mut imported).expect("close imported candidate");
+    close_document(&mut active).expect("close active document");
+    std::fs::remove_dir_all(root).expect("remove temporary root");
+}
+
+#[test]
+fn photoshop_raster_mask_psd_matches_independent_oracle_after_reopen() {
+    const SOURCE: &[u8] =
+        include_bytes!("../../../../testdata/psd-tools-conformance/simple-mask/masked-raster.psd");
+    const ORACLE_PNG: &[u8] = include_bytes!(
+        "../../../../testdata/psd-tools-conformance/simple-mask/masked-raster-psd-tools-1.11.png"
+    );
+
+    let root = std::env::temp_dir().join(format!(
+        "project-ink-bridge-photoshop-raster-mask-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temporary root");
+    let source_path = root.join("masked-raster.psd");
+    let project_path = root.join("masked-raster.inkproj");
+    let round_trip_path = root.join("masked-raster-round-trip.psd");
+    std::fs::write(&source_path, SOURCE).expect("write Photoshop mask fixture");
+
+    let mut active = create_default_document(0x4d41_534b, 64, 64, 144.0).expect("active document");
+    let mut imported = open_editable_psd(&active, source_path.to_string_lossy().into_owned())
+        .expect("open Photoshop mask PSD as editable candidate");
+    let layers = layer_summaries(&imported).expect("imported mask layer summaries");
+    let masked_layer = layers
+        .iter()
+        .find(|layer| layer.name == "Background copy")
+        .expect("masked Photoshop raster layer");
+    assert!(masked_layer.mask_enabled);
+    assert!(
+        layers
+            .iter()
+            .any(|layer| layer.mask_owner == Some(masked_layer.id))
+    );
+
+    save_document(&imported, project_path.to_string_lossy().into_owned())
+        .expect("save imported mask project");
+    close_document(&mut imported).expect("close imported candidate");
+    let mut reopened = open_document(project_path.to_string_lossy().into_owned())
+        .expect("reopen imported mask project");
+    let (oracle_width, oracle_height, oracle) =
+        ink_export::decode_png_rgba8(ORACLE_PNG).expect("decode psd-tools oracle");
+    assert_eq!((oracle_width, oracle_height), (100, 150));
+    let tile = read_composite_tile(&reopened, 0, 0).expect("read reopened mask composite");
+    for y in 0..oracle_height as usize {
+        for x in 0..oracle_width as usize {
+            let tile_offset = (y * 256 + x) * 4;
+            let oracle_offset = (y * oracle_width as usize + x) * 4;
+            let [red, green, blue, alpha] = oracle[oracle_offset..oracle_offset + 4]
+                .try_into()
+                .expect("RGBA oracle pixel");
+            let expected_bgra = [
+                ((u16::from(blue) * u16::from(alpha) + 127) / 255) as u8,
+                ((u16::from(green) * u16::from(alpha) + 127) / 255) as u8,
+                ((u16::from(red) * u16::from(alpha) + 127) / 255) as u8,
+                alpha,
+            ];
+            let actual_bgra = &tile[tile_offset..tile_offset + 4];
+            // The independent psd-tools/Photoshop PNG and Ink's premultiplied
+            // tile path can round a partially covered grayscale channel in
+            // opposite directions. Keep alpha exact and permit two encoded
+            // levels of RGB error across import and project persistence.
+            for channel in 0..3 {
+                assert!(
+                    actual_bgra[channel].abs_diff(expected_bgra[channel]) <= 2,
+                    "masked composite channel {channel} at ({x}, {y}): actual {}, expected {}",
+                    actual_bgra[channel],
+                    expected_bgra[channel]
+                );
+            }
+            assert!(
+                actual_bgra[3].abs_diff(expected_bgra[3]) <= 1,
+                "masked composite alpha at ({x}, {y}) after reopen: actual {}, expected {}",
+                actual_bgra[3],
+                expected_bgra[3]
+            );
+        }
+    }
+
+    export_editable_psd(&reopened, round_trip_path.to_string_lossy().into_owned())
+        .expect("export reopened Photoshop mask document");
+    preserve_psd_export_for_external_oracle(&round_trip_path, "raster-mask-export.psd");
+    let exported_bytes = std::fs::read(&round_trip_path).expect("read mask PSD export");
+    let exported_layers =
+        ink_export::decode_psd_editable(&exported_bytes).expect("decode exported mask layers");
+    let exported_owner = exported_layers
+        .layers
+        .iter()
+        .find(|layer| layer.name == "Background copy")
+        .expect("exported masked layer");
+    let exported_mask = exported_owner.mask.as_ref().expect("exported raster mask");
+    assert_eq!((exported_mask.left, exported_mask.top), (23, 10));
+    assert_eq!((exported_mask.width, exported_mask.height), (71, 57));
+    let (export_width, export_height, exported_composite) =
+        ink_export::decode_psd(&exported_bytes).expect("decode exported masked composite");
+    assert_eq!((export_width, export_height), (oracle_width, oracle_height));
+    for (index, (actual, expected)) in exported_composite.iter().zip(&oracle).enumerate() {
+        assert!(
+            actual.abs_diff(*expected) <= 2,
+            "exported mask composite byte {index}: actual {actual}, expected {expected}"
+        );
+    }
+
+    close_document(&mut active).expect("close active document");
+    close_document(&mut reopened).expect("close reopened project");
+    std::fs::remove_dir_all(root).expect("remove temporary root");
 }
 
 #[test]

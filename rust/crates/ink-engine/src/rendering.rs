@@ -712,20 +712,49 @@ pub(super) fn rebuild_vector_layer(
     layer: &mut LayerState,
     width_px: u32,
     height_px: u32,
-) -> Vec<TileCoord> {
+) -> Result<Vec<TileCoord>, EngineError> {
     layer.tiles.clear();
     let mut dirty = Vec::new();
-    for (_, stroke) in &layer.vectors {
-        dirty.extend(rasterize_vector_stroke(
-            &mut layer.tiles,
-            stroke,
-            width_px,
-            height_px,
-        ));
+    let mut fallback_order = layer
+        .vectors
+        .iter()
+        .map(|(id, _)| *id)
+        .chain(layer.bezier_paths.iter().map(|(id, _, _)| *id))
+        .collect::<Vec<_>>();
+    let order = if layer.vector_order.len() == fallback_order.len() {
+        layer.vector_order.clone()
+    } else {
+        std::mem::take(&mut fallback_order)
+    };
+    for id in order {
+        if let Some((_, stroke)) = layer.vectors.iter().find(|(candidate, _)| *candidate == id) {
+            dirty.extend(rasterize_vector_stroke(
+                &mut layer.tiles,
+                stroke,
+                width_px,
+                height_px,
+            ));
+        } else if let Some((_, path, _)) = layer
+            .bezier_paths
+            .iter()
+            .find(|(candidate, _, _)| *candidate == id)
+        {
+            let pixels =
+                ink_vector::rasterize_bezier_path(path, width_px, height_px).map_err(|error| {
+                    EngineError::InvalidCommand(format!("Bézier rasterization failed: {error:?}"))
+                })?;
+            for pixel in pixels {
+                let coordinate =
+                    layer
+                        .tiles
+                        .blend_pixel(pixel.x, pixel.y, pixel.color, pixel.opacity);
+                dirty.push(coordinate);
+            }
+        }
     }
     dirty.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
     dirty.dedup();
-    dirty
+    Ok(dirty)
 }
 
 fn sample_resource_alpha(resource: &BrushResource, x: f32, y: f32) -> f32 {

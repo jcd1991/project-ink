@@ -1,6 +1,10 @@
 //! Native `.inkbrush` import/export and bounded external-format inspection.
 
-use super::{BrushPresetV2, BrushValidationError, PostEffect};
+use super::{
+    BrushPresetV2, BrushValidationError, CPU_BRUSH_V2, CombineOp, EngineSemantics,
+    ParameterBinding, ParameterId, PathStabilizer, PostEffect, ResponseCurve, SensorId,
+    TipBehavior,
+};
 use ciborium::{de::from_reader, ser::into_writer};
 use ink_model::BrushId;
 use serde::{Deserialize, Serialize};
@@ -26,6 +30,8 @@ const MAX_RESOURCE_LIBRARY_BYTES: u64 = 256 * 1024 * 1024;
 // below one library's bound so shared images cannot amplify memory per brush.
 const MAX_PACK_REPORT_RESOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RESOURCE_DIMENSION: u32 = 16_384;
+const MAX_ABR_IMPORT_PRESETS: usize = 256;
+const MAX_ABR_REPORT_OMISSIONS: usize = 128;
 
 /// External brush formats known to the inspector.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -36,11 +42,11 @@ pub enum ExternalBrushFormat {
     KritaBundle,
     MyPaintMyb,
     PhotoshopAbr,
-    ClipStudioSut,
-    ClipStudioTos,
-    ProcreateBrush,
-    ProcreateBrushset,
-    ProcreateBrushlibrary,
+    SutArchive,
+    TosArchive,
+    BrushArchive,
+    BrushSetArchive,
+    BrushLibraryArchive,
     Image,
     Unknown,
 }
@@ -745,11 +751,11 @@ pub fn inspect_external_format(path: &Path) -> ExternalBrushFormat {
         "bundle" => ExternalBrushFormat::KritaBundle,
         "myb" => ExternalBrushFormat::MyPaintMyb,
         "abr" => ExternalBrushFormat::PhotoshopAbr,
-        "sut" => ExternalBrushFormat::ClipStudioSut,
-        "tos" => ExternalBrushFormat::ClipStudioTos,
-        "brush" => ExternalBrushFormat::ProcreateBrush,
-        "brushset" => ExternalBrushFormat::ProcreateBrushset,
-        "brushlibrary" => ExternalBrushFormat::ProcreateBrushlibrary,
+        "sut" => ExternalBrushFormat::SutArchive,
+        "tos" => ExternalBrushFormat::TosArchive,
+        "brush" => ExternalBrushFormat::BrushArchive,
+        "brushset" => ExternalBrushFormat::BrushSetArchive,
+        "brushlibrary" => ExternalBrushFormat::BrushLibraryArchive,
         "png" | "jpg" | "jpeg" | "webp" => ExternalBrushFormat::Image,
         _ => ExternalBrushFormat::Unknown,
     }
@@ -785,9 +791,9 @@ fn detect_external_format(path: &Path) -> Result<ExternalBrushFormat, BrushPackE
         }
         if matches!(
             hint,
-            ExternalBrushFormat::ProcreateBrush
-                | ExternalBrushFormat::ProcreateBrushset
-                | ExternalBrushFormat::ProcreateBrushlibrary
+            ExternalBrushFormat::BrushArchive
+                | ExternalBrushFormat::BrushSetArchive
+                | ExternalBrushFormat::BrushLibraryArchive
         ) {
             validate_zip_file(path)?;
             return Ok(hint);
@@ -813,11 +819,13 @@ fn detect_external_format(path: &Path) -> Result<ExternalBrushFormat, BrushPackE
         return Ok(ExternalBrushFormat::Image);
     }
     if raw.starts_with(b"8BPS") {
-        return Ok(if hint == ExternalBrushFormat::PhotoshopAbr {
-            ExternalBrushFormat::PhotoshopAbr
-        } else {
-            ExternalBrushFormat::Unknown
-        });
+        return Ok(ExternalBrushFormat::Unknown);
+    }
+    if hint == ExternalBrushFormat::PhotoshopAbr
+        && raw.len() >= 2
+        && matches!(u16::from_be_bytes([raw[0], raw[1]]), 1 | 2 | 6..=10)
+    {
+        return Ok(ExternalBrushFormat::PhotoshopAbr);
     }
     if hint == ExternalBrushFormat::MyPaintMyb {
         let bytes = read_bounded_file(path, MAX_PRESET_BYTES as u64)?;
@@ -831,11 +839,11 @@ fn detect_external_format(path: &Path) -> Result<ExternalBrushFormat, BrushPackE
     }
     if matches!(
         hint,
-        ExternalBrushFormat::ClipStudioSut
-            | ExternalBrushFormat::ClipStudioTos
-            | ExternalBrushFormat::ProcreateBrush
-            | ExternalBrushFormat::ProcreateBrushset
-            | ExternalBrushFormat::ProcreateBrushlibrary
+        ExternalBrushFormat::SutArchive
+            | ExternalBrushFormat::TosArchive
+            | ExternalBrushFormat::BrushArchive
+            | ExternalBrushFormat::BrushSetArchive
+            | ExternalBrushFormat::BrushLibraryArchive
     ) {
         if raw.is_empty() {
             return Err(BrushPackError::UnsafeArchive(
@@ -911,11 +919,11 @@ pub fn guided_recreation_report(path: &Path) -> Result<BrushImportReport, BrushP
             FidelityTier::Approximate,
             "tip extraction is experimental; exact Photoshop rendering is not promised",
         ),
-        ExternalBrushFormat::ClipStudioSut
-        | ExternalBrushFormat::ClipStudioTos
-        | ExternalBrushFormat::ProcreateBrush
-        | ExternalBrushFormat::ProcreateBrushset
-        | ExternalBrushFormat::ProcreateBrushlibrary => (
+        ExternalBrushFormat::SutArchive
+        | ExternalBrushFormat::TosArchive
+        | ExternalBrushFormat::BrushArchive
+        | ExternalBrushFormat::BrushSetArchive
+        | ExternalBrushFormat::BrushLibraryArchive => (
             FidelityTier::GuidedRecreation,
             "create a Project Ink brush from user-supplied tips, grain, and reference strokes",
         ),
@@ -941,9 +949,9 @@ pub fn guided_recreation_report(path: &Path) -> Result<BrushImportReport, BrushP
     })
 }
 
-/// Stage the ordinary PNG shape and grain assets in a user-owned Procreate
-/// brush archive. Brush.archive settings remain intentionally uninterpreted.
-fn import_procreate_brush_assets(path: &Path) -> Result<BrushImportReport, BrushPackError> {
+/// Stage ordinary PNG shape and grain assets from a user-provided brush archive.
+/// Archive settings remain intentionally uninterpreted.
+fn import_brush_archive_assets(path: &Path) -> Result<BrushImportReport, BrushPackError> {
     let metadata = std::fs::metadata(path)?;
     if metadata.len() > MAX_ARCHIVE_BYTES {
         return Err(BrushPackError::UnsafeArchive(
@@ -987,14 +995,14 @@ fn import_procreate_brush_assets(path: &Path) -> Result<BrushImportReport, Brush
     guided_report_from_assets(
         path,
         source_sha256,
-        ExternalBrushFormat::ProcreateBrush,
+        ExternalBrushFormat::BrushArchive,
         resources,
     )
 }
 
-/// Extract only ordinary PNG thumbnails from Clip Studio's SQLite/TAR wrapper.
+/// Extract only ordinary PNG thumbnails from a legacy SQLite/TAR brush archive.
 /// The encrypted C2F material payload is never decoded or decrypted.
-fn import_clip_studio_sut_assets(path: &Path) -> Result<BrushImportReport, BrushPackError> {
+fn import_sut_archive_assets(path: &Path) -> Result<BrushImportReport, BrushPackError> {
     use rusqlite::OpenFlags;
     let metadata = std::fs::metadata(path)?;
     if metadata.len() > MAX_ARCHIVE_BYTES {
@@ -1042,7 +1050,7 @@ fn import_clip_studio_sut_assets(path: &Path) -> Result<BrushImportReport, Brush
             continue;
         }
         resources.push(ImportedResource {
-            name: format!("Clip Studio {role} thumbnail.png"),
+            name: format!("external brush {role} thumbnail.png"),
             kind: role.into(),
             sha256: sha256(&rgba),
             bytes: u64::try_from(rgba.len()).unwrap_or(u64::MAX),
@@ -1060,7 +1068,7 @@ fn import_clip_studio_sut_assets(path: &Path) -> Result<BrushImportReport, Brush
     guided_report_from_assets(
         path,
         source_sha256,
-        ExternalBrushFormat::ClipStudioSut,
+        ExternalBrushFormat::SutArchive,
         resources,
     )
 }
@@ -1310,11 +1318,11 @@ pub fn inspect_brush_import(path: &Path) -> Result<BrushImportInspection, BrushP
             FidelityTier::Approximate
         }
         ExternalBrushFormat::Image => FidelityTier::Approximate,
-        ExternalBrushFormat::ClipStudioSut
-        | ExternalBrushFormat::ClipStudioTos
-        | ExternalBrushFormat::ProcreateBrush
-        | ExternalBrushFormat::ProcreateBrushset
-        | ExternalBrushFormat::ProcreateBrushlibrary => FidelityTier::GuidedRecreation,
+        ExternalBrushFormat::SutArchive
+        | ExternalBrushFormat::TosArchive
+        | ExternalBrushFormat::BrushArchive
+        | ExternalBrushFormat::BrushSetArchive
+        | ExternalBrushFormat::BrushLibraryArchive => FidelityTier::GuidedRecreation,
         _ => FidelityTier::Rejected,
     };
     Ok(BrushImportInspection {
@@ -1632,11 +1640,880 @@ pub fn import_external(path: &Path) -> Result<BrushImportReport, BrushPackError>
             })
         }
         ExternalBrushFormat::MyPaintMyb => import_mypaint_myb(path),
-        ExternalBrushFormat::ProcreateBrush => import_procreate_brush_assets(path),
-        ExternalBrushFormat::ClipStudioSut => import_clip_studio_sut_assets(path),
+        ExternalBrushFormat::PhotoshopAbr => import_photoshop_abr(path).and_then(|mut reports| {
+            reports
+                .drain(..)
+                .next()
+                .ok_or(BrushPackError::UnsafeArchive(
+                    "ABR contains no supported brushes",
+                ))
+        }),
+        ExternalBrushFormat::BrushArchive => import_brush_archive_assets(path),
+        ExternalBrushFormat::SutArchive => import_sut_archive_assets(path),
         ExternalBrushFormat::Image => import_image_as_brush(path),
         _ => guided_recreation_report(path),
     }
+}
+
+/// Convert supported ABR computed and sampled presets into bounded Ink brush
+/// reports. Every converted preset is marked Approximate (tier C); skipped
+/// or unsupported records are summarized in each returned report's warnings.
+pub fn import_photoshop_abr(path: &Path) -> Result<Vec<BrushImportReport>, BrushPackError> {
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(BrushPackError::UnsafeArchive(
+            "brush source must not be a symlink",
+        ));
+    }
+    let bytes = read_bounded_file_with_message(
+        path,
+        MAX_ARCHIVE_BYTES,
+        "ABR source exceeds the 256 MiB import limit",
+    )?;
+    let name = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Imported brush");
+    convert_photoshop_abr_bytes(&bytes, name)
+}
+
+fn convert_photoshop_abr_bytes(
+    bytes: &[u8],
+    source_name: &str,
+) -> Result<Vec<BrushImportReport>, BrushPackError> {
+    let abr = photocraft_psd::abr::parse(bytes)
+        .map_err(|error| BrushPackError::InvalidManifest(format!("ABR parse failed: {error}")))?;
+    let source_sha256 = sha256(bytes);
+    let (mut converted, mut omitted_records) = if abr.legacy.is_empty() {
+        convert_sectioned_abr(&abr, source_name, source_sha256)
+    } else {
+        convert_legacy_abr(&abr.legacy, source_name, source_sha256)
+    };
+    omitted_records.extend(abr.warnings);
+    if omitted_records.len() > MAX_ABR_REPORT_OMISSIONS {
+        return Err(BrushPackError::UnsafeArchive(
+            "ABR has too many unsupported or malformed records for a complete bounded report; no brushes were imported",
+        ));
+    }
+    if converted.is_empty() {
+        return Err(BrushPackError::UnsafeArchive(
+            "ABR has no supported, bounded brush tips",
+        ));
+    }
+    let omitted_text = omitted_records
+        .iter()
+        .map(|record| bounded_text(record, 256))
+        .collect::<Vec<_>>();
+    for report in &mut converted {
+        if report.omitted.len().saturating_add(omitted_text.len()) > MAX_ABR_REPORT_OMISSIONS {
+            return Err(BrushPackError::UnsafeArchive(
+                "ABR omissions exceed the complete per-brush report bound; no brushes were imported",
+            ));
+        }
+        report.source_sha256 = source_sha256;
+        report
+            .omitted
+            .extend(omitted_text.iter().map(|record| OmittedSetting {
+                source_path: "abr.member".into(),
+                reason: record.clone(),
+            }));
+        if !omitted_records.is_empty() {
+            report.warnings.push(ImportWarning {
+                code: "abr-members-skipped".into(),
+                message: format!(
+                    "{} unsupported or malformed ABR record(s) were skipped; see Not carried over",
+                    omitted_records.len()
+                ),
+            });
+        }
+    }
+    Ok(converted)
+}
+
+fn convert_legacy_abr(
+    legacy: &[photocraft_psd::abr::LegacyBrush],
+    source_name: &str,
+    source_sha256: [u8; 32],
+) -> (Vec<BrushImportReport>, Vec<String>) {
+    let mut converted = Vec::new();
+    let mut omitted = Vec::new();
+    let mut remaining_resource_bytes = MAX_PACK_REPORT_RESOURCE_BYTES;
+    for (index, brush) in legacy.iter().take(MAX_ABR_IMPORT_PRESETS).enumerate() {
+        if let photocraft_psd::abr::LegacyTip::Sampled(sample) = &brush.tip {
+            match abr_sample_rgba_bytes(sample) {
+                Ok(required) if required <= remaining_resource_bytes => {
+                    remaining_resource_bytes -= required;
+                }
+                Ok(_) => {
+                    omitted.push(format!(
+                        "{}: cumulative imported tip resources exceed the 256 MiB limit",
+                        abr_brush_label(&brush.name, index)
+                    ));
+                    continue;
+                }
+                Err(reason) => {
+                    omitted.push(format!("{}: {reason}", abr_brush_label(&brush.name, index)));
+                    continue;
+                }
+            }
+        }
+        match convert_legacy_abr_brush(brush, source_name, index, source_sha256) {
+            Ok(report) => converted.push(report),
+            Err(reason) => {
+                omitted.push(format!("{}: {reason}", abr_brush_label(&brush.name, index)));
+            }
+        }
+    }
+    if legacy.len() > MAX_ABR_IMPORT_PRESETS {
+        omitted.push(format!(
+            "{} additional ABR brushes exceeded the {MAX_ABR_IMPORT_PRESETS}-preset import limit",
+            legacy.len() - MAX_ABR_IMPORT_PRESETS
+        ));
+    }
+    (converted, omitted)
+}
+
+fn convert_sectioned_abr(
+    abr: &photocraft_psd::abr::AbrFile,
+    source_name: &str,
+    source_sha256: [u8; 32],
+) -> (Vec<BrushImportReport>, Vec<String>) {
+    let mut converted = Vec::new();
+    let mut omitted = Vec::new();
+    let mut matched_sample_ids = HashSet::new();
+    let mut remaining_resource_bytes = MAX_PACK_REPORT_RESOURCE_BYTES;
+    for (index, descriptor) in abr.presets.iter().take(MAX_ABR_IMPORT_PRESETS).enumerate() {
+        if let Some(sample) = sectioned_abr_sample(descriptor, &abr.samples) {
+            match abr_sample_rgba_bytes(sample) {
+                Ok(required) if required <= remaining_resource_bytes => {}
+                Ok(_) => {
+                    omitted.push(format!(
+                        "{}: cumulative imported tip resources exceed the 256 MiB limit",
+                        abr_descriptor_name(descriptor)
+                            .unwrap_or_else(|| format!("Brush {}", index + 1))
+                    ));
+                    continue;
+                }
+                Err(reason) => {
+                    omitted.push(format!(
+                        "{}: {reason}",
+                        abr_descriptor_name(descriptor)
+                            .unwrap_or_else(|| format!("Brush {}", index + 1))
+                    ));
+                    continue;
+                }
+            }
+        }
+        match convert_sectioned_abr_preset(
+            descriptor,
+            &abr.samples,
+            source_name,
+            index,
+            source_sha256,
+        ) {
+            Ok((report, sample_id)) => {
+                if let Some(sample_id) = sample_id {
+                    matched_sample_ids.insert(sample_id);
+                }
+                remaining_resource_bytes = remaining_resource_bytes
+                    .saturating_sub(report.resources.iter().map(|resource| resource.bytes).sum());
+                converted.push(report);
+            }
+            Err(reason) => omitted.push(format!(
+                "{}: {reason}",
+                abr_descriptor_name(descriptor).unwrap_or_else(|| format!("Brush {}", index + 1))
+            )),
+        }
+    }
+    push_abr_limit_omission(&mut omitted, abr.presets.len(), "ABR presets");
+    if abr.presets.is_empty() {
+        for (index, sample) in abr.samples.iter().take(MAX_ABR_IMPORT_PRESETS).enumerate() {
+            let required = match abr_sample_rgba_bytes(sample) {
+                Ok(required) if required <= remaining_resource_bytes => required,
+                Ok(_) => {
+                    omitted.push(format!(
+                        "Sample {}: cumulative imported tip resources exceed the 256 MiB limit",
+                        index + 1
+                    ));
+                    continue;
+                }
+                Err(reason) => {
+                    omitted.push(format!("Sample {}: {reason}", index + 1));
+                    continue;
+                }
+            };
+            match converted_sample_report(
+                sample,
+                source_name,
+                &format!("{} tip {}", source_name, index + 1),
+                index,
+                25,
+                32.0,
+                100.0,
+                100.0,
+                0.0,
+                source_sha256,
+            ) {
+                Ok(report) => {
+                    remaining_resource_bytes = remaining_resource_bytes.saturating_sub(required);
+                    converted.push(report);
+                }
+                Err(reason) => omitted.push(format!("Sample {}: {reason}", index + 1)),
+            }
+        }
+        push_abr_limit_omission(&mut omitted, abr.samples.len(), "standalone ABR tips");
+    } else {
+        for sample in &abr.samples {
+            if !matched_sample_ids.contains(&sample.id) {
+                omitted.push(format!(
+                    "Sample {} was not referenced by a supported preset",
+                    bounded_text(&sample.id, 128)
+                ));
+            }
+        }
+    }
+    (converted, omitted)
+}
+
+fn push_abr_limit_omission(omitted: &mut Vec<String>, actual_count: usize, subject: &str) {
+    if actual_count > MAX_ABR_IMPORT_PRESETS {
+        omitted.push(format!(
+            "{} additional {subject} exceeded the {MAX_ABR_IMPORT_PRESETS}-preset import limit",
+            actual_count - MAX_ABR_IMPORT_PRESETS
+        ));
+    }
+}
+
+fn convert_legacy_abr_brush(
+    brush: &photocraft_psd::abr::LegacyBrush,
+    source_name: &str,
+    index: usize,
+    source_sha256: [u8; 32],
+) -> Result<BrushImportReport, String> {
+    match &brush.tip {
+        photocraft_psd::abr::LegacyTip::Computed {
+            diameter,
+            hardness,
+            angle,
+            roundness,
+        } => computed_abr_report(
+            source_name,
+            &abr_brush_label(&brush.name, index),
+            index,
+            brush.spacing,
+            f32::from(*diameter),
+            f32::from(*hardness),
+            f32::from(*roundness),
+            f32::from(*angle),
+            source_sha256,
+            vec![SettingMapping {
+                source_path: "abr.tip.kind".into(),
+                source_value: DisplayValue::Text("computed".into()),
+                target_path: "tip.shape".into(),
+                target_value: DisplayValue::Text("procedural stamp".into()),
+                quality: MappingQuality::Approximated,
+                note: Some("Photoshop rasterization and edge coverage are not reproduced".into()),
+            }],
+            Vec::new(),
+        ),
+        photocraft_psd::abr::LegacyTip::Sampled(sample) => converted_sample_report(
+            sample,
+            source_name,
+            &abr_brush_label(&brush.name, index),
+            index,
+            brush.spacing,
+            32.0,
+            100.0,
+            100.0,
+            0.0,
+            source_sha256,
+        ),
+    }
+}
+
+fn sectioned_abr_sample<'a>(
+    preset: &photocraft_psd::descriptor::Descriptor,
+    samples: &'a [photocraft_psd::abr::AbrSample],
+) -> Option<&'a photocraft_psd::abr::AbrSample> {
+    use photocraft_psd::descriptor::Value;
+    let Some(Value::Descriptor(brush_descriptor)) = preset.get("Brsh") else {
+        return None;
+    };
+    let Some(Value::Text(sample_id)) = brush_descriptor.get("sampledData") else {
+        return None;
+    };
+    let sample_id = sample_id.to_string_lossy();
+    samples.iter().find(|sample| sample.id == sample_id)
+}
+
+fn abr_sample_rgba_bytes(sample: &photocraft_psd::abr::AbrSample) -> Result<u64, String> {
+    let byte_count = u64::from(sample.width)
+        .checked_mul(u64::from(sample.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "decoded tip size overflows".to_string())?;
+    if sample.width > MAX_RESOURCE_DIMENSION
+        || sample.height > MAX_RESOURCE_DIMENSION
+        || byte_count > u64::try_from(MAX_RESOURCE_BYTES).unwrap_or(u64::MAX)
+    {
+        return Err("decoded sampled tip exceeds Ink's dimension or 96 MiB resource limit".into());
+    }
+    Ok(byte_count)
+}
+
+fn convert_sectioned_abr_preset(
+    preset: &photocraft_psd::descriptor::Descriptor,
+    samples: &[photocraft_psd::abr::AbrSample],
+    source_name: &str,
+    index: usize,
+    source_sha256: [u8; 32],
+) -> Result<(BrushImportReport, Option<String>), String> {
+    use photocraft_psd::descriptor::Value;
+
+    let name =
+        abr_descriptor_name(preset).unwrap_or_else(|| format!("{source_name} {}", index + 1));
+    let Some(Value::Descriptor(brush_descriptor)) = preset.get("Brsh") else {
+        return Err("preset has no supported brush descriptor".into());
+    };
+    if let Some(Value::Text(sample_id)) = brush_descriptor.get("sampledData") {
+        let sample_id = sample_id.to_string_lossy();
+        let sample = samples
+            .iter()
+            .find(|sample| sample.id == sample_id)
+            .ok_or_else(|| "sampled tip reference is missing".to_string())?;
+        let settings =
+            sectioned_abr_settings(brush_descriptor, f64::from(sample.width.max(sample.height)));
+        let mut report = converted_sample_report(
+            sample,
+            source_name,
+            &name,
+            index,
+            settings.spacing,
+            settings.diameter,
+            settings.hardness,
+            settings.roundness,
+            settings.angle,
+            source_sha256,
+        )?;
+        let dynamics = sectioned_abr_dynamics(brush_descriptor);
+        apply_sectioned_abr_dynamics(&mut report, dynamics)?;
+        report
+            .omitted
+            .extend(abr_unsupported_settings(preset, brush_descriptor)?);
+        return Ok((report, Some(sample_id)));
+    }
+    if brush_descriptor.class_id.is("computedBrush") {
+        let settings = sectioned_abr_settings(brush_descriptor, 32.0);
+        let mut report = computed_abr_report(
+            source_name,
+            &name,
+            index,
+            settings.spacing,
+            settings.diameter,
+            settings.hardness,
+            settings.roundness,
+            settings.angle,
+            source_sha256,
+            Vec::new(),
+            abr_unsupported_settings(preset, brush_descriptor)?,
+        )?;
+        let dynamics = sectioned_abr_dynamics(brush_descriptor);
+        apply_sectioned_abr_dynamics(&mut report, dynamics)?;
+        return Ok((report, None));
+    }
+    Err("preset uses an unsupported computed or sampled tip descriptor".into())
+}
+
+struct SectionedAbrSettings {
+    spacing: u16,
+    diameter: f32,
+    hardness: f32,
+    roundness: f32,
+    angle: f32,
+}
+
+fn sectioned_abr_settings(
+    descriptor: &photocraft_psd::descriptor::Descriptor,
+    default_diameter: f64,
+) -> SectionedAbrSettings {
+    SectionedAbrSettings {
+        spacing: descriptor_spacing(descriptor_number(descriptor, &["Spcn", "spacing"]), 25),
+        diameter: bounded_descriptor_f32(
+            descriptor_number(descriptor, &["Dmtr", "diameter"]),
+            default_diameter,
+            0.25,
+            2_000.0,
+        ),
+        hardness: bounded_descriptor_f32(
+            descriptor_number(descriptor, &["Hrdn", "hardness"]),
+            100.0,
+            0.0,
+            100.0,
+        ),
+        roundness: bounded_descriptor_f32(
+            descriptor_number(descriptor, &["Rndn", "roundness"]),
+            100.0,
+            1.0,
+            100.0,
+        ),
+        angle: bounded_descriptor_f32(
+            descriptor_number(descriptor, &["Angl", "angle"]),
+            0.0,
+            -180.0,
+            180.0,
+        ),
+    }
+}
+
+struct SectionedAbrDynamics {
+    bindings: Vec<ParameterBinding>,
+    mappings: Vec<SettingMapping>,
+    omitted: Vec<OmittedSetting>,
+}
+
+/// Map the pressure-controlled, zero-jitter subset whose output has a direct
+/// equivalent in Ink's normalized sensor evaluator. Other ABR dynamics stay
+/// explicit omissions; parsing a descriptor alone never implies fidelity.
+fn sectioned_abr_dynamics(brush: &photocraft_psd::descriptor::Descriptor) -> SectionedAbrDynamics {
+    use photocraft_psd::descriptor::Value;
+
+    let mut result = SectionedAbrDynamics {
+        bindings: Vec::new(),
+        mappings: Vec::new(),
+        omitted: Vec::new(),
+    };
+    for (enabled_key, dynamics_key, target, label) in [
+        ("useTipDynamics", "szVr", ParameterId::Diameter, "size"),
+        ("usePaintDynamics", "opVr", ParameterId::Opacity, "opacity"),
+    ] {
+        if !matches!(brush.get(enabled_key), Some(Value::Boolean(true))) {
+            continue;
+        }
+        let Some(Value::Descriptor(dynamics)) = brush.get(dynamics_key) else {
+            result.omitted.push(abr_dynamics_omission(
+                dynamics_key,
+                "enabled Photoshop control has no readable dynamics descriptor",
+            ));
+            continue;
+        };
+        let control = descriptor_number(dynamics, &["bVTy"]);
+        let jitter = descriptor_percent(dynamics, "jitter");
+        if control != Some(2.0) || jitter != Some(0.0) {
+            result.omitted.push(abr_dynamics_omission(
+                dynamics_key,
+                "only zero-jitter pen-pressure dynamics can be mapped",
+            ));
+            continue;
+        }
+        let outer_minimum = if target == ParameterId::Diameter {
+            descriptor_percent(brush, "minimumDiameter")
+        } else {
+            None
+        };
+        let minimum = outer_minimum
+            .or_else(|| descriptor_percent(dynamics, "Mnm "))
+            .unwrap_or(100.0);
+        if !minimum.is_finite() || !(0.0..=100.0).contains(&minimum) {
+            result.omitted.push(abr_dynamics_omission(
+                dynamics_key,
+                "minimum value is outside the supported 0–100 percent range",
+            ));
+            continue;
+        }
+        let minimum = percent_to_unit_f32(minimum);
+        result.bindings.push(ParameterBinding {
+            target,
+            base: minimum,
+            sensor: SensorId::Pressure,
+            curve: ResponseCurve::identity(),
+            amount: 1.0 - minimum,
+            combine: CombineOp::Add,
+        });
+        result.mappings.push(SettingMapping {
+            source_path: format!("abr.brush.{dynamics_key}"),
+            source_value: DisplayValue::Text(format!(
+                "pen pressure, minimum {:.0}%",
+                minimum * 100.0
+            )),
+            target_path: format!("dynamics.pressure.{label}"),
+            target_value: DisplayValue::Text(format!(
+                "linear {:.0}% to 100%",
+                minimum * 100.0
+            )),
+            quality: MappingQuality::Approximated,
+            note: Some(
+                "maps to Ink's normalized pressure response; Photoshop's stroke renderer is not reproduced".into(),
+            ),
+        });
+    }
+    result
+}
+
+fn abr_dynamics_omission(key: &str, reason: &str) -> OmittedSetting {
+    OmittedSetting {
+        source_path: format!("abr.brush.{key}"),
+        reason: reason.into(),
+    }
+}
+
+fn descriptor_percent(
+    descriptor: &photocraft_psd::descriptor::Descriptor,
+    key: &str,
+) -> Option<f64> {
+    match descriptor.get(key)? {
+        photocraft_psd::descriptor::Value::UnitFloat { unit, value }
+            if unit == b"#Prc" && value.is_finite() =>
+        {
+            Some(*value)
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn percent_to_unit_f32(percent: f64) -> f32 {
+    // Callers validate this descriptor value is finite and in 0..=100 first.
+    (percent / 100.0) as f32
+}
+
+fn apply_sectioned_abr_dynamics(
+    report: &mut BrushImportReport,
+    dynamics: SectionedAbrDynamics,
+) -> Result<(), String> {
+    let preset = report
+        .preset
+        .as_mut()
+        .ok_or_else(|| "converted ABR preset is missing".to_string())?;
+    preset.dynamics.extend(dynamics.bindings);
+    preset.validate().map_err(|error| error.to_string())?;
+    report.mappings.extend(dynamics.mappings);
+    report.omitted.extend(dynamics.omitted);
+    report.preview = Some(preview_for(preset).map_err(|error| error.to_string())?);
+    Ok(())
+}
+
+fn abr_unsupported_settings(
+    preset: &photocraft_psd::descriptor::Descriptor,
+    brush: &photocraft_psd::descriptor::Descriptor,
+) -> Result<Vec<OmittedSetting>, String> {
+    let known_preset = ["Nm  ", "Brsh"];
+    let known_brush = [
+        "sampledData",
+        "Spcn",
+        "Dmtr",
+        "Hrdn",
+        "Rndn",
+        "Angl",
+        "useTipDynamics",
+        "szVr",
+        "minimumDiameter",
+        "usePaintDynamics",
+        "opVr",
+    ];
+    let mut omitted = Vec::new();
+    for (key, _) in &preset.items {
+        if !known_preset.iter().any(|known| key.is(known)) {
+            if omitted.len() == MAX_ABR_REPORT_OMISSIONS {
+                return Err(format!(
+                    "preset has more than {MAX_ABR_REPORT_OMISSIONS} unsupported settings; the complete bounded report cannot fit"
+                ));
+            }
+            omitted.push(OmittedSetting {
+                source_path: format!("abr.preset.{}", String::from_utf8_lossy(key.as_bytes())),
+                reason: "preset setting has no supported Project Ink mapping".into(),
+            });
+        }
+    }
+    for (key, _) in &brush.items {
+        if !known_brush.iter().any(|known| key.is(known)) {
+            if omitted.len() == MAX_ABR_REPORT_OMISSIONS {
+                return Err(format!(
+                    "preset has more than {MAX_ABR_REPORT_OMISSIONS} unsupported settings; the complete bounded report cannot fit"
+                ));
+            }
+            omitted.push(OmittedSetting {
+                source_path: format!("abr.brush.{}", String::from_utf8_lossy(key.as_bytes())),
+                reason: "brush setting has no supported Project Ink mapping".into(),
+            });
+        }
+    }
+    Ok(omitted)
+}
+
+fn descriptor_number(
+    descriptor: &photocraft_psd::descriptor::Descriptor,
+    keys: &[&str],
+) -> Option<f64> {
+    use photocraft_psd::descriptor::Value;
+    keys.iter().find_map(|key| match descriptor.get(key)? {
+        Value::Double(value) | Value::UnitFloat { value, .. } => Some(*value),
+        Value::Integer(value) => Some(f64::from(*value)),
+        _ => None,
+    })
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn descriptor_spacing(value: Option<f64>, default: u16) -> u16 {
+    let value = value
+        .filter(|number| number.is_finite())
+        .unwrap_or(f64::from(default));
+    value.round().clamp(1.0, 100.0) as u16
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn bounded_descriptor_f32(value: Option<f64>, default: f64, min: f64, max: f64) -> f32 {
+    let value = value.filter(|number| number.is_finite()).unwrap_or(default);
+    value.clamp(min, max) as f32
+}
+
+fn abr_descriptor_name(descriptor: &photocraft_psd::descriptor::Descriptor) -> Option<String> {
+    use photocraft_psd::descriptor::Value;
+    match descriptor.get("Nm  ") {
+        Some(Value::Text(name)) => {
+            let value = bounded_text(&name.to_string_lossy(), 128);
+            (!value.trim().is_empty()).then_some(value)
+        }
+        _ => None,
+    }
+}
+
+fn abr_brush_label(name: &str, index: usize) -> String {
+    if name.trim().is_empty() {
+        format!("Imported brush {}", index + 1)
+    } else {
+        bounded_text(name, 128)
+    }
+}
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    value
+        .char_indices()
+        .take_while(|(offset, character)| offset.saturating_add(character.len_utf8()) <= max_bytes)
+        .map(|(_, character)| character)
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn computed_abr_report(
+    source_name: &str,
+    name: &str,
+    index: usize,
+    spacing_percent: u16,
+    diameter: f32,
+    hardness_percent: f32,
+    roundness_percent: f32,
+    angle_degrees: f32,
+    source_sha256: [u8; 32],
+    mut mappings: Vec<SettingMapping>,
+    omitted: Vec<OmittedSetting>,
+) -> Result<BrushImportReport, String> {
+    let mut preset = abr_base_preset(source_name, name, index, source_sha256)?;
+    let computed_mappings = abr_scalar_mappings(
+        spacing_percent,
+        diameter,
+        hardness_percent,
+        roundness_percent,
+        angle_degrees,
+    );
+    mappings.extend(computed_mappings);
+    if let TipBehavior::Stamp(tip) = &mut preset.tip {
+        tip.diameter_px = diameter;
+        tip.hardness = (hardness_percent / 100.0).clamp(0.0, 1.0);
+        tip.roundness = (roundness_percent / 100.0).clamp(0.01, 1.0);
+        tip.angle_degrees = angle_degrees;
+    }
+    set_abr_spacing(&mut preset, spacing_percent);
+    preset.validate().map_err(|error| error.to_string())?;
+    let preview = preview_for(&preset).map_err(|error| error.to_string())?;
+    Ok(BrushImportReport {
+        source_format: ExternalBrushFormat::PhotoshopAbr,
+        source_sha256,
+        importer_version: BRUSH_IMPORTER_VERSION.into(),
+        fidelity: FidelityTier::Approximate,
+        preset: Some(preset),
+        mappings,
+        omitted,
+        resources: Vec::new(),
+        preview: Some(preview),
+        warnings: vec![ImportWarning {
+            code: "abr-approximate-renderer".into(),
+            message: "Imported as an Approximate tier C brush; Project Ink does not reproduce Photoshop rendering.".into(),
+        }],
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn converted_sample_report(
+    sample: &photocraft_psd::abr::AbrSample,
+    source_name: &str,
+    name: &str,
+    index: usize,
+    spacing_percent: u16,
+    diameter: f32,
+    hardness_percent: f32,
+    roundness_percent: f32,
+    angle_degrees: f32,
+    source_sha256: [u8; 32],
+) -> Result<BrushImportReport, String> {
+    let byte_count = abr_sample_rgba_bytes(sample)?;
+    let rgba = abr_sample_to_rgba(sample)?;
+    let resource_sha256 = sha256(&rgba);
+    let mut preset = abr_base_preset(source_name, name, index, source_sha256)?;
+    if let TipBehavior::Stamp(tip) = &mut preset.tip {
+        tip.resource_hash = Some(resource_sha256);
+        tip.diameter_px = diameter;
+        tip.hardness = (hardness_percent / 100.0).clamp(0.0, 1.0);
+        tip.roundness = (roundness_percent / 100.0).clamp(0.01, 1.0);
+        tip.angle_degrees = angle_degrees;
+    }
+    set_abr_spacing(&mut preset, spacing_percent);
+    preset.validate().map_err(|error| error.to_string())?;
+    let preview = preview_for(&preset).map_err(|error| error.to_string())?;
+    let mut mappings = abr_scalar_mappings(
+        spacing_percent,
+        diameter,
+        hardness_percent,
+        roundness_percent,
+        angle_degrees,
+    );
+    mappings.push(SettingMapping {
+        source_path: "sampledData".into(),
+        source_value: DisplayValue::Text(format!(
+            "{} ({}x{}x{})",
+            sample.id, sample.width, sample.height, sample.depth
+        )),
+        target_path: "tip.resource_hash".into(),
+        target_value: DisplayValue::Text(hex(&resource_sha256)),
+        quality: MappingQuality::Approximated,
+        note: Some(
+            "ABR tip identity is retained in this report; sampled coverage is saved as a content-addressed local monochrome tip".into(),
+        ),
+    });
+    Ok(BrushImportReport {
+        source_format: ExternalBrushFormat::PhotoshopAbr,
+        source_sha256,
+        importer_version: BRUSH_IMPORTER_VERSION.into(),
+        fidelity: FidelityTier::Approximate,
+        preset: Some(preset),
+        mappings,
+        omitted: vec![OmittedSetting {
+            source_path: "abr.renderer".into(),
+            reason: "Photoshop tip rasterization, dual brushes, texture, and other renderer-specific behavior are not carried over".into(),
+        }],
+        resources: vec![ImportedResource {
+            name: bounded_text(name, 128),
+            kind: "tip".into(),
+            sha256: resource_sha256,
+            bytes: byte_count,
+            data: rgba,
+            width: sample.width,
+            height: sample.height,
+        }],
+        preview: Some(preview),
+        warnings: vec![ImportWarning {
+            code: "abr-approximate-renderer".into(),
+            message: "Imported as an Approximate tier C brush; Project Ink does not reproduce Photoshop rendering.".into(),
+        }],
+    })
+}
+
+fn abr_sample_to_rgba(sample: &photocraft_psd::abr::AbrSample) -> Result<Vec<u8>, String> {
+    let pixels = usize::try_from(sample.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(sample.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| "sample dimensions overflow".to_string())?;
+    let mut rgba = Vec::with_capacity(pixels.checked_mul(4).ok_or("sample size overflow")?);
+    match sample.depth {
+        8 if sample.data.len() == pixels => {
+            for coverage in &sample.data {
+                rgba.extend_from_slice(&[255, 255, 255, *coverage]);
+            }
+        }
+        16 if sample.data.len() == pixels.saturating_mul(2) => {
+            for pair in sample.data.as_chunks::<2>().0 {
+                let value = u16::from_be_bytes(*pair);
+                let coverage = u8::try_from((u32::from(value) + 128) / 257)
+                    .map_err(|_| "16-bit sample conversion failed".to_string())?;
+                rgba.extend_from_slice(&[255, 255, 255, coverage]);
+            }
+        }
+        _ => return Err("sample byte length does not match its dimensions and depth".into()),
+    }
+    Ok(rgba)
+}
+
+fn abr_base_preset(
+    source_name: &str,
+    name: &str,
+    index: usize,
+    source_sha256: [u8; 32],
+) -> Result<BrushPresetV2, String> {
+    let mut preset = crate::builtin_library()
+        .into_iter()
+        .find(|brush| brush.metadata.name == "Opaque Round")
+        .ok_or_else(|| "built-in conversion base is missing".to_string())?;
+    let mut id_bytes = [0; 16];
+    id_bytes.copy_from_slice(&source_sha256[..16]);
+    preset.id = BrushId::from_u128(u128::from_le_bytes(id_bytes).wrapping_add(index as u128));
+    preset.format_version = 2;
+    preset.engine_semantics = EngineSemantics(CPU_BRUSH_V2);
+    // External presets must not inherit defaults from the local Opaque Round
+    // preset; only dynamics explicitly present in the source file are mapped.
+    preset.dynamics.clear();
+    preset.stroke.stabilizer = PathStabilizer::Legacy;
+    preset.metadata.name = bounded_text(name, 128);
+    preset.metadata.author = None;
+    preset.metadata.license = Some("unknown; verify source rights before redistribution".into());
+    preset.metadata.source_format = Some("photoshop-abr".into());
+    preset.metadata.tags = vec!["converted".into(), "photoshop-abr".into()];
+    let source_label = source_name
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let source_label = bounded_text(source_label.trim(), 116);
+    if !source_label.is_empty() {
+        preset
+            .metadata
+            .tags
+            .push(format!("source-file:{source_label}"));
+    }
+    Ok(preset)
+}
+
+fn set_abr_spacing(preset: &mut BrushPresetV2, spacing_percent: u16) {
+    preset.stroke.spacing = f32::from(spacing_percent.clamp(1, 100)) / 100.0;
+}
+
+fn abr_scalar_mappings(
+    spacing_percent: u16,
+    diameter: f32,
+    hardness: f32,
+    roundness: f32,
+    angle: f32,
+) -> Vec<SettingMapping> {
+    [
+        (
+            "spacing",
+            "stroke.spacing",
+            f32::from(spacing_percent) / 100.0,
+        ),
+        ("diameter", "tip.diameter_px", diameter),
+        ("hardness", "tip.hardness", hardness / 100.0),
+        ("roundness", "tip.roundness", roundness / 100.0),
+        ("angle", "tip.angle_degrees", angle),
+    ]
+    .into_iter()
+    .map(|(source, target, value)| SettingMapping {
+        source_path: format!("abr.{source}"),
+        source_value: DisplayValue::Number(value),
+        target_path: target.into(),
+        target_value: DisplayValue::Number(value),
+        quality: MappingQuality::Approximated,
+        note: None,
+    })
+    .collect()
 }
 
 /// Explicitly import a user-selected PNG/JPEG/WebP image as a brush tip.
@@ -2371,7 +3248,7 @@ mod tests {
         let path = std::env::temp_dir().join("source.sut");
         std::fs::write(&path, vec![b'x'; MAX_INSPECTION_BYTES + 1]).expect("fixture");
         let inspection = inspect_brush_import(&path).expect("inspection");
-        assert_eq!(inspection.source_format, ExternalBrushFormat::ClipStudioSut);
+        assert_eq!(inspection.source_format, ExternalBrushFormat::SutArchive);
         assert_eq!(inspection.fidelity_hint, FidelityTier::GuidedRecreation);
         let report = guided_recreation_report(&path).expect("report");
         assert_eq!(report.fidelity, FidelityTier::GuidedRecreation);
@@ -2380,9 +3257,9 @@ mod tests {
     }
 
     #[test]
-    fn procreate_zip_brush_is_reported_as_guided_recreation() {
+    fn external_brush_archive_is_reported_as_guided_recreation() {
         let path = std::env::temp_dir().join(format!(
-            "project-ink-procreate-brush-{}.brush",
+            "project-ink-external-brush-{}.brush",
             std::process::id()
         ));
         let file = File::create(&path).expect("fixture file");
@@ -2401,13 +3278,10 @@ mod tests {
         archive.finish().expect("finish fixture");
 
         let inspection = inspect_brush_import(&path).expect("inspection");
-        assert_eq!(
-            inspection.source_format,
-            ExternalBrushFormat::ProcreateBrush
-        );
+        assert_eq!(inspection.source_format, ExternalBrushFormat::BrushArchive);
         assert_eq!(inspection.fidelity_hint, FidelityTier::GuidedRecreation);
         let report = import_external(&path).expect("guided report");
-        assert_eq!(report.source_format, ExternalBrushFormat::ProcreateBrush);
+        assert_eq!(report.source_format, ExternalBrushFormat::BrushArchive);
         assert_eq!(report.fidelity, FidelityTier::GuidedRecreation);
         assert!(report.preset.is_some());
         assert_eq!(report.resources.len(), 2);
@@ -2861,5 +3735,526 @@ mod tests {
             Err(BrushPackError::UnsafeArchive(_))
         ));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn abr_v1_v2_computed_and_sampled_tips_become_tier_c_reports() {
+        use photocraft_psd::abr::{LegacyBrush, LegacyTip};
+
+        let brushes = vec![
+            LegacyBrush {
+                name: String::new(),
+                spacing: 35,
+                anti_alias: true,
+                tip: LegacyTip::Computed {
+                    diameter: 18,
+                    hardness: 72,
+                    angle: -15,
+                    roundness: 60,
+                },
+            },
+            LegacyBrush {
+                name: "Sampled Leaf".into(),
+                spacing: 28,
+                anti_alias: true,
+                tip: LegacyTip::Sampled(photocraft_psd::abr::AbrSample {
+                    id: String::new(),
+                    width: 2,
+                    height: 1,
+                    depth: 8,
+                    data: vec![0, 255],
+                }),
+            },
+        ];
+        let bytes = photocraft_psd::abr::write_v12(2, &brushes, true).expect("ABR fixture");
+        let reports = convert_photoshop_abr_bytes(&bytes, "source").expect("conversion");
+        assert_eq!(reports.len(), 2);
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.fidelity == FidelityTier::Approximate)
+        );
+        let computed = reports[0].preset.as_ref().expect("computed preset");
+        assert!(matches!(computed.tip, TipBehavior::Stamp(_)));
+        assert!(reports[0].mappings.iter().any(|mapping| {
+            mapping.source_path == "abr.spacing" && mapping.target_path == "stroke.spacing"
+        }));
+        let sampled = &reports[1];
+        assert_eq!(sampled.resources.len(), 1);
+        assert_eq!(
+            sampled.resources[0].data,
+            [255, 255, 255, 0, 255, 255, 255, 255]
+        );
+        assert_eq!(
+            sampled
+                .preset
+                .as_ref()
+                .expect("sampled preset")
+                .metadata
+                .name,
+            "Sampled Leaf"
+        );
+    }
+
+    #[test]
+    fn abr_v6_sampled_data_and_settings_map_to_a_local_tip() {
+        use photocraft_psd::abr::AbrSample;
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+        let sample = AbrSample {
+            id: "$tip".into(),
+            width: 2,
+            height: 1,
+            depth: 8,
+            data: vec![0, 255],
+        };
+        let sampled_brush = Descriptor::new("sampledBrush")
+            .with("sampledData", Value::Text(UnicodeString::new_nul("$tip")))
+            .with("Spcn", Value::Double(42.0))
+            .with("Dmtr", Value::Double(21.0));
+        let preset = Descriptor::new("brushPreset")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("ABR v6 sample")))
+            .with("Brsh", Value::Descriptor(sampled_brush));
+        let bytes = photocraft_psd::abr::write_v6(1, &[sample], &[], &[preset], true)
+            .expect("ABR v6 fixture");
+        let reports = convert_photoshop_abr_bytes(&bytes, "source").expect("conversion");
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.fidelity, FidelityTier::Approximate);
+        assert_eq!(
+            report.preset.as_ref().expect("preset").metadata.name,
+            "ABR v6 sample"
+        );
+        assert_eq!(report.resources[0].width, 2);
+        assert!(report.mappings.iter().any(|mapping| {
+            mapping.source_path == "abr.diameter" && mapping.target_path == "tip.diameter_px"
+        }));
+        let sample_mapping = report
+            .mappings
+            .iter()
+            .find(|mapping| mapping.source_path == "sampledData")
+            .expect("sample identity mapping");
+        assert!(matches!(
+            &sample_mapping.source_value,
+            DisplayValue::Text(value) if value.contains("$tip")
+        ));
+        let sampled_preset = report.preset.as_ref().expect("sampled preset metadata");
+        assert!(
+            sampled_preset
+                .metadata
+                .tags
+                .iter()
+                .any(|tag| tag == "source-file:source")
+        );
+    }
+
+    #[test]
+    fn abr_v6_computed_descriptor_maps_scalars_and_preserves_source_attribution() {
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+        let computed = Descriptor::new("computedBrush")
+            .with("Spcn", Value::Double(42.0))
+            .with("Dmtr", Value::Double(21.5))
+            .with("Hrdn", Value::Double(70.0))
+            .with("Rndn", Value::Double(60.0))
+            .with("Angl", Value::Double(-12.0))
+            .with("usePressure", Value::Boolean(true));
+        let preset = Descriptor::new("brushPreset")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("ABR computed")))
+            .with("Brsh", Value::Descriptor(computed))
+            .with("customPresetValue", Value::Boolean(true));
+
+        for version in [6_u16, 7, 9, 10] {
+            for subversion in [1, 2] {
+                let mut bytes = photocraft_psd::abr::write_v6(
+                    subversion,
+                    &[],
+                    &[],
+                    std::slice::from_ref(&preset),
+                    true,
+                )
+                .expect("sectioned computed ABR fixture");
+                bytes[..2].copy_from_slice(&version.to_be_bytes());
+                let reports = convert_photoshop_abr_bytes(&bytes, "Ink test pack")
+                    .expect("convert sectioned computed brush");
+                assert_eq!(reports.len(), 1, "ABR {version} subversion {subversion}");
+                let report = &reports[0];
+                assert_eq!(report.fidelity, FidelityTier::Approximate);
+                assert_eq!(report.source_format, ExternalBrushFormat::PhotoshopAbr);
+                let brush = report.preset.as_ref().expect("computed preset");
+                assert_eq!(brush.metadata.name, "ABR computed");
+                assert!(
+                    brush
+                        .metadata
+                        .tags
+                        .iter()
+                        .any(|tag| tag == "source-file:Ink test pack")
+                );
+                assert!((brush.stroke.spacing - 0.42).abs() < 0.0001);
+                let TipBehavior::Stamp(tip) = &brush.tip else {
+                    panic!("computed ABR tip must map to a stamp");
+                };
+                assert!((tip.diameter_px - 21.5).abs() < 0.0001);
+                assert!((tip.hardness - 0.7).abs() < 0.0001);
+                assert!((tip.roundness - 0.6).abs() < 0.0001);
+                assert!((tip.angle_degrees + 12.0).abs() < 0.0001);
+                for setting in ["abr.brush.usePressure", "abr.preset.customPresetValue"] {
+                    assert!(
+                        report
+                            .omitted
+                            .iter()
+                            .any(|omitted| omitted.source_path == setting),
+                        "ABR {version} unmapped setting {setting} must be reported"
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_imported_pressure_changes_rendered_output(preset: &BrushPresetV2) {
+        let compiled = preset.compile().expect("compile imported dynamics");
+        let sample = |pressure, x, sequence| ink_input::PointerSample {
+            pointer_id: 1,
+            flags: ink_input::flags::ACTUAL,
+            device_kind: ink_input::DeviceKind::Stylus,
+            phase: if sequence == 0 {
+                ink_input::Phase::Down
+            } else {
+                ink_input::Phase::Move
+            },
+            canvas_x: x,
+            canvas_y: 32.0,
+            pressure,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            azimuth: 0.0,
+            twist: 0.0,
+            timestamp_ns: u64::from(sequence) * 1_000_000,
+            sequence,
+        };
+        let light = compiled
+            .render(&[sample(0, 32.0, 0), sample(64, 48.0, 1)])
+            .expect("render light-pressure imported brush");
+        let firm = compiled
+            .render(&[sample(u16::MAX, 32.0, 0), sample(u16::MAX, 48.0, 1)])
+            .expect("render firm-pressure imported brush");
+        assert!(light[0].radius_x < firm[0].radius_x);
+        assert!(
+            light.last().expect("light dabs").opacity < firm.last().expect("firm dabs").opacity
+        );
+    }
+
+    #[test]
+    fn abr_v6_maps_supported_zero_jitter_pressure_size_and_opacity_dynamics() {
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+        let percent = |value| Value::UnitFloat {
+            unit: *b"#Prc",
+            value,
+        };
+        let size_dynamics = Descriptor::new("sizeDynamics")
+            .with("bVTy", Value::Integer(2))
+            .with("fStp", Value::Integer(0))
+            .with("jitter", percent(0.0))
+            .with("Mnm ", percent(30.0));
+        let opacity_dynamics = Descriptor::new("opacityDynamics")
+            .with("bVTy", Value::Integer(2))
+            .with("fStp", Value::Integer(0))
+            .with("jitter", percent(0.0))
+            .with("Mnm ", percent(15.0));
+        let brush = Descriptor::new("computedBrush")
+            .with("Spcn", Value::Double(25.0))
+            .with("Dmtr", Value::Double(18.0))
+            .with("Hrdn", Value::Double(90.0))
+            .with("Rndn", Value::Double(100.0))
+            .with("Angl", Value::Double(0.0))
+            .with("useTipDynamics", Value::Boolean(true))
+            .with("minimumDiameter", percent(25.0))
+            .with("szVr", Value::Descriptor(size_dynamics))
+            .with("usePaintDynamics", Value::Boolean(true))
+            .with("opVr", Value::Descriptor(opacity_dynamics));
+        let preset = Descriptor::new("brushPreset")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Pressure Ink")))
+            .with("Brsh", Value::Descriptor(brush));
+        let bytes = photocraft_psd::abr::write_v6(1, &[], &[], &[preset], true)
+            .expect("sectioned pressure dynamics fixture");
+
+        let reports = convert_photoshop_abr_bytes(&bytes, "pressure-pack")
+            .expect("convert pressure dynamics");
+        let report = &reports[0];
+        let converted = report.preset.as_ref().expect("converted preset");
+        let size = converted
+            .dynamics
+            .iter()
+            .find(|binding| binding.target == ParameterId::Diameter)
+            .expect("pressure size binding");
+        assert_eq!(size.sensor, SensorId::Pressure);
+        assert!((size.base - 0.25).abs() < f32::EPSILON);
+        assert!((size.amount - 0.75).abs() < f32::EPSILON);
+        assert_eq!(size.combine, CombineOp::Add);
+        let opacity = converted
+            .dynamics
+            .iter()
+            .find(|binding| binding.target == ParameterId::Opacity)
+            .expect("pressure opacity binding");
+        assert_eq!(opacity.sensor, SensorId::Pressure);
+        assert!((opacity.base - 0.15).abs() < f32::EPSILON);
+        assert!((opacity.amount - 0.85).abs() < f32::EPSILON);
+        assert!(report.mappings.iter().any(|mapping| {
+            mapping.source_path == "abr.brush.szVr"
+                && mapping.target_path == "dynamics.pressure.size"
+        }));
+        assert!(report.mappings.iter().any(|mapping| {
+            mapping.source_path == "abr.brush.opVr"
+                && mapping.target_path == "dynamics.pressure.opacity"
+        }));
+        assert!(
+            !report
+                .omitted
+                .iter()
+                .any(|omitted| omitted.source_path == "abr.brush.szVr")
+        );
+        assert!(
+            !report
+                .omitted
+                .iter()
+                .any(|omitted| omitted.source_path == "abr.brush.opVr")
+        );
+
+        assert_imported_pressure_changes_rendered_output(converted);
+    }
+
+    #[test]
+    fn abr_v6_reports_non_pressure_and_jittered_dynamics_without_mapping_them() {
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+        let percent = |value| Value::UnitFloat {
+            unit: *b"#Prc",
+            value,
+        };
+        let size_dynamics = Descriptor::new("sizeDynamics")
+            .with("bVTy", Value::Integer(2))
+            .with("fStp", Value::Integer(0))
+            .with("jitter", percent(10.0))
+            .with("Mnm ", percent(20.0));
+        let opacity_dynamics = Descriptor::new("opacityDynamics")
+            .with("bVTy", Value::Integer(3))
+            .with("fStp", Value::Integer(0))
+            .with("jitter", percent(0.0))
+            .with("Mnm ", percent(20.0));
+        let brush = Descriptor::new("computedBrush")
+            .with("Spcn", Value::Double(25.0))
+            .with("Dmtr", Value::Double(18.0))
+            .with("useTipDynamics", Value::Boolean(true))
+            .with("szVr", Value::Descriptor(size_dynamics))
+            .with("usePaintDynamics", Value::Boolean(true))
+            .with("opVr", Value::Descriptor(opacity_dynamics));
+        let preset = Descriptor::new("brushPreset")
+            .with(
+                "Nm  ",
+                Value::Text(UnicodeString::new_nul("Unsupported Dynamics")),
+            )
+            .with("Brsh", Value::Descriptor(brush));
+        let bytes = photocraft_psd::abr::write_v6(1, &[], &[], &[preset], true)
+            .expect("sectioned unsupported dynamics fixture");
+
+        let reports = convert_photoshop_abr_bytes(&bytes, "pressure-pack")
+            .expect("convert supported base tip and report dynamics");
+        let report = &reports[0];
+        assert!(report.preset.as_ref().expect("preset").dynamics.is_empty());
+        for key in ["szVr", "opVr"] {
+            assert!(report.omitted.iter().any(|omitted| {
+                omitted.source_path == format!("abr.brush.{key}")
+                    && omitted.reason.contains("only zero-jitter pen-pressure")
+            }));
+        }
+    }
+
+    #[test]
+    fn abr_sectioned_preset_limit_is_reported() {
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+        let presets = (0..=MAX_ABR_IMPORT_PRESETS)
+            .map(|index| {
+                Descriptor::new("brushPreset")
+                    .with(
+                        "Nm  ",
+                        Value::Text(UnicodeString::new_nul(&format!("Preset {index}"))),
+                    )
+                    .with(
+                        "Brsh",
+                        Value::Descriptor(
+                            Descriptor::new("computedBrush")
+                                .with("Dmtr", Value::Double(16.0))
+                                .with("Hrdn", Value::Double(75.0)),
+                        ),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let bytes = photocraft_psd::abr::write_v6(1, &[], &[], &presets, true)
+            .expect("over-limit preset fixture");
+        let reports =
+            convert_photoshop_abr_bytes(&bytes, "preset-limit").expect("bounded preset import");
+        assert_eq!(reports.len(), MAX_ABR_IMPORT_PRESETS);
+        assert!(reports[0].omitted.iter().any(|omitted| {
+            omitted.reason.contains("1 additional ABR presets")
+                && omitted.reason.contains("256-preset import limit")
+        }));
+    }
+
+    #[test]
+    fn abr_sectioned_standalone_tip_limit_is_reported() {
+        use photocraft_psd::abr::AbrSample;
+
+        let samples = (0..=MAX_ABR_IMPORT_PRESETS)
+            .map(|index| AbrSample {
+                id: format!("sample-{index}"),
+                width: 1,
+                height: 1,
+                depth: 8,
+                data: vec![255],
+            })
+            .collect::<Vec<_>>();
+        let bytes = photocraft_psd::abr::write_v6(1, &samples, &[], &[], true)
+            .expect("over-limit standalone tip fixture");
+        let reports = convert_photoshop_abr_bytes(&bytes, "sample-limit")
+            .expect("bounded standalone tip import");
+        assert_eq!(reports.len(), MAX_ABR_IMPORT_PRESETS);
+        assert!(reports[0].omitted.iter().any(|omitted| {
+            omitted.reason.contains("1 additional standalone ABR tips")
+                && omitted.reason.contains("256-preset import limit")
+        }));
+    }
+
+    #[test]
+    fn abr_unsupported_settings_are_complete_or_the_preset_is_omitted() {
+        use photocraft_psd::descriptor::{Descriptor, Id, UnicodeString, Value};
+
+        let mut oversized_settings = Descriptor::new("computedBrush");
+        for index in 0..=MAX_ABR_REPORT_OMISSIONS {
+            oversized_settings
+                .items
+                .push((Id::new(&format!("x{index:03}")), Value::Boolean(true)));
+        }
+        let oversized_preset = Descriptor::new("brushPreset")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Many settings")))
+            .with("Brsh", Value::Descriptor(oversized_settings));
+        let valid = Descriptor::new("brushPreset")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Valid")))
+            .with(
+                "Brsh",
+                Value::Descriptor(
+                    Descriptor::new("computedBrush")
+                        .with("Dmtr", Value::Double(16.0))
+                        .with("Hrdn", Value::Double(75.0)),
+                ),
+            );
+        let bytes = photocraft_psd::abr::write_v6(1, &[], &[], &[valid, oversized_preset], true)
+            .expect("oversized settings fixture");
+        let reports = convert_photoshop_abr_bytes(&bytes, "settings-limit")
+            .expect("valid preset remains explicitly importable");
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].omitted.iter().any(|omitted| {
+            omitted.reason.contains("Many settings")
+                && omitted
+                    .reason
+                    .contains("more than 128 unsupported settings")
+        }));
+    }
+
+    #[test]
+    fn abr_rejects_import_when_malformed_records_exceed_report_bound() {
+        use photocraft_psd::descriptor::{Descriptor, UnicodeString, Value};
+
+        let malformed_presets = (0..=MAX_ABR_REPORT_OMISSIONS)
+            .map(|index| {
+                Descriptor::new("brushPreset").with(
+                    "Nm  ",
+                    Value::Text(UnicodeString::new_nul(&format!("Malformed {index}"))),
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = photocraft_psd::abr::write_v6(1, &[], &[], &malformed_presets, true)
+            .expect("too-many-malformed-preset fixture");
+        let error = convert_photoshop_abr_bytes(&bytes, "malformed-limit")
+            .expect_err("unreportable partial import must be rejected");
+        assert!(matches!(
+            error,
+            BrushPackError::UnsafeArchive(message)
+                if message.contains("complete bounded report")
+        ));
+    }
+
+    #[test]
+    fn abr_rejects_combined_unsupported_and_malformed_report_overflow() {
+        use photocraft_psd::descriptor::{Descriptor, Id, UnicodeString, Value};
+
+        let mut max_settings = Descriptor::new("computedBrush");
+        for index in 0..MAX_ABR_REPORT_OMISSIONS {
+            max_settings
+                .items
+                .push((Id::new(&format!("m{index:03}")), Value::Boolean(true)));
+        }
+        let supported = Descriptor::new("brushPreset")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("128 settings")))
+            .with("Brsh", Value::Descriptor(max_settings));
+        let malformed = Descriptor::new("brushPreset").with(
+            "Nm  ",
+            Value::Text(UnicodeString::new_nul("One omitted preset")),
+        );
+        let bytes = photocraft_psd::abr::write_v6(1, &[], &[], &[supported, malformed], true)
+            .expect("combined omission bound fixture");
+        let error = convert_photoshop_abr_bytes(&bytes, "combined-limit")
+            .expect_err("combined details beyond report limit must be rejected");
+        assert!(matches!(
+            error,
+            BrushPackError::UnsafeArchive(message)
+                if message.contains("complete per-brush report bound")
+        ));
+    }
+
+    #[test]
+    fn abr_detection_requires_a_supported_header_version_and_abr_extension() {
+        let root =
+            std::env::temp_dir().join(format!("project-ink-abr-detect-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("root");
+        let abr_path = root.join("sample.abr");
+        let abr_bytes = photocraft_psd::abr::write_v12(1, &[], false).expect("ABR header");
+        std::fs::write(&abr_path, abr_bytes).expect("ABR file");
+        assert_eq!(
+            detect_external_format(&abr_path).expect("ABR detection"),
+            ExternalBrushFormat::PhotoshopAbr
+        );
+        let psd_named_abr = root.join("not-abr.abr");
+        std::fs::write(&psd_named_abr, b"8BPS\0\x01").expect("PSD-looking bytes");
+        assert_eq!(
+            detect_external_format(&psd_named_abr).expect("unknown detection"),
+            ExternalBrushFormat::Unknown
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn abr_truncated_records_are_rejected_before_conversion() {
+        use photocraft_psd::abr::{LegacyBrush, LegacyTip};
+
+        let brush = LegacyBrush {
+            name: "Truncated fixture".into(),
+            spacing: 25,
+            anti_alias: true,
+            tip: LegacyTip::Computed {
+                diameter: 20,
+                hardness: 70,
+                angle: 0,
+                roundness: 100,
+            },
+        };
+        let bytes = photocraft_psd::abr::write_v12(2, &[brush], true).expect("ABR fixture");
+        for length in [0, 1, 8, bytes.len() / 2, bytes.len() - 1] {
+            assert!(
+                convert_photoshop_abr_bytes(&bytes[..length], "truncated").is_err(),
+                "truncation at byte {length} must be rejected"
+            );
+        }
     }
 }

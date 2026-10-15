@@ -1,4 +1,4 @@
-# Comic project model v2
+# Comic project model v3
 
 Phase 3 comic structure is Rust-owned and serialized independently from raster
 tiles. A `ComicProject` contains a bounded ordered page list, print/webtoon
@@ -8,11 +8,12 @@ immutable projections through the FRB `ComicProjectHandle` API.
 
 ## Safety and compatibility
 
-- `format_version` is `2`; unknown versions are rejected before mutation.
+- `format_version` is `3` and `render_semantics` is `1`; unsupported versions
+  or renderer semantics are rejected before mutation.
 - A v1 payload is migrated in memory by adding one validated
   page-document reference per existing page and deterministic panel-layer
   bindings for every existing panel. Source bytes are never rewritten during
-  load; canonical v2 bytes are published only by a successful save.
+  load; canonical v3 bytes are published only by a successful save.
 - Maximums are validated before a project becomes live: 512 pages, 256 panels
   per page,
   512 balloons per page, 256 tones, 2,048 effect lines, 4,096 vector-ink
@@ -42,7 +43,7 @@ API transports IDs as Dart `int`. Existing v2 projects retain their stored
 binding values on load; migration of projects written with the earlier
 out-of-range namespace is a separate compatibility gate.
 
-The v2 metadata is portable and source-preserving. The v2 studio storage
+The v3 metadata is portable and source-preserving. The v2 studio storage
 loader materializes each referenced page document below the same `.inkproj`
 root, creates any missing panel layer trees atomically, and validates all page
 snapshots before publishing the replacement. A failed page save leaves the
@@ -106,15 +107,10 @@ one undoable edit. Existing artwork layers remain in the page document, and
 dialogue linked to the removed panel becomes page-level dialogue. A later panel
 geometry/style edit reapplies the current full outline set.
 
-The interaction follows the focused mobile and desktop touch points documented
-by [ibisPaint's Frame Divider tutorial](https://ibispaint.com/lecture/index.jsp?lang=en&no=38):
-one-finger frame division, spacing controls, adjustable border thickness, and
-direct frame editing. It also follows [Clip Studio Paint's Frames and Panels
-guide](https://help.clip-studio.com/en-us/manual_en/540_comic/Frames_and_Panels.htm):
-drag-to-divide with a preview, horizontal/vertical gutter settings, editable
-frame boundaries, and equal-division presets. Project Ink keeps these controls
-inside the shared Illustration tool set rather than introducing a separate
-phone-only workspace.
+The interaction supports direct frame editing on touch and desktop: one-finger
+frame division, adjustable spacing and border thickness, editable boundaries,
+and equal-division presets. Project Ink keeps these controls inside the shared
+Illustration tool set rather than introducing a separate phone-only workspace.
 
 Acceptance applies to the shared Simple and Studio canvas on iOS/iPadOS,
 macOS, and Android: open an illustration that already has artwork; create a
@@ -146,10 +142,8 @@ updates; it is not a second document authority.
 Opening the Comic workspace does not create or attach example artwork. With no
 project open, the workspace stays empty and offers explicit **New print comic**
 and **New webtoon** actions. A new print comic starts as a blank page with no
-panels or artwork; the artist adds frames and content deliberately. This
-matches Clip Studio Paint's documented flow: create a new Comic canvas, then
-create frame borders or divide them with the frame tools. Startup recovery
-inspects the package manifest and routes multi-page Studio packages through
+panels or artwork; artists add frames and content deliberately. Startup
+recovery inspects the package manifest and routes multi-page Studio packages through
 `openStudioProject`; an unreadable recovery is not replaced by a blank document.
 
 ## Dialogue and effects
@@ -190,25 +184,33 @@ These values match the serialized comic IDs, so exported dialogue remains
 associated with its panel without relying on display order. Unified page SVG
 exports may embed the page's PNG artwork beneath this editable comic structure.
 
-## Raster print-preview boundary
+## Raster print-preview and lettering boundary
 
-`render_page_preview` produces a bounded RGBA PNG for the selected page. The
-Rust renderer scales the page to a caller-provided dimension (64–4096 pixels,
-16 million pixels maximum) and deterministically draws trim/safety guides,
-panel outlines, screentone marks, effect-line polylines, balloon tails and
-outlines, and an offline text-length stub. It does not load fonts, external
-resources, or network content, so it is safe for print-layout inspection and
-stable in tests. Final production export remains responsible for font shaping
-and real text rasterization; the preview must not be presented as a proof of
-final typography or color management. The unified Studio project batch PNG
-action exports the actual flattened composite of each page drawing document
-(including its white page background) as `page-####.png`. This is an
-artwork-only export: it does not yet composite comic-owned panels, balloons,
-dialogue, tones, effect lines, or trim/safety guides into those PNGs. The
-separate structural SVG export remains available on the compatibility
-comic-project API; do not mistake either path for print-ready PDF/PSD or a
-fully lettered comic-page export.
-The main Flutter canvas may draw the stored balloon text, font fallback, text
-orientation, and outline as a local UI overlay above this deterministic PNG;
-that overlay is presentation-only and does not change Rust preview hashes or
-the saved comic structure.
+`render_page_preview` produces a bounded RGBA PNG for the selected page. It
+uses bundled Noto Sans/Serif CJK JP fonts, Parley shaping and Skrifa glyph
+outlines without consulting system fonts. Existing v1/v2 projects migrate in
+memory without editing the source file. A bounded Rust preflight reports
+unsupported font fallbacks, missing glyphs and balloon overflow. Batch PNG/SVG
+and webtoon SVG export reject warning-bearing output unless the Flutter export
+flow explicitly passes the artist's **Export with warnings** choice.
+
+The active canvas receives a second bounded `render_page_overlay_preview`
+result. It has a transparent background, includes comic-owned ink, tones,
+effects, balloon fills/tails and lettering, and omits artwork, trim/safety
+guides and structural panel borders. Flutter aligns this image with the active
+page transform and draws editable panel guides separately. A page change or
+document replacement invalidates pending overlay results before they can be
+published.
+
+Raster and SVG dialogue are clipped to the one-font-size-inset balloon text
+rectangle. The warning list identifies unsupported font families with the
+selected deterministic fallback, missing bundled glyphs, and overflow before
+the export destination is written.
+
+The preview remains bounded to a 4096-pixel maximum dimension and includes
+trim/safety guides. Batch PNG export composites page artwork with comic panels,
+ink, tones, effects, balloons and glyph lettering at the page's actual
+dimensions; it omits trim/safety guides. SVG embeds only artwork PNG beneath
+comic geometry, emits lettering as glyph paths, and retains balloon/panel IDs.
+The same comic geometry is composed once in both formats. PDF/PSD output and
+full print color management remain unsupported.

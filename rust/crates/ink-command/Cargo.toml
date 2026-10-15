@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 ink-model = { path = "../ink-model" }
 
+[dev-dependencies]
+proptest = "1.11"
+
 [lints]
 workspace = true
-

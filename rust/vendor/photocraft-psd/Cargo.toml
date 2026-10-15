@@ -1,0 +1,26 @@
+[package]
+name = "photocraft-psd"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Pinned PhotoCraft PSD/ABR parsing components vendored for Project Ink"
+
+[lib]
+name = "photocraft_psd"
+path = "src/lib.rs"
+
+[features]
+default = []
+serde = ["dep:serde"]
+testgen = []
+
+[dependencies]
+thiserror = "2"
+flate2 = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

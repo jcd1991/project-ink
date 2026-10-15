@@ -54,6 +54,29 @@ pub struct BrushPreviewPoint {
     pub pressure: f32,
 }
 
+/// Materialized Bézier repeat operation accepted by the vector editor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VectorRepeatMode {
+    Radial,
+    Grid,
+    MirrorVertical,
+    MirrorHorizontal,
+    MirrorBoth,
+}
+
+/// Bounded settings for one atomic repeat of a selected Bézier path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VectorRepeatRequest {
+    pub mode: VectorRepeatMode,
+    pub copies: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub spacing_x: f64,
+    pub spacing_y: f64,
+    pub step_degrees: f64,
+    pub scale_per_copy: f64,
+}
+
 /// Immutable pixels and revision captured for a bounded composite-tile read.
 /// The opaque handle is separate from `DocumentHandle` so CPU compositing does
 /// not hold the document's Flutter Rust Bridge lock while pointer input arrives.
@@ -93,6 +116,10 @@ pub fn convert_brush_import(path: String) -> Result<BrushImportReportView, Engin
             let brush_count = if value.source_format == ink_brush::ExternalBrushFormat::InkBrushPack
             {
                 ink_brush::import_inkbrushpack(&path).map_or(0, |reports| {
+                    u32::try_from(reports.len()).unwrap_or(u32::MAX)
+                })
+            } else if value.source_format == ink_brush::ExternalBrushFormat::PhotoshopAbr {
+                ink_brush::import_photoshop_abr(&path).map_or(0, |reports| {
                     u32::try_from(reports.len()).unwrap_or(u32::MAX)
                 })
             } else {
@@ -188,6 +215,10 @@ pub fn convert_staged_brush_import(
     }
     let brush_count = if report.source_format == ink_brush::ExternalBrushFormat::InkBrushPack {
         ink_brush::import_inkbrushpack(&operation.path).map_or(0, |reports| {
+            u32::try_from(reports.len()).unwrap_or(u32::MAX)
+        })
+    } else if report.source_format == ink_brush::ExternalBrushFormat::PhotoshopAbr {
+        ink_brush::import_photoshop_abr(&operation.path).map_or(0, |reports| {
             u32::try_from(reports.len()).unwrap_or(u32::MAX)
         })
     } else {
@@ -385,6 +416,58 @@ struct DocumentHandleState {
     tile_snapshot_sent: bool,
     staged_brush_imports: BTreeMap<u64, StagedBrushImport>,
     next_brush_import: u64,
+    engine_generation: u64,
+    staged_vector_candidate: Option<StagedVectorCandidate>,
+    next_vector_candidate: u64,
+}
+
+struct StagedVectorCandidate {
+    token: u64,
+    engine_generation: u64,
+    revision: u64,
+    layer_id: ink_model::LayerId,
+    source_id: StrokeId,
+    source_kind: String,
+    kind: String,
+    object: ink_model::VectorObject,
+}
+
+/// One bounded Bézier edit that can be previewed and committed atomically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum VectorPathEdit {
+    MoveAnchor {
+        subpath: u32,
+        anchor: u32,
+        dx: f64,
+        dy: f64,
+    },
+    MoveHandle {
+        subpath: u32,
+        anchor: u32,
+        incoming: bool,
+        x: f64,
+        y: f64,
+    },
+    SetAnchorSmooth {
+        subpath: u32,
+        anchor: u32,
+        smooth: bool,
+    },
+    SplitSegment {
+        subpath: u32,
+        segment: u32,
+        t: f64,
+    },
+    DeleteAnchor {
+        subpath: u32,
+        anchor: u32,
+    },
+    Transform {
+        tx: f64,
+        ty: f64,
+        rotation_degrees: f64,
+        uniform_scale: f64,
+    },
 }
 
 struct DocumentRef<'a> {
@@ -1040,6 +1123,7 @@ fn studio_restore_state(
             state.inner = Some(document);
             state.active_stroke = None;
             state.staged_brush_imports.clear();
+            retire_vector_candidate(&mut state);
             drop(state);
             pages.insert(page_id, existing);
         } else {
@@ -1064,6 +1148,7 @@ fn restore_page_document(
         state.inner = Some(restored);
         state.active_stroke = None;
         state.staged_brush_imports.clear();
+        retire_vector_candidate(&mut state);
     } else {
         handle.pages.insert(page_id, new_document_handle(restored));
     }
@@ -1329,6 +1414,7 @@ pub fn create_studio_project_for_document(
         let mut shared = document_state(&shared_handle)?;
         shared.inner = Some(restored);
         shared.active_stroke = None;
+        retire_vector_candidate(&mut shared);
         return Err(error);
     }
     Ok(StudioProjectHandle {
@@ -2583,6 +2669,20 @@ pub fn studio_render_page_preview(
         .map_err(|error| EngineError::InvalidCommand(format!("preview PNG failed: {error}")))
 }
 
+/// Render comic-owned page content on a transparent canvas overlay. Artwork,
+/// print guides and editor selection state are excluded.
+pub fn studio_render_page_overlay_preview(
+    handle: &StudioProjectHandle,
+    page_index: u32,
+    max_dimension: u32,
+) -> Result<Vec<u8>, EngineError> {
+    let preview = studio_project(handle)?
+        .render_page_overlay_preview(page_index as usize, max_dimension)
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+    ink_export::encode_png(preview.width, preview.height, &preview.pixels_rgba)
+        .map_err(|error| EngineError::InvalidCommand(format!("overlay PNG failed: {error}")))
+}
+
 pub fn studio_project_to_json(handle: &StudioProjectHandle) -> Result<Vec<u8>, EngineError> {
     studio_project(handle)?
         .to_json()
@@ -2615,10 +2715,21 @@ pub fn studio_batch_export_page_manifests(
 pub fn studio_batch_export_pages(
     handle: &StudioProjectHandle,
     directory: String,
+    allow_render_warnings: bool,
 ) -> Result<u32, EngineError> {
     // A unified project owns both comic structure and its page documents.
     // Export page artwork as PNG plus a self-contained composited SVG with
     // vector comic structure/lettering above the actual raster page.
+    let project = studio_project(handle)?;
+    let warnings = project
+        .render_warnings()
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+    if !warnings.is_empty() && !allow_render_warnings {
+        return Err(EngineError::InvalidCommand(format!(
+            "comic export has {} rendering warning(s); explicit confirmation is required",
+            warnings.len()
+        )));
+    }
     let directory = PathBuf::from(directory);
     if directory.as_os_str().is_empty() {
         return Err(EngineError::InvalidCommand(
@@ -2642,7 +2753,6 @@ pub fn studio_batch_export_pages(
         ));
     }
 
-    let project = studio_project(handle)?;
     let export_nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
@@ -2719,6 +2829,65 @@ pub fn studio_batch_export_pages(
                 )));
             }
         };
+        let (art_width, art_height, artwork_rgba) = match ink_export::decode_png_rgba8(&png_bytes) {
+            Ok(image) => image,
+            Err(error) => {
+                for (_, png_staged, _, svg_staged) in &staged {
+                    let _ = std::fs::remove_file(png_staged);
+                    let _ = std::fs::remove_file(svg_staged);
+                }
+                return Err(EngineError::InvalidCommand(format!(
+                    "comic artwork PNG could not be decoded: {error}"
+                )));
+            }
+        };
+        let comic_page = match project.render_page_with_artwork(
+            page_index,
+            art_width,
+            art_height,
+            &artwork_rgba,
+        ) {
+            Ok(image) => image,
+            Err(error) => {
+                for (_, png_staged, _, svg_staged) in &staged {
+                    let _ = std::fs::remove_file(png_staged);
+                    let _ = std::fs::remove_file(svg_staged);
+                }
+                return Err(EngineError::InvalidCommand(format!(
+                    "comic PNG compositing failed: {error}"
+                )));
+            }
+        };
+        let composited_png = match ink_export::encode_png(
+            comic_page.width,
+            comic_page.height,
+            &comic_page.pixels_rgba,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                for (_, png_staged, _, svg_staged) in &staged {
+                    let _ = std::fs::remove_file(png_staged);
+                    let _ = std::fs::remove_file(svg_staged);
+                }
+                return Err(EngineError::InvalidCommand(format!(
+                    "comic PNG encoding failed: {error}"
+                )));
+            }
+        };
+        let write_composite = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(png_temporary)?;
+            file.write_all(&composited_png)?;
+            file.sync_all()
+        })();
+        if let Err(error) = write_composite {
+            for (_, png_staged, _, svg_staged) in &staged {
+                let _ = std::fs::remove_file(png_staged);
+                let _ = std::fs::remove_file(svg_staged);
+            }
+            return Err(EngineError::InvalidCommand(format!(
+                "comic PNG staging failed: {error}"
+            )));
+        }
         let svg_bytes = match project.page_svg_with_raster_artwork(page_index, &png_bytes) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -2788,11 +2957,32 @@ pub fn studio_batch_export_webtoon_segments(
     handle: &StudioProjectHandle,
     directory: String,
     max_height_px: u32,
+    allow_render_warnings: bool,
 ) -> Result<u32, EngineError> {
-    let count = studio_project(handle)?
+    let project = studio_project(handle)?;
+    let warnings = project
+        .render_warnings()
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+    if !warnings.is_empty() && !allow_render_warnings {
+        return Err(EngineError::InvalidCommand(format!(
+            "comic export has {} rendering warning(s); explicit confirmation is required",
+            warnings.len()
+        )));
+    }
+    let count = project
         .batch_export_webtoon_segments(std::path::Path::new(&directory), max_height_px)
         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
     Ok(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// Inspect the complete project for dialogue fallback, missing-glyph and
+/// overflow warnings before the user confirms a comic export.
+pub fn studio_comic_render_warnings(
+    handle: &StudioProjectHandle,
+) -> Result<Vec<String>, EngineError> {
+    studio_project(handle)?
+        .render_warnings()
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))
 }
 
 /// Dispatch an editor command against the active page document. Page
@@ -3835,6 +4025,120 @@ pub fn close_comic_project(handle: &mut ComicProjectHandle) {
 
 const BRUSH_IMPORT_TTL: Duration = Duration::from_mins(10);
 const MAX_STAGED_BRUSH_IMPORTS: usize = 16;
+const MAX_PSD_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PSD_COMBINED_WORKING_SET_BYTES: u64 = 900 * 1024 * 1024;
+
+/// Bounded structural and compatibility report shown before PSD import.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PsdImportInspectionView {
+    pub width_px: u32,
+    pub height_px: u32,
+    pub depth: u16,
+    pub layer_count: u32,
+    pub editable_import_available: bool,
+    pub flattened_import_available: bool,
+    pub supported_features: Vec<String>,
+    pub incompatibilities: Vec<String>,
+    pub flattened_import_issues: Vec<String>,
+    pub estimated_editable_working_set_bytes: u64,
+    pub estimated_flattened_working_set_bytes: u64,
+}
+
+/// Inspect a PSD without changing the current document.
+#[allow(clippy::needless_pass_by_value)]
+pub fn inspect_psd_import(path: String) -> Result<PsdImportInspectionView, EngineError> {
+    let bytes = read_bounded_psd_source(std::path::Path::new(&path))?;
+    let report = ink_export::inspect_psd(&bytes)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD inspection failed: {error}")))?;
+    Ok(PsdImportInspectionView {
+        width_px: report.width,
+        height_px: report.height,
+        depth: report.depth,
+        layer_count: u32::try_from(report.logical_layer_count).unwrap_or(u32::MAX),
+        editable_import_available: report.editable_import_available,
+        flattened_import_available: report.flattened_import_available,
+        supported_features: report.supported_features,
+        incompatibilities: report.incompatibilities,
+        flattened_import_issues: report.flattened_import_issues,
+        estimated_editable_working_set_bytes: report.estimated_editable_working_set_bytes,
+        estimated_flattened_working_set_bytes: report.estimated_flattened_working_set_bytes,
+    })
+}
+
+/// Open a PSD as a fully validated editable candidate document.
+///
+/// Construction is isolated from the active UI document. Hosts must not
+/// replace their current handle until this function succeeds and the normal
+/// document replacement barrier has drained accepted input.
+pub fn open_editable_psd(
+    active_handle: &DocumentHandle,
+    path: String,
+) -> Result<DocumentHandle, EngineError> {
+    let bytes = read_bounded_psd_source(std::path::Path::new(&path))?;
+    let inspection = ink_export::inspect_psd(&bytes)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD inspection failed: {error}")))?;
+    let active_bytes = u64::try_from(document(active_handle)?.estimated_working_memory_bytes())
+        .unwrap_or(u64::MAX);
+    let combined_estimate = active_bytes
+        .checked_add(inspection.estimated_editable_working_set_bytes)
+        .ok_or_else(|| {
+            EngineError::InvalidCommand("PSD combined memory estimate overflowed".into())
+        })?;
+    if combined_estimate > MAX_PSD_COMBINED_WORKING_SET_BYTES {
+        return Err(EngineError::InvalidCommand(format!(
+            "PSD import needs an estimated {} MiB while the current document uses {} MiB; close or save another document and retry",
+            inspection
+                .estimated_editable_working_set_bytes
+                .div_ceil(1024 * 1024),
+            active_bytes.div_ceil(1024 * 1024),
+        )));
+    }
+    let imported = ink_export::decode_psd_editable(&bytes)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD import failed: {error}")))?;
+    Ok(new_document_handle(Document::from_editable_psd(
+        DocumentId::from_u128(2),
+        &imported,
+    )?))
+}
+
+fn read_bounded_psd_source(path: &std::path::Path) -> Result<Vec<u8>, EngineError> {
+    let link_metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD metadata failed: {error}")))?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return Err(EngineError::InvalidCommand(
+            "PSD source must be a regular file".into(),
+        ));
+    }
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD metadata failed: {error}")))?;
+    if metadata.len() > MAX_PSD_SOURCE_BYTES {
+        return Err(EngineError::InvalidCommand(
+            "PSD exceeds the 512 MiB import limit".into(),
+        ));
+    }
+    let mut header = [0_u8; 26];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
+    if &header[..4] == b"8BPS" {
+        let width = u32::from_be_bytes([header[18], header[19], header[20], header[21]]);
+        let height = u32::from_be_bytes([header[14], header[15], header[16], header[17]]);
+        ink_export::validate_psd_import_budget(metadata.len(), width, height)
+            .map_err(|error| EngineError::InvalidCommand(format!("PSD import failed: {error}")))?;
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PSD_SOURCE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PSD_SOURCE_BYTES {
+        return Err(EngineError::InvalidCommand(
+            "PSD exceeds the 512 MiB import limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
 
 /// Immutable Phase 1 canvas metadata cached by Flutter.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3847,6 +4151,9 @@ pub struct DocumentInfo {
 
 /// Small immutable brush projection for the Flutter library UI.
 #[derive(Clone, Debug, PartialEq)]
+// These fields mirror independent editable brush controls across FRB. Replacing
+// them with an enum would invent mutually exclusive states the UI does not use.
+#[allow(clippy::struct_excessive_bools)]
 #[allow(dead_code)]
 pub struct BrushSummary {
     pub id: u128,
@@ -3857,7 +4164,11 @@ pub struct BrushSummary {
     pub opacity: f32,
     pub spacing: f32,
     pub smoothing: f32,
+    pub pulled_string: bool,
+    pub stabilizer_distance_px: f32,
+    pub catch_up_on_end: bool,
     pub pressure_size: f32,
+    pub pressure_size_replace: bool,
     pub pressure_opacity: f32,
     pub hardness: f32,
     pub texture_scale: f32,
@@ -3998,6 +4309,8 @@ pub struct LayerSummary {
     pub label_rgba: Option<u32>,
     pub adjustment_brightness: i16,
     pub adjustment_contrast: i16,
+    /// Canonical JSON for the current typed adjustment parameters, when set.
+    pub adjustment_json: Option<String>,
     pub can_drag: bool,
     pub drag_reason: Option<String>,
     pub can_receive_layers: bool,
@@ -4025,6 +4338,43 @@ pub struct VectorStrokeSummary {
     pub min_y: f32,
     pub max_x: f32,
     pub max_y: f32,
+}
+
+/// Bounded ordered projection of a legacy ink or editable Bézier object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorObjectSummary {
+    pub id: u128,
+    pub kind: String,
+    pub point_count: u32,
+    pub points: Vec<f32>,
+    pub geometry: Vec<f64>,
+    pub subpath_starts: Vec<u32>,
+    pub closed: Vec<bool>,
+    pub has_source_archive: bool,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+}
+
+/// Immutable preview projection for one staged shape-recognition or curve-fit
+/// candidate. Geometry stores six `f64` values per anchor in document pixels:
+/// position, incoming handle, and outgoing handle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorCandidateView {
+    pub token: u64,
+    pub source_id: u128,
+    pub revision: u64,
+    pub matched: bool,
+    pub kind: String,
+    /// Legacy sampled points in `(x, y, pressure, tilt)` groups, when present.
+    pub points: Vec<f64>,
+    pub geometry: Vec<f64>,
+    pub subpath_starts: Vec<u32>,
+    pub closed: Vec<bool>,
+    pub stroke_rgba: u32,
+    pub stroke_width: f64,
+    pub notice: String,
 }
 
 fn layer_kind_name(kind: LayerKind) -> &'static str {
@@ -4102,6 +4452,11 @@ fn document_state(
         .map_err(|_| EngineError::InvalidCommand("document handle lock is poisoned".into()))
 }
 
+fn retire_vector_candidate(state: &mut DocumentHandleState) {
+    state.staged_vector_candidate = None;
+    state.engine_generation = state.engine_generation.wrapping_add(1).max(1);
+}
+
 fn new_document_handle(document: Document) -> DocumentHandle {
     DocumentHandle {
         state: Arc::new(Mutex::new(DocumentHandleState {
@@ -4110,6 +4465,9 @@ fn new_document_handle(document: Document) -> DocumentHandle {
             tile_snapshot_sent: false,
             staged_brush_imports: BTreeMap::new(),
             next_brush_import: 1,
+            engine_generation: 1,
+            staged_vector_candidate: None,
+            next_vector_candidate: 1,
         })),
     }
 }
@@ -4149,48 +4507,7 @@ pub fn open_document(path: String) -> Result<DocumentHandle, EngineError> {
         .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|extension| extension.eq_ignore_ascii_case("psd"))
     {
-        const MAX_PSD_BYTES: u64 = 512 * 1024 * 1024;
-        let link_metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            EngineError::InvalidCommand(format!("PSD metadata failed: {error}"))
-        })?;
-        if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
-            return Err(EngineError::InvalidCommand(
-                "PSD source must be a regular file".into(),
-            ));
-        }
-        let metadata = std::fs::metadata(&path).map_err(|error| {
-            EngineError::InvalidCommand(format!("PSD metadata failed: {error}"))
-        })?;
-        if metadata.len() > MAX_PSD_BYTES {
-            return Err(EngineError::InvalidCommand(
-                "PSD exceeds the 512 MiB import limit".into(),
-            ));
-        }
-        // Check the aggregate source + decoded image + initial raster-layer
-        // footprint from the fixed-size header before allocating the source
-        // buffer. The decoder repeats this validation before allocating RGBA.
-        let mut header = [0_u8; 26];
-        std::fs::File::open(&path)
-            .and_then(|mut file| file.read_exact(&mut header))
-            .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
-        if &header[..4] == b"8BPS" {
-            let width = u32::from_be_bytes([header[18], header[19], header[20], header[21]]);
-            let height = u32::from_be_bytes([header[14], header[15], header[16], header[17]]);
-            ink_export::validate_psd_import_budget(metadata.len(), width, height).map_err(
-                |error| EngineError::InvalidCommand(format!("PSD import failed: {error}")),
-            )?;
-        }
-        let file = std::fs::File::open(&path)
-            .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
-        let mut bytes = Vec::new();
-        file.take(MAX_PSD_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| EngineError::InvalidCommand(format!("PSD read failed: {error}")))?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PSD_BYTES {
-            return Err(EngineError::InvalidCommand(
-                "PSD exceeds the 512 MiB import limit".into(),
-            ));
-        }
+        let bytes = read_bounded_psd_source(&path)?;
         let (width, height, pixels) = ink_export::decode_psd(&bytes)
             .map_err(|error| EngineError::InvalidCommand(format!("PSD import failed: {error}")))?;
         return Ok(new_document_handle(Document::from_flattened_rgba(
@@ -4212,6 +4529,7 @@ pub fn close_document(handle: &mut DocumentHandle) -> Result<(), EngineError> {
     }
     state.active_stroke = None;
     state.staged_brush_imports.clear();
+    retire_vector_candidate(&mut state);
     Ok(())
 }
 
@@ -5049,8 +5367,11 @@ pub fn update_brush_settings(
     smudge: f32,
     wetness: f32,
     pressure_curve_points: Vec<f32>,
+    pulled_string: bool,
+    stabilizer_distance_px: f32,
+    catch_up_on_end: bool,
 ) -> Result<u64, EngineError> {
-    document_mut(handle)?.update_brush_settings(
+    document_mut(handle)?.update_brush_settings_with_stabilizer(
         BrushId::from_u128(brush_id),
         diameter_px,
         opacity,
@@ -5066,6 +5387,9 @@ pub fn update_brush_settings(
         smudge,
         wetness,
         &pressure_curve_points,
+        pulled_string,
+        stabilizer_distance_px,
+        catch_up_on_end,
     )
 }
 
@@ -5130,6 +5454,9 @@ pub fn update_brush_draft(
     rotation_jitter: f32,
     smudge: f32,
     wetness: f32,
+    pulled_string: bool,
+    stabilizer_distance_px: f32,
+    catch_up_on_end: bool,
     pressure_curve_points: Vec<f32>,
 ) -> Result<(), EngineError> {
     document_mut(handle)?.update_brush_draft(
@@ -5147,6 +5474,9 @@ pub fn update_brush_draft(
         rotation_jitter,
         smudge,
         wetness,
+        pulled_string,
+        stabilizer_distance_px,
+        catch_up_on_end,
         &pressure_curve_points,
     )
 }
@@ -5372,6 +5702,47 @@ pub fn set_layer_brightness_contrast(
             adjustment,
         },
     )
+}
+
+/// Begin a Rust-owned, non-persistent adjustment preview transaction.
+pub fn begin_layer_adjustment_edit(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.begin_layer_adjustment_edit(ink_model::LayerId::from_u128(layer_id))
+}
+
+/// Preview one validated adjustment payload without adding history.
+#[allow(clippy::needless_pass_by_value)]
+pub fn update_layer_adjustment_edit(
+    handle: &mut DocumentHandle,
+    edit_id: u64,
+    adjustment_json: String,
+) -> Result<u64, EngineError> {
+    if adjustment_json.len() > 4_096 {
+        return Err(EngineError::InvalidCommand(
+            "adjustment preview payload exceeds 4096 bytes".into(),
+        ));
+    }
+    let adjustment: LayerAdjustment = serde_json::from_str(&adjustment_json)
+        .map_err(|_| EngineError::InvalidCommand("invalid adjustment preview payload".into()))?;
+    document_mut(handle)?.update_layer_adjustment_edit(edit_id, adjustment)
+}
+
+/// Commit the active adjustment preview as one undoable command.
+pub fn commit_layer_adjustment_edit(
+    handle: &mut DocumentHandle,
+    edit_id: u64,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.commit_layer_adjustment_edit(edit_id)
+}
+
+/// Cancel an adjustment preview and restore its committed settings.
+pub fn cancel_layer_adjustment_edit(
+    handle: &mut DocumentHandle,
+    edit_id: u64,
+) -> Result<u64, EngineError> {
+    document_mut(handle)?.cancel_layer_adjustment_edit(edit_id)
 }
 
 /// Replace the ephemeral raster selection with a rectangle in canvas pixels.
@@ -5901,6 +6272,22 @@ pub fn import_krita_bundle_verified(
         .map(|ids| ids.into_iter().map(|id| id.0).collect())
 }
 
+/// Import all readable ABR brushes transactionally when the source hash
+/// matches the compatibility report.
+#[allow(clippy::needless_pass_by_value)]
+pub fn import_photoshop_abr_verified(
+    handle: &mut DocumentHandle,
+    path: String,
+    source_sha256: Vec<u8>,
+) -> Result<Vec<u128>, EngineError> {
+    let hash: [u8; 32] = source_sha256.try_into().map_err(|_| {
+        EngineError::InvalidCommand("brush report hash must contain 32 bytes".into())
+    })?;
+    document_mut(handle)?
+        .import_photoshop_abr_verified(std::path::Path::new(&path), Some(hash))
+        .map(|ids| ids.into_iter().map(|id| id.0).collect())
+}
+
 /// Return the original built-in Phase 2 brush library.
 #[allow(dead_code)]
 pub fn builtin_brushes() -> Vec<BrushSummary> {
@@ -5915,7 +6302,11 @@ pub fn builtin_brushes() -> Vec<BrushSummary> {
             opacity: 1.0,
             spacing: 0.1,
             smoothing: 0.0,
+            pulled_string: false,
+            stabilizer_distance_px: 0.0,
+            catch_up_on_end: false,
             pressure_size: 0.0,
+            pressure_size_replace: false,
             pressure_opacity: 0.0,
             hardness: 0.75,
             texture_scale: 1.0,
@@ -5945,7 +6336,11 @@ pub fn brushes(handle: &DocumentHandle) -> Result<Vec<BrushSummary>, EngineError
             opacity: summary.opacity,
             spacing: summary.spacing,
             smoothing: summary.smoothing,
+            pulled_string: summary.pulled_string,
+            stabilizer_distance_px: summary.stabilizer_distance_px,
+            catch_up_on_end: summary.catch_up_on_end,
             pressure_size: summary.pressure_size,
+            pressure_size_replace: summary.pressure_size_replace,
             pressure_opacity: summary.pressure_opacity,
             hardness: summary.hardness,
             texture_scale: summary.texture_scale,
@@ -6043,6 +6438,12 @@ pub fn export_document(
         ExportKind::Psd => ink_export::ExportFormat::Psd,
     };
     document(handle)?.export(std::path::Path::new(&path), format)
+}
+
+/// Export supported raster layers as an editable PSD with a coherent merged composite.
+#[flutter_rust_bridge::frb]
+pub fn export_editable_psd(handle: &DocumentHandle, path: String) -> Result<(), EngineError> {
+    document(handle)?.export_editable_psd(std::path::Path::new(&path))
 }
 
 /// Export the committed in-session stroke history for a local time-lapse tool.
@@ -6523,12 +6924,15 @@ pub fn layer_summaries(handle: &DocumentHandle) -> Result<Vec<LayerSummary>, Eng
                 }),
                 adjustment_brightness: match layer.adjustment {
                     Some(LayerAdjustment::BrightnessContrast { brightness, .. }) => brightness,
-                    None => 0,
+                    _ => 0,
                 },
                 adjustment_contrast: match layer.adjustment {
                     Some(LayerAdjustment::BrightnessContrast { contrast, .. }) => contrast,
-                    None => 0,
+                    _ => 0,
                 },
+                adjustment_json: layer
+                    .adjustment
+                    .and_then(|adjustment| serde_json::to_string(&adjustment).ok()),
                 can_drag: capability.can_drag,
                 drag_reason: capability.drag_reason.clone(),
                 can_receive_layers: capability.can_receive_layers,
@@ -6570,6 +6974,915 @@ pub fn vector_stroke_summaries(
                 })
                 .collect()
         })
+}
+
+/// Read one bounded page of mixed vector summaries in layer order.
+pub fn vector_object_summaries(
+    handle: &DocumentHandle,
+    layer_id: u128,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<VectorObjectSummary>, EngineError> {
+    let offset = usize::try_from(offset).map_err(|_| EngineError::InvalidLayer)?;
+    let limit = usize::try_from(limit).map_err(|_| EngineError::InvalidLayer)?;
+    document(handle)?
+        .vector_object_summaries(ink_model::LayerId::from_u128(layer_id), offset, limit)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(
+                    |(
+                        id,
+                        kind,
+                        point_count,
+                        bounds,
+                        points,
+                        geometry,
+                        subpath_starts,
+                        closed,
+                        has_source_archive,
+                    )| {
+                        VectorObjectSummary {
+                            id: id.0,
+                            kind,
+                            point_count,
+                            points,
+                            geometry,
+                            subpath_starts,
+                            closed,
+                            has_source_archive,
+                            min_x: bounds[0],
+                            min_y: bounds[1],
+                            max_x: bounds[2],
+                            max_y: bounds[3],
+                        }
+                    },
+                )
+                .collect()
+        })
+}
+
+/// Fetch geometry for one selected vector object without projecting its peers.
+pub fn vector_object_detail(
+    handle: &DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+) -> Result<Option<VectorObjectSummary>, EngineError> {
+    document(handle)?
+        .vector_object_detail(
+            ink_model::LayerId::from_u128(layer_id),
+            ink_model::StrokeId::from_u128(object_id),
+        )
+        .map(|item| {
+            item.map(
+                |(
+                    id,
+                    kind,
+                    point_count,
+                    bounds,
+                    points,
+                    geometry,
+                    subpath_starts,
+                    closed,
+                    has_source_archive,
+                )| {
+                    VectorObjectSummary {
+                        id: id.0,
+                        kind,
+                        point_count,
+                        points,
+                        geometry,
+                        subpath_starts,
+                        closed,
+                        has_source_archive,
+                        min_x: bounds[0],
+                        min_y: bounds[1],
+                        max_x: bounds[2],
+                        max_y: bounds[3],
+                    }
+                },
+            )
+        })
+}
+
+/// Return the topmost editable vector object hit by a document-space point.
+pub fn hit_test_vector_object(
+    handle: &DocumentHandle,
+    layer_id: u128,
+    x: f64,
+    y: f64,
+    tolerance_px: f64,
+) -> Result<Option<u128>, EngineError> {
+    document(handle)?
+        .vector_hit_test(ink_model::LayerId::from_u128(layer_id), x, y, tolerance_px)
+        .map(|object| object.map(|id| id.0))
+}
+
+/// Stage a recognized shape for preview without changing committed artwork.
+/// A new preview replaces the previous candidate for this document.
+pub fn preview_vector_shape(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    stroke_id: u128,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_candidate(handle, layer_id, stroke_id, None)
+}
+
+/// Stage a fitted curve for preview without changing committed artwork.
+pub fn preview_vector_curve_fit(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    stroke_id: u128,
+    tolerance_px: f64,
+) -> Result<VectorCandidateView, EngineError> {
+    if !tolerance_px.is_finite() || !(0.25..=8.0).contains(&tolerance_px) {
+        return Err(EngineError::InvalidCommand(
+            "curve-fit tolerance must be between 0.25 and 8 pixels".into(),
+        ));
+    }
+    stage_vector_candidate(handle, layer_id, stroke_id, Some(tolerance_px))
+}
+
+/// Stage a translated legacy vector stroke for drag preview. Confirmed samples
+/// and their pressure/tilt values are preserved; document pixels change only
+/// when the returned candidate is applied.
+pub fn preview_vector_legacy_translation(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    stroke_id: u128,
+    translation_x: f64,
+    translation_y: f64,
+) -> Result<VectorCandidateView, EngineError> {
+    if !translation_x.is_finite() || !translation_y.is_finite() {
+        return Err(EngineError::InvalidCommand(
+            "legacy vector translation must be finite".into(),
+        ));
+    }
+    let layer_id = ink_model::LayerId::from_u128(layer_id);
+    let stroke_id = StrokeId::from_u128(stroke_id);
+    let captured_generation = {
+        let mut state = document_state(handle)?;
+        state.staged_vector_candidate = None;
+        state.engine_generation
+    };
+    let (revision, mut stroke) =
+        document(handle)?.vector_stroke_for_candidate(layer_id, stroke_id)?;
+    for point in &mut stroke.points {
+        let x = f64::from(point.x) + translation_x;
+        let y = f64::from(point.y) + translation_y;
+        if !x.is_finite()
+            || !y.is_finite()
+            || x.abs() > f64::from(f32::MAX)
+            || y.abs() > f64::from(f32::MAX)
+        {
+            return Err(EngineError::InvalidCommand(
+                "legacy vector translation exceeds numeric bounds".into(),
+            ));
+        }
+        point.x = x as f32;
+        point.y = y as f32;
+    }
+    let object = ink_model::VectorObject::LegacyInk { stroke };
+    ink_model::validate_vector_object(&object, document(handle)?.spec).map_err(|error| {
+        EngineError::InvalidCommand(format!("translated vector stroke is invalid: {error:?}"))
+    })?;
+    let mut state = document_state(handle)?;
+    let document = state
+        .inner
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+    if state.engine_generation != captured_generation || document.revision() != revision {
+        return Err(EngineError::InvalidCommand(
+            "legacy vector translation preview became stale".into(),
+        ));
+    }
+    let token = state.next_vector_candidate;
+    state.next_vector_candidate = token.checked_add(1).ok_or_else(|| {
+        EngineError::InvalidCommand("vector preview token space is exhausted".into())
+    })?;
+    let kind = "LegacyInk".to_owned();
+    state.staged_vector_candidate = Some(StagedVectorCandidate {
+        token,
+        engine_generation: captured_generation,
+        revision,
+        layer_id,
+        source_id: stroke_id,
+        source_kind: kind.clone(),
+        kind: kind.clone(),
+        object: object.clone(),
+    });
+    vector_candidate_view(token, stroke_id, revision, &kind, &object)
+}
+
+/// Constrain a recognized rectangle to a square (`0`) or ellipse to a circle
+/// (`1`) while retaining the current candidate token and its source archive.
+pub fn preview_vector_shape_constraint(
+    handle: &mut DocumentHandle,
+    token: u64,
+    constraint: u8,
+) -> Result<VectorCandidateView, EngineError> {
+    let (source_kind, kind, generation, revision, layer_id, source_id, object) = {
+        let state = document_state(handle)?;
+        let candidate = state
+            .staged_vector_candidate
+            .as_ref()
+            .filter(|candidate| candidate.token == token)
+            .ok_or_else(|| EngineError::InvalidCommand("vector candidate is stale".into()))?;
+        let expected = match constraint {
+            0 => "Rectangle",
+            1 => "Ellipse",
+            _ => {
+                return Err(EngineError::InvalidCommand(
+                    "unknown shape constraint".into(),
+                ));
+            }
+        };
+        if candidate.source_kind != expected {
+            return Err(EngineError::InvalidCommand(
+                "shape constraint does not match the recognized candidate".into(),
+            ));
+        }
+        (
+            candidate.source_kind.clone(),
+            candidate.kind.clone(),
+            candidate.engine_generation,
+            candidate.revision,
+            candidate.layer_id,
+            candidate.source_id,
+            candidate.object.clone(),
+        )
+    };
+    let ink_model::VectorObject::BezierPath { path, source } = object else {
+        return Err(EngineError::InvalidCommand(
+            "shape constraint requires a Bézier candidate".into(),
+        ));
+    };
+    let constrained = ink_vector::constrain_recognized_shape(
+        &path,
+        if constraint == 0 {
+            ink_vector::ShapeConstraint::Square
+        } else {
+            ink_vector::ShapeConstraint::Circle
+        },
+    )
+    .map_err(|error| EngineError::InvalidCommand(format!("shape constraint failed: {error:?}")))?;
+    let constrained_kind = if constraint == 0 { "Square" } else { "Circle" };
+    let object = ink_model::VectorObject::BezierPath {
+        path: constrained,
+        source,
+    };
+    let mut state = document_state(handle)?;
+    let document = state
+        .inner
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+    if state.engine_generation != generation || document.revision() != revision {
+        return Err(EngineError::InvalidCommand(
+            "vector candidate became stale".into(),
+        ));
+    }
+    let candidate = state
+        .staged_vector_candidate
+        .as_mut()
+        .filter(|candidate| {
+            candidate.token == token
+                && candidate.engine_generation == generation
+                && candidate.revision == revision
+                && candidate.layer_id == layer_id
+                && candidate.source_id == source_id
+                && candidate.source_kind == source_kind
+                && candidate.kind == kind
+        })
+        .ok_or_else(|| EngineError::InvalidCommand("vector candidate became stale".into()))?;
+    candidate.object = object.clone();
+    candidate.kind = constrained_kind.into();
+    vector_candidate_view(token, source_id, revision, constrained_kind, &object)
+}
+
+/// Stage one Bézier edit. The committed path remains unchanged until the
+/// existing apply-candidate call validates and publishes the complete patch.
+#[allow(clippy::too_many_lines)] // Capture, compute, stale-check, and stage are one candidate boundary.
+fn stage_vector_path_edit(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    edit: VectorPathEdit,
+) -> Result<VectorCandidateView, EngineError> {
+    let layer_id = ink_model::LayerId::from_u128(layer_id);
+    let object_id = ink_model::StrokeId::from_u128(object_id);
+    let captured_generation = {
+        let mut state = document_state(handle)?;
+        state.staged_vector_candidate = None;
+        state.engine_generation
+    };
+    let (revision, path, source) =
+        document(handle)?.vector_path_for_candidate(layer_id, object_id)?;
+    let subpath = |value: u32| usize::try_from(value).unwrap_or(usize::MAX);
+    let path = match edit {
+        VectorPathEdit::MoveAnchor {
+            subpath: contour,
+            anchor,
+            dx,
+            dy,
+        } => ink_vector::move_anchor(&path, subpath(contour), subpath(anchor), (dx, dy)),
+        VectorPathEdit::MoveHandle {
+            subpath: contour,
+            anchor,
+            incoming,
+            x,
+            y,
+        } => ink_vector::move_handle(
+            &path,
+            subpath(contour),
+            subpath(anchor),
+            if incoming {
+                ink_vector::HandleKind::Incoming
+            } else {
+                ink_vector::HandleKind::Outgoing
+            },
+            (x, y),
+        ),
+        VectorPathEdit::SetAnchorSmooth {
+            subpath: contour,
+            anchor,
+            smooth,
+        } => ink_vector::set_anchor_kind(
+            &path,
+            subpath(contour),
+            subpath(anchor),
+            if smooth {
+                ink_model::AnchorKind::Smooth
+            } else {
+                ink_model::AnchorKind::Corner
+            },
+        ),
+        VectorPathEdit::SplitSegment {
+            subpath: contour,
+            segment,
+            t,
+        } => ink_vector::split_segment(&path, subpath(contour), subpath(segment), t),
+        VectorPathEdit::DeleteAnchor {
+            subpath: contour,
+            anchor,
+        } => ink_vector::delete_anchor(&path, subpath(contour), subpath(anchor)),
+        VectorPathEdit::Transform {
+            tx,
+            ty,
+            rotation_degrees,
+            uniform_scale,
+        } => ink_vector::transform_path(
+            &path,
+            ink_vector::VectorTransform {
+                translate: (tx, ty),
+                rotation_degrees,
+                scale: uniform_scale,
+            },
+        ),
+    }
+    .map_err(|error| EngineError::InvalidCommand(format!("vector path edit failed: {error:?}")))?;
+    let object = ink_model::VectorObject::BezierPath { path, source };
+    let mut state = document_state(handle)?;
+    let document = state
+        .inner
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+    if state.engine_generation != captured_generation || document.revision() != revision {
+        return Err(EngineError::InvalidCommand(
+            "vector path edit became stale".into(),
+        ));
+    }
+    let token = state.next_vector_candidate;
+    state.next_vector_candidate = token.checked_add(1).ok_or_else(|| {
+        EngineError::InvalidCommand("vector preview token space is exhausted".into())
+    })?;
+    state.staged_vector_candidate = Some(StagedVectorCandidate {
+        token,
+        engine_generation: state.engine_generation,
+        revision,
+        layer_id,
+        source_id: object_id,
+        source_kind: "Path edit".into(),
+        kind: "Path edit".into(),
+        object: object.clone(),
+    });
+    vector_candidate_view(token, object_id, revision, "Path edit", &object)
+}
+
+/// Preview moving an anchor while translating both absolute handles.
+pub fn preview_vector_anchor_move(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    subpath: u32,
+    anchor: u32,
+    horizontal_delta: f64,
+    vertical_delta: f64,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_path_edit(
+        handle,
+        layer_id,
+        object_id,
+        VectorPathEdit::MoveAnchor {
+            subpath,
+            anchor,
+            dx: horizontal_delta,
+            dy: vertical_delta,
+        },
+    )
+}
+
+/// Preview moving an absolute incoming or outgoing handle.
+#[allow(clippy::too_many_arguments)] // A fixed scalar bridge operation; the edit is validated as one candidate.
+pub fn preview_vector_handle_move(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    subpath: u32,
+    anchor: u32,
+    incoming: bool,
+    handle_x: f64,
+    handle_y: f64,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_path_edit(
+        handle,
+        layer_id,
+        object_id,
+        VectorPathEdit::MoveHandle {
+            subpath,
+            anchor,
+            incoming,
+            x: handle_x,
+            y: handle_y,
+        },
+    )
+}
+
+/// Preview changing an anchor between independent corner and smooth handles.
+pub fn preview_vector_anchor_smooth(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    subpath: u32,
+    anchor: u32,
+    smooth: bool,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_path_edit(
+        handle,
+        layer_id,
+        object_id,
+        VectorPathEdit::SetAnchorSmooth {
+            subpath,
+            anchor,
+            smooth,
+        },
+    )
+}
+
+/// Preview splitting a cubic segment at its normalized parameter.
+pub fn preview_vector_segment_split(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    subpath: u32,
+    segment: u32,
+    t: f64,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_path_edit(
+        handle,
+        layer_id,
+        object_id,
+        VectorPathEdit::SplitSegment {
+            subpath,
+            segment,
+            t,
+        },
+    )
+}
+
+/// Preview deleting an anchor, subject to open/closed path minimums.
+pub fn preview_vector_anchor_delete(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    subpath: u32,
+    anchor: u32,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_path_edit(
+        handle,
+        layer_id,
+        object_id,
+        VectorPathEdit::DeleteAnchor { subpath, anchor },
+    )
+}
+
+/// Preview translation, rotation, and positive uniform scaling of a path.
+#[allow(clippy::too_many_arguments)] // Mirrors the bounded transform parameters without adding a bridge DTO.
+pub fn preview_vector_path_transform(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    translation_x: f64,
+    translation_y: f64,
+    rotation_degrees: f64,
+    uniform_scale: f64,
+) -> Result<VectorCandidateView, EngineError> {
+    stage_vector_path_edit(
+        handle,
+        layer_id,
+        object_id,
+        VectorPathEdit::Transform {
+            tx: translation_x,
+            ty: translation_y,
+            rotation_degrees,
+            uniform_scale,
+        },
+    )
+}
+
+fn stage_vector_candidate(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    stroke_id: u128,
+    fit_tolerance_px: Option<f64>,
+) -> Result<VectorCandidateView, EngineError> {
+    let layer_id = ink_model::LayerId::from_u128(layer_id);
+    let stroke_id = StrokeId::from_u128(stroke_id);
+    let captured_generation = {
+        let mut state = document_state(handle)?;
+        state.staged_vector_candidate = None;
+        state.engine_generation
+    };
+    let (revision, stroke) =
+        { document(handle)?.vector_stroke_for_candidate(layer_id, stroke_id)? };
+    let (object, kind) = if let Some(tolerance) = fit_tolerance_px {
+        (
+            ink_vector::fit_curve_object(&stroke, tolerance).map_err(|error| {
+                EngineError::InvalidCommand(format!("curve fit failed: {error:?}"))
+            })?,
+            "Fitted curve".to_owned(),
+        )
+    } else {
+        let Some(recognition) = ink_vector::recognize(&stroke).map_err(|error| {
+            EngineError::InvalidCommand(format!("shape recognition failed: {error:?}"))
+        })?
+        else {
+            let mut state = document_state(handle)?;
+            let current_revision = state
+                .inner
+                .as_ref()
+                .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?
+                .revision();
+            if current_revision != revision {
+                return Err(EngineError::InvalidCommand(
+                    "vector preview became stale while recognition was running".into(),
+                ));
+            }
+            state.staged_vector_candidate = None;
+            return Ok(VectorCandidateView {
+                token: 0,
+                source_id: stroke_id.0,
+                revision,
+                matched: false,
+                kind: "NoMatch".into(),
+                points: Vec::new(),
+                geometry: Vec::new(),
+                subpath_starts: Vec::new(),
+                closed: Vec::new(),
+                stroke_rgba: 0,
+                stroke_width: 0.0,
+                notice: "No supported shape recognized.".into(),
+            });
+        };
+        (
+            ink_model::VectorObject::BezierPath {
+                path: recognition.path,
+                source: Some(ink_model::VectorSourceArchive {
+                    legacy: stroke.clone(),
+                }),
+            },
+            match recognition.kind {
+                ink_vector::RecognizedKind::Line => "Line",
+                ink_vector::RecognizedKind::Rectangle => "Rectangle",
+                ink_vector::RecognizedKind::Ellipse => "Ellipse",
+                ink_vector::RecognizedKind::Triangle => "Triangle",
+            }
+            .to_owned(),
+        )
+    };
+    let mut state = document_state(handle)?;
+    let document = state
+        .inner
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+    if state.engine_generation != captured_generation || document.revision() != revision {
+        return Err(EngineError::InvalidCommand(
+            "vector preview became stale while geometry was running".into(),
+        ));
+    }
+    let token = state.next_vector_candidate;
+    state.next_vector_candidate = token.checked_add(1).ok_or_else(|| {
+        EngineError::InvalidCommand("vector preview token space is exhausted".into())
+    })?;
+    let staged = StagedVectorCandidate {
+        token,
+        engine_generation: state.engine_generation,
+        revision,
+        layer_id,
+        source_id: stroke_id,
+        source_kind: kind.clone(),
+        kind: kind.clone(),
+        object: object.clone(),
+    };
+    state.staged_vector_candidate = Some(staged);
+    vector_candidate_view(token, stroke_id, revision, &kind, &object)
+}
+
+fn vector_candidate_view(
+    token: u64,
+    source_id: StrokeId,
+    revision: u64,
+    kind: &str,
+    object: &ink_model::VectorObject,
+) -> Result<VectorCandidateView, EngineError> {
+    if let ink_model::VectorObject::LegacyInk { stroke } = object {
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(stroke.points.len().saturating_mul(4))
+            .map_err(|_| {
+                EngineError::InvalidCommand("vector candidate exceeds available memory".into())
+            })?;
+        for point in &stroke.points {
+            points.extend([
+                f64::from(point.x),
+                f64::from(point.y),
+                f64::from(point.pressure),
+                f64::from(point.tilt),
+            ]);
+        }
+        return Ok(VectorCandidateView {
+            token,
+            source_id: source_id.0,
+            revision,
+            matched: true,
+            kind: kind.into(),
+            points,
+            geometry: Vec::new(),
+            subpath_starts: Vec::new(),
+            closed: Vec::new(),
+            stroke_rgba: 0x1818_1cff,
+            stroke_width: 0.0,
+            notice: String::new(),
+        });
+    }
+    let ink_model::VectorObject::BezierPath { path, .. } = object else {
+        return Err(EngineError::InvalidCommand(
+            "unsupported vector candidate object".into(),
+        ));
+    };
+    let mut geometry = Vec::new();
+    let mut subpath_starts = Vec::new();
+    let mut closed = Vec::new();
+    let anchor_count = path
+        .subpaths
+        .iter()
+        .map(|subpath| subpath.anchors.len())
+        .sum::<usize>();
+    geometry
+        .try_reserve_exact(anchor_count.saturating_mul(6))
+        .map_err(|_| {
+            EngineError::InvalidCommand("vector candidate exceeds available memory".into())
+        })?;
+    subpath_starts
+        .try_reserve_exact(path.subpaths.len())
+        .map_err(|_| {
+            EngineError::InvalidCommand("vector candidate exceeds available memory".into())
+        })?;
+    closed.try_reserve_exact(path.subpaths.len()).map_err(|_| {
+        EngineError::InvalidCommand("vector candidate exceeds available memory".into())
+    })?;
+    for subpath in &path.subpaths {
+        subpath_starts.push(u32::try_from(geometry.len() / 6).unwrap_or(u32::MAX));
+        closed.push(subpath.closed);
+        for anchor in &subpath.anchors {
+            geometry.extend_from_slice(&[
+                anchor.x,
+                anchor.y,
+                anchor.incoming[0],
+                anchor.incoming[1],
+                anchor.outgoing[0],
+                anchor.outgoing[1],
+            ]);
+        }
+    }
+    let stroke = path.style.stroke.unwrap_or_default();
+    Ok(VectorCandidateView {
+        token,
+        source_id: source_id.0,
+        revision,
+        matched: true,
+        kind: kind.into(),
+        points: Vec::new(),
+        geometry,
+        subpath_starts,
+        closed,
+        stroke_rgba: (u32::from(stroke.r) << 24)
+            | (u32::from(stroke.g) << 16)
+            | (u32::from(stroke.b) << 8)
+            | u32::from(stroke.a),
+        stroke_width: path.style.stroke_width,
+        notice: "Pressure variation becomes a uniform-width vector stroke. The original ink remains recoverable.".into(),
+    })
+}
+
+/// Apply the current preview candidate as one undoable replacement. The
+/// revision and engine-generation checks run while holding the document-handle
+/// gate, so a page replacement or intervening edit cannot publish stale work.
+pub fn apply_vector_candidate(handle: &mut DocumentHandle, token: u64) -> Result<u64, EngineError> {
+    let mut state = document_state(handle)?;
+    let candidate = state
+        .staged_vector_candidate
+        .take()
+        .ok_or_else(|| EngineError::InvalidCommand("there is no vector preview to apply".into()))?;
+    if candidate.token != token || candidate.engine_generation != state.engine_generation {
+        return Err(EngineError::InvalidCommand(
+            "vector preview token is stale".into(),
+        ));
+    }
+    let document = state
+        .inner
+        .as_mut()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+    document.apply_vector_patch_if_revision(
+        candidate.revision,
+        candidate.layer_id,
+        vec![ink_command::VectorPatchEdit::Replace {
+            object_id: ink_model::Id::from_u128(candidate.source_id.0),
+            object: candidate.object,
+        }],
+    )
+}
+
+/// Discard a staged preview. Cancellation never mutates document content.
+pub fn cancel_vector_candidate(handle: &mut DocumentHandle, token: u64) -> Result<(), EngineError> {
+    let mut state = document_state(handle)?;
+    if state
+        .staged_vector_candidate
+        .as_ref()
+        .is_some_and(|candidate| candidate.token == token)
+    {
+        state.staged_vector_candidate = None;
+    }
+    Ok(())
+}
+
+/// Restore the archived sampled stroke as one undoable replacement.
+pub fn restore_vector_original_ink(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+) -> Result<u64, EngineError> {
+    let layer_id = ink_model::LayerId::from_u128(layer_id);
+    let object_id = ink_model::StrokeId::from_u128(object_id);
+    let mut state = document_state(handle)?;
+    state.staged_vector_candidate = None;
+    let (revision, source) = state
+        .inner
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?
+        .vector_source_for_restore(layer_id, object_id)?;
+    let document = state
+        .inner
+        .as_mut()
+        .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+    document.apply_vector_patch_if_revision(
+        revision,
+        layer_id,
+        vec![ink_command::VectorPatchEdit::Replace {
+            object_id: ink_model::Id::from_u128(object_id.0),
+            object: ink_model::VectorObject::LegacyInk { stroke: source },
+        }],
+    )
+}
+
+/// Generate ordinary Bézier paths from a selected path and insert them as one
+/// revision-checked, undoable vector patch.
+pub fn repeat_vector_path(
+    handle: &mut DocumentHandle,
+    layer_id: u128,
+    object_id: u128,
+    request: VectorRepeatRequest,
+) -> Result<Vec<u128>, EngineError> {
+    let layer_id = ink_model::LayerId::from_u128(layer_id);
+    let object_id = StrokeId::from_u128(object_id);
+    let copy_count = match request.mode {
+        VectorRepeatMode::Radial => usize::try_from(request.copies).unwrap_or(usize::MAX),
+        VectorRepeatMode::Grid => {
+            let total = usize::try_from(request.columns)
+                .ok()
+                .and_then(|columns| {
+                    usize::try_from(request.rows)
+                        .ok()
+                        .and_then(|rows| columns.checked_mul(rows))
+                })
+                .and_then(|total| total.checked_sub(1));
+            total.ok_or_else(|| {
+                EngineError::InvalidCommand("invalid vector grid dimensions".into())
+            })?
+        }
+        VectorRepeatMode::MirrorVertical | VectorRepeatMode::MirrorHorizontal => 1,
+        VectorRepeatMode::MirrorBoth => 3,
+    };
+    let (revision, path, insertion_position, ids) = {
+        let mut state = document_state(handle)?;
+        state.staged_vector_candidate = None;
+        let document = state
+            .inner
+            .as_ref()
+            .ok_or_else(|| EngineError::InvalidCommand("document handle is closed".into()))?;
+        document.vector_path_for_repeat(layer_id, object_id, copy_count)?
+    };
+    let copies = match request.mode {
+        VectorRepeatMode::Radial => {
+            let (center, _) = vector_path_center(&path);
+            ink_vector::repeat_radial(
+                &path,
+                center,
+                copy_count,
+                request.step_degrees,
+                request.scale_per_copy,
+            )
+        }
+        VectorRepeatMode::Grid => ink_vector::repeat_grid(
+            &path,
+            usize::try_from(request.columns).unwrap_or(usize::MAX),
+            usize::try_from(request.rows).unwrap_or(usize::MAX),
+            request.spacing_x,
+            request.spacing_y,
+        ),
+        VectorRepeatMode::MirrorVertical => {
+            let (center, _) = vector_path_center(&path);
+            ink_vector::mirror_path(&path, Some(center.0), None).map(|path| vec![path])
+        }
+        VectorRepeatMode::MirrorHorizontal => {
+            let (center, _) = vector_path_center(&path);
+            ink_vector::mirror_path(&path, None, Some(center.1)).map(|path| vec![path])
+        }
+        VectorRepeatMode::MirrorBoth => {
+            let (center, _) = vector_path_center(&path);
+            ink_vector::mirror_path(&path, Some(center.0), None).and_then(|vertical| {
+                ink_vector::mirror_path(&path, None, Some(center.1)).and_then(|horizontal| {
+                    ink_vector::mirror_path(&path, Some(center.0), Some(center.1))
+                        .map(|both| vec![vertical, horizontal, both])
+                })
+            })
+        }
+    }
+    .map_err(|error| EngineError::InvalidCommand(format!("vector repeat failed: {error:?}")))?;
+    if copies.len() != ids.len() {
+        return Err(EngineError::InvalidCommand(
+            "vector repeat produced an unexpected number of paths".into(),
+        ));
+    }
+    let new_ids = ids.iter().map(|id| id.0).collect();
+    let edits = copies
+        .into_iter()
+        .zip(ids)
+        .enumerate()
+        .map(|(index, (path, id))| ink_command::VectorPatchEdit::Insert {
+            object_id: ink_model::Id::from_u128(id.0),
+            position: insertion_position.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
+            object: ink_model::VectorObject::BezierPath { path, source: None },
+        })
+        .collect();
+    let mut document = document_mut(handle)?;
+    document.apply_vector_patch_if_revision(revision, layer_id, edits)?;
+    Ok(new_ids)
+}
+
+fn vector_path_center(path: &ink_model::BezierPath) -> ((f64, f64), [f64; 4]) {
+    let mut bounds = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for anchor in path.subpaths.iter().flat_map(|subpath| &subpath.anchors) {
+        for (x, y) in [
+            (anchor.x, anchor.y),
+            (anchor.incoming[0], anchor.incoming[1]),
+            (anchor.outgoing[0], anchor.outgoing[1]),
+        ] {
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].min(y);
+            bounds[2] = bounds[2].max(x);
+            bounds[3] = bounds[3].max(y);
+        }
+    }
+    let center = (
+        f64::midpoint(bounds[0], bounds[2]),
+        f64::midpoint(bounds[1], bounds[3]),
+    );
+    (center, bounds)
 }
 
 #[cfg(test)]

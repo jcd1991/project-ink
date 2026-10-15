@@ -14,7 +14,10 @@ members = [
   "rust/crates/ink-test-support",
   "rust/crates/ink-tools",
   "rust/crates/ink-comic",
+  "rust/crates/ink-vector",
+  "rust/crates/ink-text",
   "rust/crates/ink-live-render",
+  "rust/vendor/photocraft-psd",
 ]
 
 [workspace.package]

@@ -18,12 +18,14 @@ use ink_brush::{
     ResponseCurve, SensorId, TipBehavior, ToolBehavior, WatercolorEdgeStyle, builtin_library,
     resample_from,
 };
-use ink_command::{EditorCommand, History, Transaction, decode_journal, encode_command};
+use ink_command::{
+    EditorCommand, History, Transaction, VectorPatchEdit, decode_journal, try_encode_command,
+};
 use ink_export::ExportError;
 use ink_input::{PacketQueue, PointerPacket, QueueOutcome, decode, flags};
 use ink_model::{
-    BrushId, ColorSpace, DocumentId, DocumentSpec, Layer, LayerId, LayerKind, ModelError, Rgba8,
-    StrokeId,
+    BrushId, ColorSpace, DocumentId, DocumentSpec, Layer, LayerAdjustment, LayerBlendMode,
+    LayerGroupMode, LayerId, LayerKind, ModelError, Rgba8, StrokeId,
 };
 use ink_raster::{TILE_SIZE, Tile, TileCoord, TileStore};
 use ink_storage::{
@@ -69,6 +71,9 @@ const MAX_POST_EFFECT_PIXELS: usize = 32 * 1024 * 1024;
 /// means reopening a document cannot silently reset the Flutter inspector to
 /// UI defaults.
 #[derive(Clone, Debug, PartialEq)]
+// These flags describe independent brush controls. Grouping them into an enum
+// would imply combinations that the brush format does not constrain.
+#[allow(clippy::struct_excessive_bools)]
 pub struct BrushSummaryProjection {
     pub id: BrushId,
     pub is_builtin: bool,
@@ -78,7 +83,11 @@ pub struct BrushSummaryProjection {
     pub opacity: f32,
     pub spacing: f32,
     pub smoothing: f32,
+    pub pulled_string: bool,
+    pub stabilizer_distance_px: f32,
+    pub catch_up_on_end: bool,
     pub pressure_size: f32,
+    pub pressure_size_replace: bool,
     pub pressure_opacity: f32,
     pub hardness: f32,
     pub texture_scale: f32,
@@ -103,6 +112,19 @@ pub struct BrushPreviewPoint {
 /// Stable projection of one editable vector stroke for the UI. The bounds are
 /// document-space and intentionally contain no mutable engine state.
 pub type VectorStrokeSummaryTuple = (ink_model::StrokeId, u32, [f32; 4], Vec<f32>);
+/// One bounded mixed-vector projection. Summary calls leave geometry arrays
+/// empty; detail calls populate legacy x/y/pressure/tilt or Bézier anchor data.
+pub type VectorObjectSummaryTuple = (
+    ink_model::StrokeId,
+    String,
+    u32,
+    [f32; 4],
+    Vec<f32>,
+    Vec<f64>,
+    Vec<u32>,
+    Vec<bool>,
+    bool,
+);
 
 /// Read-only UI projection of one Rust-owned transaction history entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -592,7 +614,6 @@ fn resource_total_bytes(resources: &BTreeMap<[u8; 32], BrushResource>) -> usize 
 
 fn layer_map_bytes(layers: &BTreeMap<LayerId, LayerState>) -> usize {
     layers.values().fold(0usize, |total, layer| {
-        let tiles = layer.tiles.tiles();
         total
             .saturating_add(std::mem::size_of::<LayerState>())
             .saturating_add(
@@ -611,12 +632,47 @@ fn layer_map_bytes(layers: &BTreeMap<LayerId, LayerState>) -> usize {
                     })
                     .fold(0usize, usize::saturating_add),
             )
-            .saturating_add(tiles.iter().fold(0usize, |tile_total, (_, bytes)| {
-                tile_total
-                    .saturating_add(std::mem::size_of::<TileCoord>())
-                    .saturating_add(std::mem::size_of::<Vec<u8>>())
-                    .saturating_add(bytes.len())
-            }))
+            .saturating_add(
+                layer
+                    .bezier_paths
+                    .iter()
+                    .map(|(_, path, source)| {
+                        let anchors = path
+                            .subpaths
+                            .iter()
+                            .map(|subpath| {
+                                subpath
+                                    .anchors
+                                    .capacity()
+                                    .saturating_mul(std::mem::size_of::<ink_model::BezierAnchor>())
+                            })
+                            .fold(0usize, usize::saturating_add);
+                        let archived = source.as_ref().map_or(0, |archive| {
+                            std::mem::size_of::<ink_model::VectorSourceArchive>().saturating_add(
+                                archive
+                                    .legacy
+                                    .points
+                                    .capacity()
+                                    .saturating_mul(std::mem::size_of::<VectorPoint>()),
+                            )
+                        });
+                        std::mem::size_of::<ink_model::StrokeId>()
+                            .saturating_add(std::mem::size_of::<ink_model::BezierPath>())
+                            .saturating_add(path.subpaths.capacity().saturating_mul(
+                                std::mem::size_of::<ink_model::BezierSubpath>(),
+                            ))
+                            .saturating_add(anchors)
+                            .saturating_add(archived)
+                    })
+                    .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(
+                layer
+                    .vector_order
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ink_model::StrokeId>()),
+            )
+            .saturating_add(layer.tiles.estimated_payload_bytes())
     })
 }
 
@@ -1658,6 +1714,67 @@ pub struct CompositeTileReadSnapshot {
     layers: BTreeMap<LayerId, LayerState>,
 }
 
+/// Layer metadata that is invariant across every tile in one composite read.
+/// Preparing it once avoids repeating hierarchy walks and adjustment LUT
+/// compilation for each tile in a visible batch.
+struct CompositeLayerPlan<'a> {
+    entries: Vec<CompositeLayerPlanEntry<'a>>,
+    scope_count: usize,
+    adjustment_luts: HashMap<LayerId, ink_compositor::RgbAdjustmentLut>,
+}
+
+struct CompositeLayerPlanEntry<'a> {
+    state: &'a LayerState,
+    mask: Option<(&'a LayerState, bool, bool)>,
+    inherited_opacity: u16,
+    adjustment_scope: Option<usize>,
+    paint_scopes: Vec<usize>,
+    ancestor_groups: HashSet<LayerId>,
+}
+
+fn composite_adjustment_lut(
+    adjustment: ink_model::LayerAdjustment,
+) -> Result<Option<ink_compositor::RgbAdjustmentLut>, EngineError> {
+    let lut = match adjustment {
+        ink_model::LayerAdjustment::Levels {
+            input_black,
+            input_white,
+            gamma_hundredths,
+            output_black,
+            output_white,
+        } => Some(ink_compositor::RgbAdjustmentLut::from_levels(
+            input_black,
+            input_white,
+            gamma_hundredths,
+            output_black,
+            output_white,
+        )),
+        ink_model::LayerAdjustment::Curves {
+            master,
+            red,
+            green,
+            blue,
+        } => {
+            let points = |curve: ink_model::AdjustmentCurve| {
+                curve.points[..usize::from(curve.len)]
+                    .iter()
+                    .map(|point| (point.x, point.y))
+                    .collect::<Vec<_>>()
+            };
+            Some(ink_compositor::RgbAdjustmentLut::from_curves(
+                &points(master),
+                &points(red),
+                &points(green),
+                &points(blue),
+            ))
+        }
+        ink_model::LayerAdjustment::BrightnessContrast { .. }
+        | ink_model::LayerAdjustment::HueSaturation { .. } => None,
+    };
+    lut.map(|lut| lut.map_err(|error| EngineError::InvalidCommand(format!("{error:?}"))))
+        .transpose()
+}
+
 impl CompositeTileReadSnapshot {
     /// Revision captured with this immutable set of layer tile bytes.
     #[must_use]
@@ -1667,6 +1784,7 @@ impl CompositeTileReadSnapshot {
 
     /// Composite the requested tiles from the captured revision.
     pub fn read_tiles(&self, coordinates: &[TileCoord]) -> Result<Vec<Vec<u8>>, EngineError> {
+        let plan = Document::prepare_composite_layer_plan(&self.layers)?;
         coordinates
             .iter()
             .copied()
@@ -1675,7 +1793,7 @@ impl CompositeTileReadSnapshot {
                     self.width_px,
                     self.height_px,
                     self.background,
-                    &self.layers,
+                    &plan,
                     coordinate,
                 )
             })
@@ -2475,6 +2593,8 @@ impl Document {
                 layer,
                 tiles: TileStore::default(),
                 vectors: Vec::new(),
+                bezier_paths: Vec::new(),
+                vector_order: Vec::new(),
             },
         );
         Self::from_parts(
@@ -2505,6 +2625,8 @@ impl Document {
                 next_brush_draft: 1,
                 opacity_edit: None,
                 next_opacity_edit: 1,
+                adjustment_edit: None,
+                next_adjustment_edit: 1,
                 live_dabs: Arc::new(Mutex::new(
                     ink_live_render::LiveDabQueue::new(LIVE_DAB_QUEUE_CAPACITY).map_err(|_| {
                         EngineError::WorkerUnavailable("live dab queue unavailable".into())
@@ -2568,6 +2690,269 @@ impl Document {
             }
         }
         Ok(document)
+    }
+
+    /// Build an isolated candidate document from the supported editable PSD
+    /// subset. All coordinates are clipped to the declared canvas and the
+    /// source RGBA samples pass through `TileStore::set_pixel` exactly once.
+    pub fn from_editable_psd(
+        id: DocumentId,
+        imported: &ink_export::PsdEditableImport,
+    ) -> Result<Self, EngineError> {
+        if imported.layers.is_empty() || imported.layers.len() > MAX_LAYERS {
+            return Err(EngineError::InvalidCommand(
+                "editable PSD must contain between 1 and 4096 layer records".into(),
+            ));
+        }
+        let spec = DocumentSpec {
+            width_px: imported.width,
+            height_px: imported.height,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        }
+        .validate()
+        .map_err(EngineError::from)?;
+        let initial = Self::new(id, spec)?;
+        let mut snapshot = initial.snapshot();
+        snapshot.id = id;
+        snapshot.layers.clear();
+        snapshot.tiles.clear();
+        snapshot.vectors.clear();
+        snapshot.journal.clear();
+        snapshot.history = HistorySnapshot::default();
+        snapshot.brushes.clear();
+        snapshot.resources.clear();
+        snapshot.layer_panel_state = LayerPanelState::default();
+        snapshot.comic = None;
+
+        let mut layer_ids = Vec::with_capacity(imported.layers.len());
+        let mut child_orders = HashMap::<Option<LayerId>, u32>::new();
+        let mut tile_records = Vec::new();
+        let mut primary_layer = None;
+        for (position, source) in imported.layers.iter().enumerate() {
+            if source.source_index != position
+                || source.parent_index.is_some_and(|parent| parent >= position)
+            {
+                return Err(EngineError::InvalidCommand(
+                    "editable PSD layer hierarchy is not in validated parent-first order".into(),
+                ));
+            }
+            let layer_id = LayerId::from_u128(position as u128 + 1);
+            let parent = source.parent_index.map(|index| layer_ids[index]);
+            let order = child_orders.entry(parent).or_default();
+            let layer_order = *order;
+            *order = order.saturating_add(1);
+            let layer = Self::psd_layer(layer_id, parent, layer_order, source)?;
+            if !source.is_group && primary_layer.is_none() {
+                primary_layer = Some(layer_id);
+            }
+
+            let mut pending_mask_layer = None;
+            if !source.is_group {
+                tile_records.extend(Self::psd_raster_tiles(
+                    layer_id,
+                    source,
+                    imported.width,
+                    imported.height,
+                )?);
+                if let Some(mask) = &source.mask {
+                    let mask_id =
+                        LayerId::from_u128(imported.layers.len() as u128 + position as u128 + 1);
+                    let mask_order = *order;
+                    *order = order.saturating_add(1);
+                    let (mask_layer, mut mask_tiles) = Self::psd_mask_candidate(
+                        mask_id,
+                        layer_id,
+                        parent,
+                        mask_order,
+                        &source.name,
+                        mask,
+                        (imported.width, imported.height),
+                    )?;
+                    tile_records.append(&mut mask_tiles);
+                    pending_mask_layer = Some(mask_layer);
+                }
+            }
+            layer_ids.push(layer_id);
+            snapshot.layers.push(layer);
+            if let Some(mask_layer) = pending_mask_layer {
+                snapshot.layers.push(mask_layer);
+            }
+        }
+        snapshot.tiles = tile_records;
+        snapshot.layer_panel_state.primary_layer = primary_layer;
+        Self::from_snapshot(snapshot)
+    }
+
+    fn psd_layer(
+        id: LayerId,
+        parent: Option<LayerId>,
+        order: u32,
+        source: &ink_export::PsdEditableLayer,
+    ) -> Result<Layer, EngineError> {
+        let kind = if source.is_group {
+            LayerKind::Group
+        } else {
+            LayerKind::Raster
+        };
+        let mut layer = Layer::new(id, kind, source.name.clone());
+        layer.parent = parent;
+        layer.order = order;
+        layer.opacity = u16::from(source.opacity) * 257;
+        layer.visible = source.visible;
+        layer.alpha_lock = source.alpha_locked;
+        layer.locked = source.whole_layer_locked;
+        layer.clipping = source.clipping;
+        layer.blend_mode = match source.blend_mode.as_str() {
+            "norm" | "pass" if source.is_group => ink_model::LayerBlendMode::Normal,
+            "norm" => ink_model::LayerBlendMode::Normal,
+            "mul " => ink_model::LayerBlendMode::Multiply,
+            "scrn" => ink_model::LayerBlendMode::Screen,
+            _ => {
+                return Err(EngineError::InvalidCommand(format!(
+                    "unsupported PSD blend mode {:?}",
+                    source.blend_mode
+                )));
+            }
+        };
+        if source.is_group {
+            layer.group_mode = if source.blend_mode == "pass" {
+                ink_model::LayerGroupMode::PassThrough
+            } else {
+                ink_model::LayerGroupMode::Isolated
+            };
+        }
+        Ok(layer)
+    }
+
+    fn psd_raster_tiles(
+        layer: LayerId,
+        source: &ink_export::PsdEditableLayer,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> Result<Vec<TileRecord>, EngineError> {
+        let expected = Self::psd_rgba_len(source.width, source.height)?;
+        if source.rgba.len() != expected {
+            return Err(EngineError::InvalidCommand(
+                "PSD layer pixel payload does not match its bounds".into(),
+            ));
+        }
+        let mut tiles = TileStore::default();
+        for (index, rgba) in source.rgba.as_chunks::<4>().0.iter().enumerate() {
+            let x = source
+                .left
+                .saturating_add((index % source.width as usize) as i32);
+            let y = source
+                .top
+                .saturating_add((index / source.width as usize) as i32);
+            if x < 0 || y < 0 || x >= canvas_width as i32 || y >= canvas_height as i32 {
+                continue;
+            }
+            tiles.set_pixel(
+                x as u32,
+                y as u32,
+                Rgba8 {
+                    r: rgba[0],
+                    g: rgba[1],
+                    b: rgba[2],
+                    a: rgba[3],
+                },
+            );
+        }
+        Ok(tiles
+            .tiles()
+            .into_iter()
+            .map(|(coordinate, bytes)| TileRecord {
+                layer,
+                coordinate,
+                bytes,
+            })
+            .collect())
+    }
+
+    fn psd_mask_candidate(
+        id: LayerId,
+        owner: LayerId,
+        parent: Option<LayerId>,
+        order: u32,
+        owner_name: &str,
+        mask: &ink_export::PsdEditableMask,
+        canvas_size: (u32, u32),
+    ) -> Result<(Layer, Vec<TileRecord>), EngineError> {
+        if mask.default_value != 0 && mask.default_value != 255 {
+            return Err(EngineError::InvalidCommand(
+                "PSD mask default must be fully hidden (0) or fully revealed (255)".into(),
+            ));
+        }
+        let expected = usize::try_from(mask.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(mask.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or_else(|| EngineError::InvalidCommand("PSD mask dimensions overflow".into()))?;
+        if mask.samples.len() != expected {
+            return Err(EngineError::InvalidCommand(
+                "PSD mask sample payload does not match its bounds".into(),
+            ));
+        }
+        let mut layer = Layer::new(id, LayerKind::Mask, format!("{owner_name} Mask"));
+        layer.parent = parent;
+        layer.order = order;
+        layer.mask_owner = Some(owner);
+        layer.mask_enabled = mask.enabled;
+        layer.mask_stencil = mask.default_value == 0;
+        let mut tiles = TileStore::default();
+        for (index, sample) in mask.samples.iter().copied().enumerate() {
+            let x = mask
+                .left
+                .saturating_add((index % mask.width as usize) as i32);
+            let y = mask
+                .top
+                .saturating_add((index / mask.width as usize) as i32);
+            if x < 0 || y < 0 || x >= canvas_size.0 as i32 || y >= canvas_size.1 as i32 {
+                continue;
+            }
+            let alpha = if mask.default_value == 255 {
+                255 - sample
+            } else {
+                sample
+            };
+            tiles.set_pixel(
+                x as u32,
+                y as u32,
+                Rgba8 {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: alpha,
+                },
+            );
+        }
+        let records = tiles
+            .tiles()
+            .into_iter()
+            .map(|(coordinate, bytes)| TileRecord {
+                layer: id,
+                coordinate,
+                bytes,
+            })
+            .collect();
+        Ok((layer, records))
+    }
+
+    fn psd_rgba_len(width: u32, height: u32) -> Result<usize, EngineError> {
+        usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| EngineError::InvalidCommand("PSD layer dimensions overflow".into()))
     }
 
     /// Reconstruct a document from a validated native snapshot.
@@ -2716,6 +3101,8 @@ impl Document {
                 next_brush_draft: 1,
                 opacity_edit: None,
                 next_opacity_edit: 1,
+                adjustment_edit: None,
+                next_adjustment_edit: 1,
                 live_dabs: Arc::new(Mutex::new(
                     ink_live_render::LiveDabQueue::new(LIVE_DAB_QUEUE_CAPACITY).map_err(|_| {
                         EngineError::WorkerUnavailable("live dab queue unavailable".into())
@@ -2750,6 +3137,29 @@ impl Document {
 
     /// Dispatch a command and return the new document revision.
     pub fn dispatch(&mut self, command: EditorCommand) -> Result<u64, EngineError> {
+        self.dispatch_inner(command, None)
+    }
+
+    /// Atomically validate a captured content revision and apply one vector
+    /// patch. Accepted input is drained before the comparison, and the
+    /// revision check and mutation share the serialized engine dispatch lock.
+    pub fn apply_vector_patch_if_revision(
+        &mut self,
+        expected_revision: u64,
+        layer: LayerId,
+        edits: Vec<ink_command::VectorPatchEdit>,
+    ) -> Result<u64, EngineError> {
+        self.dispatch_inner(
+            EditorCommand::ApplyVectorPatch { layer, edits },
+            Some(expected_revision),
+        )
+    }
+
+    fn dispatch_inner(
+        &mut self,
+        command: EditorCommand,
+        expected_revision: Option<u64>,
+    ) -> Result<u64, EngineError> {
         let input_error = self.flush_input().err();
         if let Some(error) = input_error
             && !matches!(command, EditorCommand::CancelStroke { .. })
@@ -2759,6 +3169,14 @@ impl Document {
         let mut state = lock_recover(&self.state);
         if state.opacity_edit.is_some() {
             commands::commit_pending_opacity_edit(&mut state, None)?;
+        }
+        if state.adjustment_edit.is_some() {
+            commands::commit_pending_adjustment_edit(&mut state, None)?;
+        }
+        if expected_revision.is_some_and(|expected| expected != state.revision) {
+            return Err(EngineError::InvalidCommand(
+                "document changed after vector preview; preview again".into(),
+            ));
         }
         let revision = dispatch_state(&mut state, command)?;
         let valid_layers = state.layers.keys().copied().collect::<HashSet<_>>();
@@ -2993,6 +3411,7 @@ fn history_kind(command: &EditorCommand) -> &'static str {
         | EditorCommand::ConnectVectorStrokes { .. }
         | EditorCommand::EraseVectorSegment { .. }
         | EditorCommand::SetVectorPoint { .. } => "transform",
+        EditorCommand::ApplyVectorPatch { .. } => "vector",
         EditorCommand::Undo | EditorCommand::Redo => "history",
     }
 }
@@ -3046,6 +3465,7 @@ fn history_label(command: &EditorCommand) -> String {
         EditorCommand::ConnectVectorStrokes { .. } => "Connect vector strokes".into(),
         EditorCommand::EraseVectorSegment { .. } => "Erase vector segment".into(),
         EditorCommand::SetVectorPoint { .. } => "Edit vector point".into(),
+        EditorCommand::ApplyVectorPatch { .. } => "Edit vector paths".into(),
         EditorCommand::EndStroke { .. } => "Finish stroke".into(),
         EditorCommand::CancelStroke { .. } => "Cancel stroke".into(),
         EditorCommand::Undo => "Undo".into(),
@@ -3115,6 +3535,7 @@ fn validate_brush_draft_settings(settings: &BrushDraftSettings) -> Result<(), En
         settings.rotation_jitter,
         settings.smudge,
         settings.wetness,
+        settings.stabilizer_distance_px,
     ];
     if values.iter().any(|value| !value.is_finite())
         || !(0.25..=4096.0).contains(&settings.diameter_px)
@@ -3130,6 +3551,7 @@ fn validate_brush_draft_settings(settings: &BrushDraftSettings) -> Result<(), En
         || !(0.0..=1.0).contains(&settings.rotation_jitter)
         || !(0.0..=1.0).contains(&settings.smudge)
         || !(0.0..=1.0).contains(&settings.wetness)
+        || !(0.0..=100.0).contains(&settings.stabilizer_distance_px)
     {
         return Err(EngineError::InvalidCommand(
             "brush settings are outside the supported finite ranges".into(),
@@ -3140,29 +3562,8 @@ fn validate_brush_draft_settings(settings: &BrushDraftSettings) -> Result<(), En
 }
 
 fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
-    let pressure_curve_binding = preset
-        .dynamics
-        .iter()
-        .find(|binding| {
-            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
-        })
-        .or_else(|| {
-            preset
-                .dynamics
-                .iter()
-                .find(|binding| binding.sensor == SensorId::Pressure)
-        });
-    let curve = pressure_curve_binding.map_or_else(
-        || vec![0.0, 0.0, 1.0, 1.0],
-        |binding| {
-            binding
-                .curve
-                .points
-                .iter()
-                .flat_map(|point| [point.x, point.y])
-                .collect::<Vec<_>>()
-        },
-    );
+    let (curve, pressure_size, pressure_opacity, pressure_size_replace) =
+        brush_pressure_projection(preset);
     let (diameter_px, hardness, scatter, rotation_jitter) = match &preset.tip {
         TipBehavior::Stamp(tip) => (
             tip.diameter_px,
@@ -3192,20 +3593,6 @@ fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
         PaintBehavior::DigitalWatercolor(value) => (value.pickup, value.dilution),
         _ => (0.0, 0.0),
     };
-    let pressure_size = preset
-        .dynamics
-        .iter()
-        .find(|binding| {
-            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
-        })
-        .map_or(0.0, |binding| binding.amount.clamp(0.0, 1.0));
-    let pressure_opacity = preset
-        .dynamics
-        .iter()
-        .find(|binding| {
-            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
-        })
-        .map_or(0.0, |binding| binding.amount.clamp(0.0, 1.0));
     let texture_scale = preset
         .grain
         .as_ref()
@@ -3218,6 +3605,8 @@ fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
         .grain
         .as_ref()
         .map(|grain| grain.resource_hash.to_vec());
+    let (pulled_string, stabilizer_distance_px, catch_up_on_end) =
+        brush_path_stabilizer_projection(preset);
     BrushSummaryProjection {
         id: preset.id,
         is_builtin: builtin_library().iter().any(|item| item.id == preset.id),
@@ -3227,7 +3616,11 @@ fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
         opacity,
         spacing: preset.stroke.spacing,
         smoothing: preset.stroke.smoothing,
+        pulled_string,
+        stabilizer_distance_px,
+        catch_up_on_end,
         pressure_size,
+        pressure_size_replace,
         pressure_opacity,
         hardness,
         texture_scale,
@@ -3240,6 +3633,538 @@ fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
         tip_resource_hash: tip_hash,
         grain_resource_hash: grain_hash,
     }
+}
+
+fn brush_pressure_projection(preset: &BrushPresetV2) -> (Vec<f32>, f32, f32, bool) {
+    let pressure_curve_binding = preset
+        .dynamics
+        .iter()
+        .find(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        })
+        .or_else(|| {
+            preset
+                .dynamics
+                .iter()
+                .find(|binding| binding.sensor == SensorId::Pressure)
+        });
+    let curve = pressure_curve_binding.map_or_else(
+        || vec![0.0, 0.0, 1.0, 1.0],
+        |binding| {
+            binding
+                .curve
+                .points
+                .iter()
+                .flat_map(|point| [point.x, point.y])
+                .collect::<Vec<_>>()
+        },
+    );
+    let pressure_amount = |target| {
+        preset
+            .dynamics
+            .iter()
+            .find(|binding| binding.sensor == SensorId::Pressure && binding.target == target)
+            .map_or(0.0, |binding| binding.amount.clamp(0.0, 1.0))
+    };
+    let pressure_size_replace = preset.dynamics.iter().any(|binding| {
+        binding.sensor == SensorId::Pressure
+            && binding.target == ParameterId::Diameter
+            && binding.combine == CombineOp::Replace
+    });
+    (
+        curve,
+        pressure_amount(ParameterId::Diameter),
+        pressure_amount(ParameterId::Opacity),
+        pressure_size_replace,
+    )
+}
+
+fn brush_path_stabilizer_projection(preset: &BrushPresetV2) -> (bool, f32, bool) {
+    (
+        preset.stroke.stabilizer == ink_brush::PathStabilizer::PulledString,
+        preset.stroke.distance_px,
+        preset.stroke.catch_up_on_end,
+    )
+}
+
+fn editable_psd_export_document(
+    document: &Document,
+    snapshot: &ProjectSnapshot,
+) -> Result<ink_export::PsdExportDocument, EngineError> {
+    let width = snapshot.spec.width_px;
+    let height = snapshot.spec.height_px;
+    let canvas_bytes = psd_export_canvas_bytes(width, height)?;
+    validate_psd_export_snapshot(snapshot, canvas_bytes)?;
+    let layers = editable_psd_export_layers(snapshot, width, height, canvas_bytes)?;
+    let composite_rgba =
+        editable_psd_export_composite(document, snapshot, width, height, canvas_bytes)?;
+    Ok(ink_export::PsdExportDocument {
+        width,
+        height,
+        dpi: snapshot.spec.dpi,
+        layers,
+        composite_rgba,
+    })
+}
+
+fn psd_export_canvas_bytes(width: u32, height: u32) -> Result<usize, EngineError> {
+    usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| EngineError::InvalidCommand("PSD export dimensions overflow".into()))
+}
+
+fn validate_psd_export_snapshot(
+    snapshot: &ProjectSnapshot,
+    canvas_bytes: usize,
+) -> Result<(), EngineError> {
+    let width = snapshot.spec.width_px;
+    let height = snapshot.spec.height_px;
+    let raster_layers = snapshot
+        .layers
+        .iter()
+        .filter(|layer| layer.kind == LayerKind::Raster)
+        .count();
+    let mask_layers = snapshot
+        .layers
+        .iter()
+        .filter(|layer| layer.kind == LayerKind::Mask && layer.mask_owner.is_some())
+        .count();
+    let estimated = u64::try_from(canvas_bytes)
+        .ok()
+        .and_then(|base| {
+            u64::try_from(raster_layers)
+                .ok()
+                .and_then(|raster| base.checked_mul(raster.saturating_add(2)))
+                .and_then(|base| {
+                    u64::from(width)
+                        .checked_mul(u64::from(height))
+                        .and_then(|pixels| {
+                            u64::try_from(mask_layers)
+                                .ok()
+                                .and_then(|masks| pixels.checked_mul(masks))
+                        })
+                        .and_then(|masks| base.checked_add(masks))
+                })
+        })
+        .and_then(|working| working.checked_mul(3))
+        .ok_or_else(|| {
+            EngineError::InvalidCommand("PSD export memory estimate overflowed".into())
+        })?;
+    if estimated > ink_export::MAX_PSD_EXPORT_WORKING_SET_BYTES {
+        return Err(EngineError::InvalidCommand(
+            "editable PSD export exceeds the 768 MiB working-set budget; use flattened PSD export"
+                .into(),
+        ));
+    }
+    let layer_count = snapshot.layers.len();
+    if layer_count == 0 || layer_count > 1_024 {
+        return Err(EngineError::InvalidCommand(
+            "editable PSD export supports 1 to 1,024 layers".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn editable_psd_export_layers(
+    snapshot: &ProjectSnapshot,
+    width: u32,
+    height: u32,
+    canvas_bytes: usize,
+) -> Result<Vec<ink_export::PsdExportLayer>, EngineError> {
+    let layer_count = snapshot.layers.len();
+    let mask_layers = snapshot
+        .layers
+        .iter()
+        .filter(|layer| layer.kind == LayerKind::Mask && layer.mask_owner.is_some())
+        .count();
+    let mut tile_records = HashMap::<LayerId, Vec<&TileRecord>>::new();
+    for tile in &snapshot.tiles {
+        tile_records.entry(tile.layer).or_default().push(tile);
+    }
+    let mut masks = HashMap::<LayerId, &Layer>::new();
+    for layer in snapshot
+        .layers
+        .iter()
+        .filter(|layer| layer.kind == LayerKind::Mask)
+    {
+        let owner = layer.mask_owner.ok_or_else(|| {
+            EngineError::InvalidCommand(
+                "editable PSD export cannot include an unattached mask".into(),
+            )
+        })?;
+        if masks.insert(owner, layer).is_some() {
+            return Err(EngineError::InvalidCommand(
+                "editable PSD export supports one raster mask per layer".into(),
+            ));
+        }
+    }
+    let mut layers = Vec::new();
+    layers
+        .try_reserve_exact(layer_count.saturating_sub(mask_layers))
+        .map_err(|_| EngineError::InvalidCommand("unable to allocate PSD layer table".into()))?;
+    for layer in &snapshot.layers {
+        match layer.kind {
+            LayerKind::Mask => continue,
+            LayerKind::Raster | LayerKind::Group => {}
+            _ => {
+                return Err(EngineError::InvalidCommand(format!(
+                    "editable PSD export does not support {:?} layers; choose flattened PSD export",
+                    layer.kind
+                )));
+            }
+        }
+        let is_group = layer.kind == LayerKind::Group;
+        let blend_mode = psd_export_blend_mode(layer.blend_mode)?;
+        let mask = if is_group {
+            if masks.contains_key(&layer.id) {
+                return Err(EngineError::InvalidCommand(
+                    "editable PSD export does not support group masks".into(),
+                ));
+            }
+            None
+        } else if let Some(mask_layer) = masks.get(&layer.id) {
+            Some(export_psd_mask(mask_layer, &tile_records, width, height)?)
+        } else {
+            None
+        };
+        let (left, top, pixel_width, pixel_height, rgba) = if is_group {
+            (0, 0, 0, 0, Vec::new())
+        } else {
+            let records = tile_records.get(&layer.id).map_or(&[][..], Vec::as_slice);
+            let (left, top, pixel_width, pixel_height) =
+                psd_raster_content_bounds(records, width, height);
+            let mut full_canvas = zeroed_export_buffer(canvas_bytes)?;
+            for record in records {
+                copy_premultiplied_bgra_tile_to_rgba(
+                    &record.bytes,
+                    record.coordinate,
+                    width,
+                    height,
+                    &mut full_canvas,
+                )?;
+            }
+            let pixels = crop_psd_rgba(&full_canvas, width, left, top, pixel_width, pixel_height)?;
+            (left, top, pixel_width, pixel_height, pixels)
+        };
+        layers.push(ink_export::PsdExportLayer {
+            id: layer.id.0,
+            parent: layer.parent.map(|parent| parent.0),
+            order: layer.order,
+            name: layer.name.clone(),
+            left,
+            top,
+            width: pixel_width,
+            height: pixel_height,
+            is_group,
+            pass_through: is_group && layer.group_mode == LayerGroupMode::PassThrough,
+            rgba,
+            visible: layer.visible,
+            opacity: layer.opacity,
+            blend_mode,
+            alpha_locked: layer.alpha_lock,
+            whole_layer_locked: layer.locked,
+            clipping: layer.clipping,
+            mask,
+        });
+    }
+    Ok(layers)
+}
+
+fn editable_psd_export_composite(
+    document: &Document,
+    snapshot: &ProjectSnapshot,
+    width: u32,
+    height: u32,
+    canvas_bytes: usize,
+) -> Result<Vec<u8>, EngineError> {
+    let tile_columns = width.div_ceil(TILE_SIZE);
+    let tile_rows = height.div_ceil(TILE_SIZE);
+    let tile_count = usize::try_from(tile_columns)
+        .ok()
+        .and_then(|columns| {
+            usize::try_from(tile_rows)
+                .ok()
+                .and_then(|rows| columns.checked_mul(rows))
+        })
+        .ok_or_else(|| EngineError::InvalidCommand("PSD tile count overflowed".into()))?;
+    let mut coordinates = Vec::new();
+    coordinates
+        .try_reserve_exact(tile_count)
+        .map_err(|_| EngineError::InvalidCommand("unable to allocate PSD tile table".into()))?;
+    for y in 0..tile_rows {
+        for x in 0..tile_columns {
+            coordinates.push(TileCoord {
+                x: i32::try_from(x).map_err(|_| {
+                    EngineError::InvalidCommand("PSD tile coordinate overflowed".into())
+                })?,
+                y: i32::try_from(y).map_err(|_| {
+                    EngineError::InvalidCommand("PSD tile coordinate overflowed".into())
+                })?,
+            });
+        }
+    }
+    let (revision, composite_tiles) = document.read_composite_tiles_snapshot(&coordinates)?;
+    if revision != snapshot.revision {
+        return Err(EngineError::InvalidCommand(
+            "document changed during PSD export; retry the export".into(),
+        ));
+    }
+    let mut composite_rgba = zeroed_export_buffer(canvas_bytes)?;
+    for (coordinate, tile) in coordinates.iter().zip(&composite_tiles) {
+        copy_premultiplied_bgra_tile_to_rgba(
+            tile,
+            *coordinate,
+            width,
+            height,
+            &mut composite_rgba,
+        )?;
+    }
+    Ok(composite_rgba)
+}
+
+fn psd_export_blend_mode(
+    mode: LayerBlendMode,
+) -> Result<ink_export::PsdExportBlendMode, EngineError> {
+    match mode {
+        LayerBlendMode::Normal => Ok(ink_export::PsdExportBlendMode::Normal),
+        LayerBlendMode::Multiply => Ok(ink_export::PsdExportBlendMode::Multiply),
+        LayerBlendMode::Screen => Ok(ink_export::PsdExportBlendMode::Screen),
+        _ => Err(EngineError::InvalidCommand(
+            "editable PSD export supports Normal, Multiply, and Screen blend modes; choose flattened PSD export".into(),
+        )),
+    }
+}
+
+fn export_psd_mask(
+    layer: &Layer,
+    tile_records: &HashMap<LayerId, Vec<&TileRecord>>,
+    width: u32,
+    height: u32,
+) -> Result<ink_export::PsdEditableMask, EngineError> {
+    let samples_count = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| EngineError::InvalidCommand("PSD mask dimensions overflowed".into()))?;
+    let default_value = if layer.mask_stencil { 0 } else { u8::MAX };
+    let mut samples = zeroed_export_buffer(samples_count)?;
+    samples.fill(default_value);
+    if let Some(records) = tile_records.get(&layer.id) {
+        for record in records {
+            let expected = TILE_SIZE as usize * TILE_SIZE as usize * 4;
+            if record.bytes.len() != expected {
+                return Err(EngineError::InvalidCommand(
+                    "PSD mask tile has an invalid byte length".into(),
+                ));
+            }
+            for local_y in 0..TILE_SIZE {
+                let y = i64::from(record.coordinate.y) * i64::from(TILE_SIZE) + i64::from(local_y);
+                if y < 0 || y >= i64::from(height) {
+                    continue;
+                }
+                for local_x in 0..TILE_SIZE {
+                    let x =
+                        i64::from(record.coordinate.x) * i64::from(TILE_SIZE) + i64::from(local_x);
+                    if x < 0 || x >= i64::from(width) {
+                        continue;
+                    }
+                    let source = ((local_y * TILE_SIZE + local_x) * 4 + 3) as usize;
+                    let destination = y as usize * width as usize + x as usize;
+                    samples[destination] = u8::try_from(mask_coverage(
+                        record.bytes[source],
+                        layer.mask_stencil,
+                        layer.mask_inverted,
+                    ))
+                    .unwrap_or(u8::MAX);
+                }
+            }
+        }
+    }
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = None::<u32>;
+    let mut max_y = None::<u32>;
+    for y in 0..height {
+        for x in 0..width {
+            if samples[(y * width + x) as usize] != default_value {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = Some(max_x.map_or(x, |value| value.max(x)));
+                max_y = Some(max_y.map_or(y, |value| value.max(y)));
+            }
+        }
+    }
+    let (left, top, mask_width, mask_height) = match (max_x, max_y) {
+        (Some(max_x), Some(max_y)) => (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1),
+        _ => (0, 0, 1, 1),
+    };
+    let mask_len = usize::try_from(mask_width)
+        .ok()
+        .and_then(|mask_width| {
+            usize::try_from(mask_height)
+                .ok()
+                .and_then(|mask_height| mask_width.checked_mul(mask_height))
+        })
+        .ok_or_else(|| EngineError::InvalidCommand("PSD mask bounds overflowed".into()))?;
+    let mut cropped_samples = zeroed_export_buffer(mask_len)?;
+    for y in 0..mask_height {
+        let source = ((top + y) * width + left) as usize;
+        let destination = (y * mask_width) as usize;
+        let row_len = mask_width as usize;
+        cropped_samples[destination..destination + row_len]
+            .copy_from_slice(&samples[source..source + row_len]);
+    }
+    Ok(ink_export::PsdEditableMask {
+        enabled: layer.mask_enabled,
+        left: i32::try_from(left)
+            .map_err(|_| EngineError::InvalidCommand("PSD mask offset overflowed".into()))?,
+        top: i32::try_from(top)
+            .map_err(|_| EngineError::InvalidCommand("PSD mask offset overflowed".into()))?,
+        width: mask_width,
+        height: mask_height,
+        samples: cropped_samples,
+        default_value,
+    })
+}
+
+fn psd_raster_content_bounds(
+    records: &[&TileRecord],
+    width: u32,
+    height: u32,
+) -> (i32, i32, u32, u32) {
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = None::<u32>;
+    let mut max_y = None::<u32>;
+    for record in records {
+        for (index, pixel) in record.bytes.as_chunks::<4>().0.iter().enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let local_x = u32::try_from(index % TILE_SIZE as usize).unwrap_or(u32::MAX);
+            let local_y = u32::try_from(index / TILE_SIZE as usize).unwrap_or(u32::MAX);
+            let document_x =
+                i64::from(record.coordinate.x) * i64::from(TILE_SIZE) + i64::from(local_x);
+            let document_y =
+                i64::from(record.coordinate.y) * i64::from(TILE_SIZE) + i64::from(local_y);
+            if document_x < 0
+                || document_y < 0
+                || document_x >= i64::from(width)
+                || document_y >= i64::from(height)
+            {
+                continue;
+            }
+            let x = u32::try_from(document_x).unwrap_or(u32::MAX);
+            let y = u32::try_from(document_y).unwrap_or(u32::MAX);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = Some(max_x.map_or(x, |value| value.max(x)));
+            max_y = Some(max_y.map_or(y, |value| value.max(y)));
+        }
+    }
+    match (max_x, max_y) {
+        (Some(max_x), Some(max_y)) => (
+            i32::try_from(min_x).unwrap_or(i32::MAX),
+            i32::try_from(min_y).unwrap_or(i32::MAX),
+            max_x - min_x + 1,
+            max_y - min_y + 1,
+        ),
+        _ => (0, 0, 1, 1),
+    }
+}
+
+fn crop_psd_rgba(
+    full_canvas: &[u8],
+    canvas_width: u32,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, EngineError> {
+    let length = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| EngineError::InvalidCommand("PSD layer bounds overflowed".into()))?;
+    let mut cropped = zeroed_export_buffer(length)?;
+    for y in 0..height {
+        let source_y = usize::try_from(top).unwrap_or(0) + y as usize;
+        let source_x = usize::try_from(left).unwrap_or(0);
+        let source_start = (source_y * canvas_width as usize + source_x) * 4;
+        let destination_start = y as usize * width as usize * 4;
+        let row_bytes = width as usize * 4;
+        cropped[destination_start..destination_start + row_bytes]
+            .copy_from_slice(&full_canvas[source_start..source_start + row_bytes]);
+    }
+    Ok(cropped)
+}
+
+fn zeroed_export_buffer(length: usize) -> Result<Vec<u8>, EngineError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| EngineError::InvalidCommand("PSD export allocation failed".into()))?;
+    bytes.resize(length, 0);
+    Ok(bytes)
+}
+
+fn copy_premultiplied_bgra_tile_to_rgba(
+    source: &[u8],
+    coordinate: TileCoord,
+    width: u32,
+    height: u32,
+    destination: &mut [u8],
+) -> Result<(), EngineError> {
+    let expected = TILE_SIZE as usize * TILE_SIZE as usize * 4;
+    if source.len() != expected {
+        return Err(EngineError::InvalidCommand(
+            "PSD export received an invalid tile".into(),
+        ));
+    }
+    for local_y in 0..TILE_SIZE {
+        let y = i64::from(coordinate.y) * i64::from(TILE_SIZE) + i64::from(local_y);
+        if y < 0 || y >= i64::from(height) {
+            continue;
+        }
+        for local_x in 0..TILE_SIZE {
+            let x = i64::from(coordinate.x) * i64::from(TILE_SIZE) + i64::from(local_x);
+            if x < 0 || x >= i64::from(width) {
+                continue;
+            }
+            let source_offset = ((local_y * TILE_SIZE + local_x) * 4) as usize;
+            let destination_offset = (y as usize * width as usize + x as usize) * 4;
+            let alpha = u32::from(source[source_offset + 3]);
+            destination[destination_offset] =
+                unpremultiply_channel(source[source_offset + 2], alpha);
+            destination[destination_offset + 1] =
+                unpremultiply_channel(source[source_offset + 1], alpha);
+            destination[destination_offset + 2] =
+                unpremultiply_channel(source[source_offset], alpha);
+            destination[destination_offset + 3] = source[source_offset + 3];
+        }
+    }
+    Ok(())
+}
+
+fn unpremultiply_channel(channel: u8, alpha: u32) -> u8 {
+    u32::from(channel)
+        .checked_mul(255)
+        .and_then(|value| value.checked_div(alpha))
+        .unwrap_or(0)
+        .min(255) as u8
 }
 
 fn pack_rgba(color: Rgba8) -> u32 {
@@ -3553,6 +4478,8 @@ impl Document {
                         // Composite snapshots use rasterized vector tiles;
                         // authored vector geometry is not read here.
                         vectors: Vec::new(),
+                        bezier_paths: Vec::new(),
+                        vector_order: Vec::new(),
                     },
                 )
             })
@@ -3569,15 +4496,9 @@ impl Document {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
-    fn composite_tile_from_layers(
-        width_px: u32,
-        height_px: u32,
-        background: Rgba8,
+    fn prepare_composite_layer_plan(
         layers: &BTreeMap<LayerId, LayerState>,
-        coordinate: TileCoord,
-    ) -> Result<Vec<u8>, EngineError> {
-        let mut output = Tile::default();
+    ) -> Result<CompositeLayerPlan<'_>, EngineError> {
         let ordered_layers = ordered_layer_states(layers);
         // Each nested adjustment scopes itself to the accumulated content of
         // its parent group. Store one alpha plane per group that owns an
@@ -3594,79 +4515,115 @@ impl Document {
             .enumerate()
             .map(|(index, group)| (group, index))
             .collect::<HashMap<_, _>>();
-        let mut scope_coverage = vec![0_u8; adjustment_scopes.len()];
-        // Generation tags avoid clearing every group coverage value for each
-        // pixel in the tile. Pixel indices are bounded by TILE_SIZE squared.
-        let mut scope_generation = vec![0_u32; adjustment_scopes.len()];
-        let layer_tiles = ordered_layers
-            .into_iter()
-            .filter_map(|candidate| {
-                let (visible, _) = effective_layer_presentation(layers, candidate.layer.id);
-                let is_paint = matches!(
-                    candidate.layer.kind,
-                    LayerKind::Raster | LayerKind::VectorInk
-                );
-                let is_adjustment = candidate.layer.kind == LayerKind::Adjustment;
-                let is_group = matches!(
-                    candidate.layer.kind,
-                    LayerKind::Group | LayerKind::PanelGroup
-                );
-                if !visible || (!is_paint && !is_adjustment && !is_group) {
-                    return None;
-                }
-                let adjustment_scope = candidate
-                    .layer
-                    .parent
-                    .and_then(|parent| adjustment_scopes.get(&parent).copied());
-                let mut paint_scopes = Vec::new();
-                if is_paint {
-                    let mut parent = candidate.layer.parent;
-                    let mut visited = HashSet::new();
-                    while let Some(group) = parent {
-                        if !visited.insert(group) {
-                            break;
-                        }
-                        if let Some(scope) = adjustment_scopes.get(&group) {
-                            paint_scopes.push(*scope);
-                        }
-                        parent = layers.get(&group).and_then(|layer| layer.layer.parent);
-                    }
-                }
-                let mut ancestor_groups = HashSet::new();
+        let mut entries = Vec::with_capacity(ordered_layers.len());
+        let mut adjustment_luts = HashMap::new();
+        for candidate in ordered_layers {
+            let (visible, _) = effective_layer_presentation(layers, candidate.layer.id);
+            let is_paint = matches!(
+                candidate.layer.kind,
+                LayerKind::Raster | LayerKind::VectorInk
+            );
+            let is_adjustment = candidate.layer.kind == LayerKind::Adjustment;
+            let is_group = matches!(
+                candidate.layer.kind,
+                LayerKind::Group | LayerKind::PanelGroup
+            );
+            if !visible || (!is_paint && !is_adjustment && !is_group) {
+                continue;
+            }
+
+            let adjustment_scope = candidate
+                .layer
+                .parent
+                .and_then(|parent| adjustment_scopes.get(&parent).copied());
+            let mut paint_scopes = Vec::new();
+            if is_paint {
                 let mut parent = candidate.layer.parent;
                 let mut visited = HashSet::new();
-                while let Some(id) = parent {
-                    if !visited.insert(id) {
+                while let Some(group) = parent {
+                    if !visited.insert(group) {
                         break;
                     }
-                    if layers.get(&id).is_some_and(|layer| {
-                        matches!(layer.layer.kind, LayerKind::Group | LayerKind::PanelGroup)
-                    }) {
-                        ancestor_groups.insert(id);
+                    if let Some(scope) = adjustment_scopes.get(&group) {
+                        paint_scopes.push(*scope);
                     }
-                    parent = layers.get(&id).and_then(|layer| layer.layer.parent);
+                    parent = layers.get(&group).and_then(|layer| layer.layer.parent);
                 }
-                Some((
-                    candidate,
-                    candidate.tiles.read(coordinate),
-                    if is_paint {
-                        mask_sibling(layers, candidate)
-                            .or_else(|| ancestor_group_mask(layers, candidate))
-                            .map(|mask| {
-                                (
-                                    mask.tiles.read(coordinate),
-                                    mask.layer.mask_stencil,
-                                    mask.layer.mask_inverted,
-                                )
-                            })
-                    } else {
-                        None
-                    },
-                    candidate.layer.opacity,
-                    adjustment_scope,
-                    paint_scopes,
-                    ancestor_groups,
-                ))
+            }
+
+            let mut ancestor_groups = HashSet::new();
+            let mut parent = candidate.layer.parent;
+            let mut visited = HashSet::new();
+            while let Some(id) = parent {
+                if !visited.insert(id) {
+                    break;
+                }
+                if layers.get(&id).is_some_and(|layer| {
+                    matches!(layer.layer.kind, LayerKind::Group | LayerKind::PanelGroup)
+                }) {
+                    ancestor_groups.insert(id);
+                }
+                parent = layers.get(&id).and_then(|layer| layer.layer.parent);
+            }
+
+            if let Some(adjustment) = candidate.layer.adjustment
+                && let Some(lut) = composite_adjustment_lut(adjustment)?
+            {
+                adjustment_luts.insert(candidate.layer.id, lut);
+            }
+
+            let mask = if is_paint {
+                mask_sibling(layers, candidate)
+                    .or_else(|| ancestor_group_mask(layers, candidate))
+                    .map(|mask| (mask, mask.layer.mask_stencil, mask.layer.mask_inverted))
+            } else {
+                None
+            };
+            entries.push(CompositeLayerPlanEntry {
+                state: candidate,
+                mask,
+                inherited_opacity: candidate.layer.opacity,
+                adjustment_scope,
+                paint_scopes,
+                ancestor_groups,
+            });
+        }
+
+        Ok(CompositeLayerPlan {
+            entries,
+            scope_count: adjustment_scopes.len(),
+            adjustment_luts,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn composite_tile_from_layers(
+        width_px: u32,
+        height_px: u32,
+        background: Rgba8,
+        plan: &CompositeLayerPlan<'_>,
+        coordinate: TileCoord,
+    ) -> Result<Vec<u8>, EngineError> {
+        let mut output = Tile::default();
+        let mut scope_coverage = vec![0_u8; plan.scope_count];
+        // Generation tags avoid clearing every group coverage value for each
+        // pixel in the tile. Pixel indices are bounded by TILE_SIZE squared.
+        let mut scope_generation = vec![0_u32; plan.scope_count];
+        let layer_tiles = plan
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.state,
+                    entry.state.tiles.read(coordinate),
+                    entry.mask.map(|(mask, stencil, inverted)| {
+                        (mask.tiles.read(coordinate), stencil, inverted)
+                    }),
+                    entry.inherited_opacity,
+                    entry.adjustment_scope,
+                    &entry.paint_scopes,
+                    &entry.ancestor_groups,
+                )
             })
             .collect::<Vec<_>>();
         // Composite pixel buffers are scratch space for the inner pixel loop.
@@ -3674,8 +4631,8 @@ impl Document {
         // vectors for every one of its 65,536 pixels. Snapshotting many dirty
         // tiles during a long stroke made those tiny per-pixel allocations a
         // substantial part of the CPU handoff latency.
-        let mut composites = Vec::with_capacity(layer_tiles.len().saturating_add(1));
-        let mut clip_bases = Vec::with_capacity(layer_tiles.len().saturating_add(1));
+        let mut composites = Vec::with_capacity(plan.entries.len().saturating_add(1));
+        let mut clip_bases = Vec::with_capacity(plan.entries.len().saturating_add(1));
         let mut group_stack = Vec::<(
             LayerId,
             usize,
@@ -3683,7 +4640,7 @@ impl Document {
             ink_model::LayerBlendMode,
             ink_model::LayerGroupMode,
             bool,
-        )>::with_capacity(layer_tiles.len());
+        )>::with_capacity(plan.entries.len());
         for local_y in 0..TILE_SIZE {
             let document_y = i64::from(coordinate.y)
                 .saturating_mul(i64::from(TILE_SIZE))
@@ -3785,11 +4742,7 @@ impl Document {
                     }
                     let target = composites.len() - 1;
                     if layer_state.layer.kind == LayerKind::Adjustment {
-                        let Some(ink_model::LayerAdjustment::BrightnessContrast {
-                            brightness,
-                            contrast,
-                        }) = layer_state.layer.adjustment
-                        else {
+                        let Some(adjustment) = layer_state.layer.adjustment else {
                             continue;
                         };
                         if composites[target][3] == 0 {
@@ -3810,12 +4763,38 @@ impl Document {
                             continue;
                         }
                         let original = composites[target];
-                        let adjusted = ink_compositor::BrightnessContrast {
-                            brightness,
-                            contrast,
-                        }
-                        .apply(original)
-                        .map_err(|error| EngineError::InvalidCommand(format!("{error:?}")))?;
+                        let adjusted = match adjustment {
+                            ink_model::LayerAdjustment::BrightnessContrast {
+                                brightness,
+                                contrast,
+                            } => ink_compositor::BrightnessContrast {
+                                brightness,
+                                contrast,
+                            }
+                            .apply(original)
+                            .map_err(|error| EngineError::InvalidCommand(format!("{error:?}"))),
+                            ink_model::LayerAdjustment::Levels { .. }
+                            | ink_model::LayerAdjustment::Curves { .. } => plan
+                                .adjustment_luts
+                                .get(&layer_state.layer.id)
+                                .map(|lut| lut.apply(original))
+                                .ok_or_else(|| {
+                                    EngineError::InvalidCommand(
+                                        "adjustment lookup table is missing".into(),
+                                    )
+                                }),
+                            ink_model::LayerAdjustment::HueSaturation {
+                                hue_degrees,
+                                saturation,
+                                lightness,
+                            } => ink_compositor::hue_saturation(
+                                original,
+                                hue_degrees,
+                                saturation,
+                                lightness,
+                            )
+                            .map_err(|error| EngineError::InvalidCommand(format!("{error:?}"))),
+                        }?;
                         composites[target] = ink_compositor::blend_rgba8(
                             original,
                             adjusted,
@@ -3828,7 +4807,8 @@ impl Document {
                         continue;
                     }
                     let offset = index * 4;
-                    let mut alpha = layer_tile.bytes()[offset + 3];
+                    let source_alpha = layer_tile.bytes()[offset + 3];
+                    let mut alpha = source_alpha;
                     if let Some((mask, stencil, inverted)) = mask_tile {
                         let coverage = mask_coverage(mask.bytes()[offset + 3], *stencil, *inverted);
                         alpha = ((u32::from(alpha) * coverage + 127) / 255) as u8;
@@ -3848,10 +4828,10 @@ impl Document {
                         continue;
                     }
                     let unpremultiply = |value: u8| {
-                        if alpha == 0 {
+                        if source_alpha == 0 {
                             0
                         } else {
-                            (u32::from(value) * 255 / u32::from(alpha)).min(255) as u8
+                            (u32::from(value) * 255 / u32::from(source_alpha)).min(255) as u8
                         }
                     };
                     let source = [
@@ -3869,7 +4849,7 @@ impl Document {
                     if !layer_state.layer.clipping {
                         clip_bases[target] = effective_alpha;
                     }
-                    for scope in paint_scopes {
+                    for scope in *paint_scopes {
                         let previous = if scope_generation[*scope] == generation {
                             scope_coverage[*scope]
                         } else {
@@ -4113,6 +5093,11 @@ impl Document {
         {
             let _ = commands::cancel_pending_opacity_edit(&mut state, None);
         }
+        if state.adjustment_edit.is_some()
+            && commands::commit_pending_adjustment_edit(&mut state, None).is_err()
+        {
+            let _ = commands::cancel_pending_adjustment_edit(&mut state, None);
+        }
         let current = map_to_stored_state(&state.layers);
         ProjectSnapshot {
             id: self.id,
@@ -4252,6 +5237,14 @@ impl Document {
         }
         ink_export::write_export(destination, format, width, height, &pixels)
             .map_err(EngineError::from)
+    }
+
+    /// Export supported raster layers, groups, locks, clipping, masks, and the
+    /// authoritative merged composite as one coherent editable PSD.
+    pub fn export_editable_psd(&self, destination: &std::path::Path) -> Result<(), EngineError> {
+        let snapshot = self.snapshot_for_save()?;
+        let document = editable_psd_export_document(self, &snapshot)?;
+        ink_export::write_editable_psd(destination, &document).map_err(EngineError::from)
     }
     /// Current revision.
     #[must_use]

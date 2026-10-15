@@ -130,11 +130,18 @@ pub enum RasterError {
 /// Sparse document raster with dirty tracking and copy-on-write tile snapshots.
 #[derive(Clone, Debug, Default)]
 pub struct TileStore {
-    tiles: HashMap<TileCoord, Tile>,
-    dirty: HashSet<TileCoord>,
+    // History snapshots share the sparse index and detach it on first write.
+    // Tile pixel buffers have their own copy-on-write Arc inside `Tile`.
+    tiles: Arc<HashMap<TileCoord, Tile>>,
+    dirty: Arc<HashSet<TileCoord>>,
 }
 
 impl TileStore {
+    /// Iterate allocated tile coordinates without cloning tile pixel storage.
+    pub fn coordinates(&self) -> impl Iterator<Item = TileCoord> + '_ {
+        self.tiles.keys().copied()
+    }
+
     /// Clone only the requested tile handles into an immutable sparse
     /// snapshot. Pixel storage stays shared until either store mutates it,
     /// when that store detaches its copy. Callers use this to release document
@@ -144,7 +151,7 @@ impl TileStore {
         let mut snapshot = Self::default();
         for coordinate in coordinates {
             if let Some(tile) = self.tiles.get(coordinate) {
-                snapshot.tiles.insert(*coordinate, tile.clone());
+                Arc::make_mut(&mut snapshot.tiles).insert(*coordinate, tile.clone());
             }
         }
         // Some layer-tree decisions depend on whether a mask has any tiles
@@ -155,7 +162,7 @@ impl TileStore {
             && !self.tiles.is_empty()
             && let Some(coordinate) = coordinates.first()
         {
-            snapshot.tiles.insert(*coordinate, Tile::default());
+            Arc::make_mut(&mut snapshot.tiles).insert(*coordinate, Tile::default());
         }
         snapshot
     }
@@ -184,9 +191,9 @@ impl TileStore {
             x: i32::try_from(x / TILE_SIZE).unwrap_or(i32::MAX),
             y: i32::try_from(y / TILE_SIZE).unwrap_or(i32::MAX),
         };
-        let tile = self.tiles.entry(coord).or_default();
+        let tile = Arc::make_mut(&mut self.tiles).entry(coord).or_default();
         tile.blend_pixel(x % TILE_SIZE, y % TILE_SIZE, source, opacity);
-        self.dirty.insert(coord);
+        Arc::make_mut(&mut self.dirty).insert(coord);
         coord
     }
 
@@ -196,9 +203,9 @@ impl TileStore {
             x: i32::try_from(x / TILE_SIZE).unwrap_or(i32::MAX),
             y: i32::try_from(y / TILE_SIZE).unwrap_or(i32::MAX),
         };
-        if let Some(tile) = self.tiles.get_mut(&coord) {
+        if let Some(tile) = Arc::make_mut(&mut self.tiles).get_mut(&coord) {
             tile.erase_pixel(x % TILE_SIZE, y % TILE_SIZE);
-            self.dirty.insert(coord);
+            Arc::make_mut(&mut self.dirty).insert(coord);
         }
         coord
     }
@@ -211,7 +218,7 @@ impl TileStore {
             x: i32::try_from(x / TILE_SIZE).unwrap_or(i32::MAX),
             y: i32::try_from(y / TILE_SIZE).unwrap_or(i32::MAX),
         };
-        let tile = self.tiles.entry(coord).or_default();
+        let tile = Arc::make_mut(&mut self.tiles).entry(coord).or_default();
         let bytes = Arc::make_mut(&mut tile.bytes);
         let offset = (((y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4) as usize;
         let alpha = source.a;
@@ -219,13 +226,13 @@ impl TileStore {
         bytes[offset + 1] = (u16::from(source.g) * u16::from(alpha) / 255) as u8;
         bytes[offset + 2] = (u16::from(source.r) * u16::from(alpha) / 255) as u8;
         bytes[offset + 3] = alpha;
-        self.dirty.insert(coord);
+        Arc::make_mut(&mut self.dirty).insert(coord);
         coord
     }
 
     /// Return and clear all dirty coordinates in stable order.
     pub fn take_dirty(&mut self) -> Vec<TileCoord> {
-        let mut result: Vec<_> = self.dirty.drain().collect();
+        let mut result: Vec<_> = Arc::make_mut(&mut self.dirty).drain().collect();
         result.sort_unstable_by_key(|coord| (coord.y, coord.x));
         result
     }
@@ -242,8 +249,8 @@ impl TileStore {
     /// Restore a prior snapshot and mark the affected region dirty.
     pub fn restore(&mut self, snapshot: impl IntoIterator<Item = (TileCoord, Tile)>) {
         for (coord, tile) in snapshot {
-            self.tiles.insert(coord, tile);
-            self.dirty.insert(coord);
+            Arc::make_mut(&mut self.tiles).insert(coord, tile);
+            Arc::make_mut(&mut self.dirty).insert(coord);
         }
     }
 
@@ -251,6 +258,21 @@ impl TileStore {
     #[must_use]
     pub fn allocated_tiles(&self) -> usize {
         self.tiles.len()
+    }
+
+    /// Return a conservative estimate of serialized tile payload storage
+    /// without copying pixel buffers. Shared history snapshots are counted
+    /// independently so existing history limits remain conservative.
+    #[must_use]
+    pub fn estimated_payload_bytes(&self) -> usize {
+        self.tiles
+            .iter()
+            .fold(0usize, |total, (_coordinate, tile)| {
+                total
+                    .saturating_add(std::mem::size_of::<TileCoord>())
+                    .saturating_add(std::mem::size_of::<Vec<u8>>())
+                    .saturating_add(tile.bytes.len())
+            })
     }
 
     /// Return allocated coordinates in stable order without copying pixels.
@@ -263,8 +285,8 @@ impl TileStore {
 
     /// Remove all allocated tiles and pending dirty markers.
     pub fn clear(&mut self) {
-        self.tiles.clear();
-        self.dirty.clear();
+        Arc::make_mut(&mut self.tiles).clear();
+        Arc::make_mut(&mut self.dirty).clear();
     }
 
     /// Copy all allocated tile payloads in stable coordinate order.
@@ -491,9 +513,9 @@ impl TileStore {
     ) -> Vec<TileCoord> {
         let width = i64::from(width_px);
         let height = i64::from(height_px);
-        let old_tiles = std::mem::take(&mut self.tiles);
+        let old_tiles = std::mem::take(Arc::make_mut(&mut self.tiles));
         let mut transformed = HashMap::new();
-        let mut dirty = std::mem::take(&mut self.dirty);
+        let mut dirty = std::mem::take(Arc::make_mut(&mut self.dirty));
         dirty.extend(old_tiles.keys().copied());
         for (coordinate, tile) in old_tiles {
             for local_y in 0..TILE_SIZE {
@@ -545,8 +567,8 @@ impl TileStore {
             }
         }
         dirty.extend(transformed.keys().copied());
-        self.tiles = transformed;
-        self.dirty = dirty;
+        self.tiles = Arc::new(transformed);
+        self.dirty = Arc::new(dirty);
         let mut dirty_coordinates: Vec<_> = self.dirty.iter().copied().collect();
         dirty_coordinates.sort_unstable_by_key(|coordinate| (coordinate.y, coordinate.x));
         dirty_coordinates
@@ -609,6 +631,61 @@ mod tests {
 
         assert_eq!(store.sample_pixel(3, 4).b, 255);
         assert_eq!(snapshot.sample_pixel(3, 4).r, 255);
+    }
+
+    #[test]
+    fn history_clone_shares_sparse_maps_and_detaches_only_mutated_data() {
+        let mut original = TileStore::default();
+        original.set_pixel(
+            2,
+            3,
+            Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+        original.set_pixel(
+            TILE_SIZE + 2,
+            3,
+            Rgba8 {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            },
+        );
+
+        let mut snapshot = original.clone();
+        assert!(Arc::ptr_eq(&original.tiles, &snapshot.tiles));
+        assert!(Arc::ptr_eq(&original.dirty, &snapshot.dirty));
+        assert!(Arc::ptr_eq(
+            &original.tiles[&TileCoord { x: 1, y: 0 }].bytes,
+            &snapshot.tiles[&TileCoord { x: 1, y: 0 }].bytes,
+        ));
+
+        snapshot.set_pixel(
+            2,
+            3,
+            Rgba8 {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            },
+        );
+
+        assert!(!Arc::ptr_eq(&original.tiles, &snapshot.tiles));
+        assert!(!Arc::ptr_eq(&original.dirty, &snapshot.dirty));
+        assert_eq!(original.sample_pixel(2, 3).r, 255);
+        assert_eq!(snapshot.sample_pixel(2, 3).b, 255);
+        assert!(Arc::ptr_eq(
+            &original.tiles[&TileCoord { x: 1, y: 0 }].bytes,
+            &snapshot.tiles[&TileCoord { x: 1, y: 0 }].bytes,
+        ));
+        assert_eq!(original.take_dirty().len(), 2);
+        assert_eq!(snapshot.take_dirty().len(), 2);
     }
 
     #[test]

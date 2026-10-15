@@ -2,14 +2,16 @@ use super::{
     BrushDraftSettings, BrushEditUndo, BrushId, BrushPresetV2, BrushPreviewPoint, BrushResource,
     BrushSummaryProjection, CombineOp, Document, EngineError, EngineEvent, LayerId, LayerKind,
     MAX_DOCUMENT_RESOURCE_BYTES, PaintBehavior, ParameterBinding, ParameterId, ResponseCurve,
-    Rgba8, SensorId, TipBehavior, VectorStrokeSummaryTuple, advance_revision,
-    brush_summary_projection, builtin_library, decode_editor_curve, hex_hash, lock_recover,
-    next_available_brush_id, render_brush_dabs, resource_hashes_for_preset, resource_total_bytes,
-    validate_brush_draft_settings,
+    Rgba8, SensorId, TipBehavior, VectorObjectSummaryTuple, VectorStroke, VectorStrokeSummaryTuple,
+    advance_revision, brush_summary_projection, builtin_library, decode_editor_curve, hex_hash,
+    lock_recover, next_available_brush_id, render_brush_dabs, resource_hashes_for_preset,
+    resource_total_bytes, validate_brush_draft_settings,
 };
 use ink_input::{DeviceKind, Phase, PointerSample, flags};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::Ordering;
+
+const MAX_VECTOR_HIT_TEST_OBJECTS: usize = 4_096;
 
 fn validate_brush_preview_bounds(
     width: u16,
@@ -37,6 +39,121 @@ fn validate_brush_preview_bounds(
         ));
     }
     Ok(())
+}
+
+fn vector_stroke_near_point(stroke: &VectorStroke, x: f64, y: f64, tolerance: f64) -> bool {
+    let Some(first) = stroke.points.first() else {
+        return false;
+    };
+    let mut bounds = [first.x, first.y, first.x, first.y];
+    for point in &stroke.points[1..] {
+        bounds[0] = bounds[0].min(point.x);
+        bounds[1] = bounds[1].min(point.y);
+        bounds[2] = bounds[2].max(point.x);
+        bounds[3] = bounds[3].max(point.y);
+    }
+    x >= f64::from(bounds[0]) - tolerance
+        && x <= f64::from(bounds[2]) + tolerance
+        && y >= f64::from(bounds[1]) - tolerance
+        && y <= f64::from(bounds[3]) + tolerance
+}
+
+fn vector_path_near_point(path: &ink_model::BezierPath, x: f64, y: f64, tolerance: f64) -> bool {
+    let mut bounds = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for anchor in path.subpaths.iter().flat_map(|subpath| &subpath.anchors) {
+        for (px, py) in [
+            (anchor.x, anchor.y),
+            (anchor.incoming[0], anchor.incoming[1]),
+            (anchor.outgoing[0], anchor.outgoing[1]),
+        ] {
+            bounds[0] = bounds[0].min(px);
+            bounds[1] = bounds[1].min(py);
+            bounds[2] = bounds[2].max(px);
+            bounds[3] = bounds[3].max(py);
+        }
+    }
+    let expansion = tolerance
+        + path.style.stroke.map_or(0.0, |color| {
+            if color.a == 0 {
+                0.0
+            } else {
+                path.style.stroke_width
+                    * 0.5
+                    * if path.style.join == ink_model::StrokeJoin::Miter {
+                        path.style.miter_limit
+                    } else {
+                        1.0
+                    }
+            }
+        });
+    x >= bounds[0] - expansion
+        && x <= bounds[2] + expansion
+        && y >= bounds[1] - expansion
+        && y <= bounds[3] + expansion
+}
+
+fn stroke_bounds(points: &[ink_model::VectorPoint]) -> [f32; 4] {
+    let Some(first) = points.first() else {
+        return [0.0; 4];
+    };
+    let mut bounds = [first.x, first.y, first.x, first.y];
+    for point in &points[1..] {
+        bounds[0] = bounds[0].min(point.x);
+        bounds[1] = bounds[1].min(point.y);
+        bounds[2] = bounds[2].max(point.x);
+        bounds[3] = bounds[3].max(point.y);
+    }
+    bounds
+}
+
+fn bezier_bounds_and_anchor_count(path: &ink_model::BezierPath) -> ([f32; 4], usize) {
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    let mut count = 0usize;
+    for anchor in path.subpaths.iter().flat_map(|subpath| &subpath.anchors) {
+        count = count.saturating_add(1);
+        for (x, y) in [
+            (anchor.x, anchor.y),
+            (anchor.incoming[0], anchor.incoming[1]),
+            (anchor.outgoing[0], anchor.outgoing[1]),
+        ] {
+            bounds[0] = bounds[0].min(x as f32);
+            bounds[1] = bounds[1].min(y as f32);
+            bounds[2] = bounds[2].max(x as f32);
+            bounds[3] = bounds[3].max(y as f32);
+        }
+    }
+    if count == 0 {
+        ([0.0; 4], 0)
+    } else {
+        let stroke_expansion = path.style.stroke.map_or(0.0, |color| {
+            if color.a == 0 {
+                0.0
+            } else {
+                path.style.stroke_width
+                    * 0.5
+                    * if path.style.join == ink_model::StrokeJoin::Miter {
+                        path.style.miter_limit
+                    } else {
+                        1.0
+                    }
+            }
+        }) as f32;
+        bounds[0] -= stroke_expansion;
+        bounds[1] -= stroke_expansion;
+        bounds[2] += stroke_expansion;
+        bounds[3] += stroke_expansion;
+        (bounds, count)
+    }
 }
 
 impl Document {
@@ -175,6 +292,9 @@ impl Document {
                     rotation_jitter: 0.0,
                     smudge: 0.0,
                     wetness: 0.0,
+                    pulled_string: false,
+                    stabilizer_distance_px: 0.0,
+                    catch_up_on_end: false,
                     pressure_curve_points: Vec::new(),
                 },
             ),
@@ -202,6 +322,9 @@ impl Document {
         rotation_jitter: f32,
         smudge: f32,
         wetness: f32,
+        pulled_string: bool,
+        stabilizer_distance_px: f32,
+        catch_up_on_end: bool,
         pressure_curve_points: &[f32],
     ) -> Result<(), EngineError> {
         let settings = BrushDraftSettings {
@@ -218,6 +341,9 @@ impl Document {
             rotation_jitter,
             smudge,
             wetness,
+            pulled_string,
+            stabilizer_distance_px,
+            catch_up_on_end,
             pressure_curve_points: pressure_curve_points.to_vec(),
         };
         validate_brush_draft_settings(&settings)?;
@@ -248,7 +374,7 @@ impl Document {
             state.brush_drafts.insert(draft_id, (brush_id, settings));
             return Err(error);
         }
-        let result = self.update_brush_settings(
+        let result = self.update_brush_settings_internal(
             brush_id,
             settings.diameter_px,
             settings.opacity,
@@ -264,6 +390,11 @@ impl Document {
             settings.smudge,
             settings.wetness,
             &settings.pressure_curve_points,
+            Some((
+                settings.pulled_string,
+                settings.stabilizer_distance_px,
+                settings.catch_up_on_end,
+            )),
         );
         match result {
             Ok(revision) => Ok(revision),
@@ -311,6 +442,92 @@ impl Document {
         wetness: f32,
         pressure_curve_points: &[f32],
     ) -> Result<u64, EngineError> {
+        self.update_brush_settings_internal(
+            brush_id,
+            diameter_px,
+            opacity,
+            spacing,
+            smoothing,
+            pressure_size,
+            pressure_opacity,
+            pressure_curve,
+            hardness,
+            texture_scale,
+            scatter,
+            rotation_jitter,
+            smudge,
+            wetness,
+            pressure_curve_points,
+            None,
+        )
+    }
+
+    /// Update the ordinary brush controls and path stabilizer as one undoable
+    /// library mutation.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
+    pub fn update_brush_settings_with_stabilizer(
+        &mut self,
+        brush_id: BrushId,
+        diameter_px: f32,
+        opacity: f32,
+        spacing: f32,
+        smoothing: f32,
+        pressure_size: f32,
+        pressure_opacity: f32,
+        pressure_curve: f32,
+        hardness: f32,
+        texture_scale: f32,
+        scatter: f32,
+        rotation_jitter: f32,
+        smudge: f32,
+        wetness: f32,
+        pressure_curve_points: &[f32],
+        pulled_string: bool,
+        stabilizer_distance_px: f32,
+        catch_up_on_end: bool,
+    ) -> Result<u64, EngineError> {
+        self.update_brush_settings_internal(
+            brush_id,
+            diameter_px,
+            opacity,
+            spacing,
+            smoothing,
+            pressure_size,
+            pressure_opacity,
+            pressure_curve,
+            hardness,
+            texture_scale,
+            scatter,
+            rotation_jitter,
+            smudge,
+            wetness,
+            pressure_curve_points,
+            Some((pulled_string, stabilizer_distance_px, catch_up_on_end)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
+    fn update_brush_settings_internal(
+        &mut self,
+        brush_id: BrushId,
+        diameter_px: f32,
+        opacity: f32,
+        spacing: f32,
+        smoothing: f32,
+        pressure_size: f32,
+        pressure_opacity: f32,
+        pressure_curve: f32,
+        hardness: f32,
+        texture_scale: f32,
+        scatter: f32,
+        rotation_jitter: f32,
+        smudge: f32,
+        wetness: f32,
+        pressure_curve_points: &[f32],
+        stabilizer: Option<(bool, f32, bool)>,
+    ) -> Result<u64, EngineError> {
         self.flush_input()?;
         if !diameter_px.is_finite()
             || !opacity.is_finite()
@@ -338,6 +555,9 @@ impl Document {
             || !(0.0..=1.0).contains(&rotation_jitter)
             || !(0.0..=1.0).contains(&smudge)
             || !(0.0..=1.0).contains(&wetness)
+            || stabilizer.is_some_and(|(_, distance, _)| {
+                !distance.is_finite() || !(0.0..=100.0).contains(&distance)
+            })
         {
             return Err(EngineError::InvalidCommand(
                 "brush settings are outside the supported finite ranges".into(),
@@ -358,6 +578,11 @@ impl Document {
                     .find(|candidate| candidate.id == brush_id)
             })
             .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
+        let (pulled_string, stabilizer_distance_px, catch_up_on_end) = stabilizer.unwrap_or((
+            preset.stroke.stabilizer == ink_brush::PathStabilizer::PulledString,
+            preset.stroke.distance_px,
+            preset.stroke.catch_up_on_end,
+        ));
         let settings = BrushDraftSettings {
             diameter_px,
             opacity,
@@ -372,6 +597,9 @@ impl Document {
             rotation_jitter,
             smudge,
             wetness,
+            pulled_string,
+            stabilizer_distance_px,
+            catch_up_on_end,
             pressure_curve_points: pressure_curve_points.to_vec(),
         };
         apply_brush_draft_to_preset(&mut preset, &settings)?;
@@ -692,6 +920,21 @@ impl Document {
         self.install_imported_brush_reports(reports, expected_sha256, "Krita bundle")
     }
 
+    /// Convert and install every readable ABR tip as one library transaction.
+    /// A changed source, invalid preset, or resource-budget failure leaves the
+    /// current brush library untouched.
+    pub fn import_photoshop_abr_verified(
+        &mut self,
+        source: &std::path::Path,
+        expected_sha256: Option<[u8; 32]>,
+    ) -> Result<Vec<BrushId>, EngineError> {
+        self.flush_input()?;
+        let reports = ink_brush::import_photoshop_abr(source).map_err(|error| {
+            EngineError::InvalidCommand(format!("Photoshop ABR import failed: {error}"))
+        })?;
+        self.install_imported_brush_reports(reports, expected_sha256, "Photoshop ABR")
+    }
+
     fn install_imported_brush_reports(
         &mut self,
         reports: Vec<ink_brush::BrushImportReport>,
@@ -855,6 +1098,505 @@ impl Document {
             .collect())
     }
 
+    /// Return one bounded page of lightweight mixed-vector summaries.
+    pub fn vector_object_summaries(
+        &self,
+        layer_id: LayerId,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<VectorObjectSummaryTuple>, EngineError> {
+        if limit == 0 || limit > 64 {
+            return Err(EngineError::InvalidCommand(
+                "vector summary page size must be between 1 and 64".into(),
+            ));
+        }
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let layer = state
+            .layers
+            .get(&layer_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer.layer.kind != LayerKind::VectorInk {
+            return Err(EngineError::InvalidCommand(
+                "vector object summaries require a vector layer".into(),
+            ));
+        }
+        let end = offset.saturating_add(limit).min(layer.vector_order.len());
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        let mut page = Vec::new();
+        page.try_reserve(end - offset).map_err(|_| {
+            EngineError::InvalidCommand("vector summary page exceeds available memory".into())
+        })?;
+        for id in &layer.vector_order[offset..end] {
+            if let Some((_, stroke)) = layer.vectors.iter().find(|(candidate, _)| candidate == id) {
+                let bounds = stroke_bounds(&stroke.points);
+                page.push((
+                    *id,
+                    "LegacyInk".to_owned(),
+                    u32::try_from(stroke.points.len()).unwrap_or(u32::MAX),
+                    bounds,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                ));
+                continue;
+            }
+            let Some((_, path, source)) = layer
+                .bezier_paths
+                .iter()
+                .find(|(candidate, _, _)| candidate == id)
+            else {
+                continue;
+            };
+            let (bounds, anchor_count) = bezier_bounds_and_anchor_count(path);
+            page.push((
+                *id,
+                "BezierPath".to_owned(),
+                u32::try_from(anchor_count).unwrap_or(u32::MAX),
+                bounds,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                source.is_some(),
+            ));
+        }
+        Ok(page)
+    }
+
+    /// Fetch full geometry for a single selected object only.
+    pub fn vector_object_detail(
+        &self,
+        layer_id: LayerId,
+        object_id: ink_model::StrokeId,
+    ) -> Result<Option<VectorObjectSummaryTuple>, EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let layer = state
+            .layers
+            .get(&layer_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer.layer.kind != LayerKind::VectorInk {
+            return Err(EngineError::InvalidCommand(
+                "vector object details require a vector layer".into(),
+            ));
+        }
+        if let Some((_, stroke)) = layer
+            .vectors
+            .iter()
+            .find(|(candidate, _)| *candidate == object_id)
+        {
+            let bounds = stroke_bounds(&stroke.points);
+            let mut points = Vec::new();
+            points
+                .try_reserve(stroke.points.len().saturating_mul(4))
+                .map_err(|_| {
+                    EngineError::InvalidCommand(
+                        "vector object detail exceeds available memory".into(),
+                    )
+                })?;
+            for point in &stroke.points {
+                points.extend([point.x, point.y, point.pressure, point.tilt]);
+            }
+            return Ok(Some((
+                object_id,
+                "LegacyInk".to_owned(),
+                u32::try_from(stroke.points.len()).unwrap_or(u32::MAX),
+                bounds,
+                points,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )));
+        }
+        let Some((_, path, source)) = layer
+            .bezier_paths
+            .iter()
+            .find(|(candidate, _, _)| *candidate == object_id)
+        else {
+            return Ok(None);
+        };
+        let (bounds, anchor_count) = bezier_bounds_and_anchor_count(path);
+        let mut geometry = Vec::new();
+        geometry
+            .try_reserve(anchor_count.saturating_mul(6))
+            .map_err(|_| {
+                EngineError::InvalidCommand("vector object detail exceeds available memory".into())
+            })?;
+        let mut subpath_starts = Vec::new();
+        let mut closed = Vec::new();
+        subpath_starts
+            .try_reserve(path.subpaths.len())
+            .map_err(|_| {
+                EngineError::InvalidCommand("vector detail exceeds available memory".into())
+            })?;
+        closed.try_reserve(path.subpaths.len()).map_err(|_| {
+            EngineError::InvalidCommand("vector detail exceeds available memory".into())
+        })?;
+        let mut anchor_offset = 0usize;
+        for subpath in &path.subpaths {
+            subpath_starts.push(u32::try_from(anchor_offset).map_err(|_| {
+                EngineError::InvalidCommand("vector subpath index exceeds supported range".into())
+            })?);
+            closed.push(subpath.closed);
+            for anchor in &subpath.anchors {
+                geometry.extend([
+                    anchor.x,
+                    anchor.y,
+                    anchor.incoming[0],
+                    anchor.incoming[1],
+                    anchor.outgoing[0],
+                    anchor.outgoing[1],
+                ]);
+            }
+            anchor_offset = anchor_offset
+                .checked_add(subpath.anchors.len())
+                .ok_or_else(|| {
+                    EngineError::InvalidCommand(
+                        "vector anchor count exceeds supported range".into(),
+                    )
+                })?;
+        }
+        Ok(Some((
+            object_id,
+            "BezierPath".to_owned(),
+            u32::try_from(anchor_count).unwrap_or(u32::MAX),
+            bounds,
+            Vec::new(),
+            geometry,
+            subpath_starts,
+            closed,
+            source.is_some(),
+        )))
+    }
+
+    /// Hit-test the topmost editable vector object near a document-space point.
+    /// Geometry work runs after the state lock is released, and at most 4,096
+    /// ordered objects are examined per request.
+    pub fn vector_hit_test(
+        &self,
+        layer_id: LayerId,
+        x: f64,
+        y: f64,
+        tolerance_px: f64,
+    ) -> Result<Option<ink_model::StrokeId>, EngineError> {
+        if !x.is_finite()
+            || !y.is_finite()
+            || !tolerance_px.is_finite()
+            || !(0.0..=4096.0).contains(&tolerance_px)
+        {
+            return Err(EngineError::InvalidCommand(
+                "vector hit-test coordinates or tolerance are invalid".into(),
+            ));
+        }
+        self.flush_input()?;
+        let (object_count, revision) = {
+            let state = lock_recover(&self.state);
+            let layer = state
+                .layers
+                .get(&layer_id)
+                .ok_or(EngineError::InvalidLayer)?;
+            if layer.layer.kind != LayerKind::VectorInk {
+                return Err(EngineError::InvalidCommand(
+                    "vector hit-testing requires a vector-ink layer".into(),
+                ));
+            }
+            let mut ancestor = Some(layer_id);
+            while let Some(id) = ancestor {
+                let current = state.layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+                if !current.layer.visible || current.layer.locked {
+                    return Err(EngineError::InvalidCommand(
+                        "vector hit-test target is hidden or locked".into(),
+                    ));
+                }
+                ancestor = current.layer.parent;
+            }
+            (layer.vector_order.len(), state.revision)
+        };
+        let examined = object_count.min(MAX_VECTOR_HIT_TEST_OBJECTS);
+        for index in (object_count - examined..object_count).rev() {
+            let object = {
+                let state = lock_recover(&self.state);
+                if state.revision != revision {
+                    return Err(EngineError::InvalidCommand(
+                        "vector hit-test became stale during selection".into(),
+                    ));
+                }
+                let layer = state
+                    .layers
+                    .get(&layer_id)
+                    .ok_or(EngineError::InvalidLayer)?;
+                let id = layer.vector_order[index];
+                if let Some((_, stroke)) =
+                    layer.vectors.iter().find(|(candidate, _)| *candidate == id)
+                {
+                    vector_stroke_near_point(stroke, x, y, tolerance_px).then(|| {
+                        (
+                            id,
+                            ink_model::VectorObject::LegacyInk {
+                                stroke: stroke.clone(),
+                            },
+                        )
+                    })
+                } else if let Some((_, path, source)) = layer
+                    .bezier_paths
+                    .iter()
+                    .find(|(candidate, _, _)| *candidate == id)
+                {
+                    vector_path_near_point(path, x, y, tolerance_px).then(|| {
+                        (
+                            id,
+                            ink_model::VectorObject::BezierPath {
+                                path: path.clone(),
+                                source: source.clone(),
+                            },
+                        )
+                    })
+                } else {
+                    None
+                }
+            };
+            let Some((object_id, object)) = object else {
+                continue;
+            };
+            let hit = match object {
+                ink_model::VectorObject::LegacyInk { stroke } => {
+                    ink_vector::hit_test_legacy_stroke(&stroke, x, y, tolerance_px)
+                }
+                ink_model::VectorObject::BezierPath { path, .. } => {
+                    ink_vector::hit_test_bezier_path(&path, x, y, tolerance_px)
+                }
+            }
+            .map_err(|error| {
+                EngineError::InvalidCommand(format!("vector hit-test failed: {error:?}"))
+            })?;
+            if hit {
+                return Ok(Some(object_id));
+            }
+        }
+        if object_count > MAX_VECTOR_HIT_TEST_OBJECTS {
+            return Err(EngineError::InvalidCommand(
+                "vector hit-test exceeded its 4,096-object scan limit".into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Capture one visible, editable legacy vector stroke for an off-lock
+    /// recognition or fitting preview. It clones only the selected legacy
+    /// stroke so geometry work can run after this lock is released.
+    pub fn vector_stroke_for_candidate(
+        &self,
+        layer_id: LayerId,
+        stroke_id: ink_model::StrokeId,
+    ) -> Result<(u64, VectorStroke), EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let layer = state
+            .layers
+            .get(&layer_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer.layer.kind != LayerKind::VectorInk {
+            return Err(EngineError::InvalidCommand(
+                "vector candidates require a vector-ink layer".into(),
+            ));
+        }
+        let mut ancestor = Some(layer_id);
+        while let Some(id) = ancestor {
+            let current = state.layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+            if !current.layer.visible || current.layer.locked {
+                return Err(EngineError::InvalidCommand(
+                    "vector candidate target is hidden or locked".into(),
+                ));
+            }
+            ancestor = current.layer.parent;
+        }
+        let (_, stroke) = layer
+            .vectors
+            .iter()
+            .find(|(candidate_id, _)| *candidate_id == stroke_id)
+            .ok_or_else(|| {
+                EngineError::InvalidCommand(
+                    "selected object is not an editable legacy vector stroke".into(),
+                )
+            })?;
+        if !layer.vector_order.contains(&stroke_id) {
+            return Err(EngineError::InvalidCommand(
+                "vector order is inconsistent".into(),
+            ));
+        }
+        Ok((state.revision, stroke.clone()))
+    }
+
+    /// Capture the exact sampled source of a converted path for one-step
+    /// restoration. The revision is checked again by the applying command.
+    pub fn vector_source_for_restore(
+        &self,
+        layer_id: LayerId,
+        object_id: ink_model::StrokeId,
+    ) -> Result<(u64, VectorStroke), EngineError> {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let layer = state
+            .layers
+            .get(&layer_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer.layer.kind != LayerKind::VectorInk {
+            return Err(EngineError::InvalidCommand(
+                "vector restoration requires a vector-ink layer".into(),
+            ));
+        }
+        let mut ancestor = Some(layer_id);
+        while let Some(id) = ancestor {
+            let current = state.layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+            if !current.layer.visible || current.layer.locked {
+                return Err(EngineError::InvalidCommand(
+                    "vector restoration target is hidden or locked".into(),
+                ));
+            }
+            ancestor = current.layer.parent;
+        }
+        let (_, _, archive) = layer
+            .bezier_paths
+            .iter()
+            .find(|(id, _, _)| *id == object_id)
+            .ok_or_else(|| EngineError::InvalidCommand("editable path does not exist".into()))?;
+        let source = archive.as_ref().ok_or_else(|| {
+            EngineError::InvalidCommand("this path has no recoverable original ink".into())
+        })?;
+        Ok((state.revision, source.legacy.clone()))
+    }
+
+    /// Capture one editable path and its archive for off-lock path-edit
+    /// candidate work.
+    pub fn vector_path_for_candidate(
+        &self,
+        layer_id: LayerId,
+        object_id: ink_model::StrokeId,
+    ) -> Result<
+        (
+            u64,
+            ink_model::BezierPath,
+            Option<ink_model::VectorSourceArchive>,
+        ),
+        EngineError,
+    > {
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let layer = state
+            .layers
+            .get(&layer_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer.layer.kind != LayerKind::VectorInk {
+            return Err(EngineError::InvalidCommand(
+                "path editing requires a vector-ink layer".into(),
+            ));
+        }
+        let mut ancestor = Some(layer_id);
+        while let Some(id) = ancestor {
+            let current = state.layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+            if !current.layer.visible || current.layer.locked {
+                return Err(EngineError::InvalidCommand(
+                    "path edit target is hidden or locked".into(),
+                ));
+            }
+            ancestor = current.layer.parent;
+        }
+        let (_, path, source) = layer
+            .bezier_paths
+            .iter()
+            .find(|(id, _, _)| *id == object_id)
+            .ok_or_else(|| EngineError::InvalidCommand("editable path does not exist".into()))?;
+        Ok((state.revision, path.clone(), source.clone()))
+    }
+
+    /// Capture an editable path and allocate collision-free IDs for one
+    /// bounded repeat operation. Geometry work happens after this lock drops;
+    /// callers must apply the resulting patch against the returned revision.
+    pub fn vector_path_for_repeat(
+        &self,
+        layer_id: LayerId,
+        object_id: ink_model::StrokeId,
+        copy_count: usize,
+    ) -> Result<(u64, ink_model::BezierPath, u32, Vec<ink_model::StrokeId>), EngineError> {
+        if copy_count == 0 || copy_count > ink_vector::MAX_REPEAT_OBJECTS {
+            return Err(EngineError::InvalidCommand(
+                "vector repeat count is outside the supported range".into(),
+            ));
+        }
+        self.flush_input()?;
+        let state = lock_recover(&self.state);
+        let layer = state
+            .layers
+            .get(&layer_id)
+            .ok_or(EngineError::InvalidLayer)?;
+        if layer.layer.kind != LayerKind::VectorInk {
+            return Err(EngineError::InvalidCommand(
+                "vector repeat requires a vector-ink layer".into(),
+            ));
+        }
+        let mut ancestor = Some(layer_id);
+        while let Some(id) = ancestor {
+            let current = state.layers.get(&id).ok_or(EngineError::InvalidLayer)?;
+            if !current.layer.visible || current.layer.locked {
+                return Err(EngineError::InvalidCommand(
+                    "vector repeat target is hidden or locked".into(),
+                ));
+            }
+            ancestor = current.layer.parent;
+        }
+        let (_, path, _) = layer
+            .bezier_paths
+            .iter()
+            .find(|(id, _, _)| *id == object_id)
+            .ok_or_else(|| {
+                EngineError::InvalidCommand("vector repeat requires a Bézier path".into())
+            })?;
+        let position = layer
+            .vector_order
+            .iter()
+            .position(|id| *id == object_id)
+            .ok_or_else(|| EngineError::InvalidCommand("vector order is inconsistent".into()))?;
+        let position = u32::try_from(position.saturating_add(1)).map_err(|_| {
+            EngineError::InvalidCommand("vector order exceeds the supported range".into())
+        })?;
+        let mut used = std::collections::HashSet::new();
+        used.try_reserve(layer.vector_order.len().saturating_add(copy_count))
+            .map_err(|_| EngineError::InvalidCommand("vector repeat IDs exceed memory".into()))?;
+        used.extend(layer.vector_order.iter().map(|id| id.0));
+        let mut next = layer
+            .vector_order
+            .iter()
+            .map(|id| id.0)
+            .max()
+            .and_then(|id| id.checked_add(1))
+            .unwrap_or(1);
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(copy_count)
+            .map_err(|_| EngineError::InvalidCommand("vector repeat IDs exceed memory".into()))?;
+        let attempts = layer.vector_order.len().saturating_add(copy_count);
+        for _ in 0..attempts {
+            if ids.len() == copy_count {
+                break;
+            }
+            if used.insert(next) {
+                ids.push(ink_model::StrokeId::from_u128(next));
+            }
+            next = next.checked_add(1).unwrap_or(1);
+        }
+        if ids.len() != copy_count {
+            return Err(EngineError::InvalidCommand(
+                "unable to allocate vector repeat object IDs".into(),
+            ));
+        }
+        Ok((state.revision, path.clone(), position, ids))
+    }
+
     /// Consume a high-frequency packet and rasterize confirmed samples.
     pub fn push_pointer_packet(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
         if bytes.len() > ink_input::MAX_PACKET_BYTES {
@@ -920,6 +1662,13 @@ fn apply_brush_draft_to_preset(
     validate_brush_draft_settings(settings)?;
     preset.stroke.spacing = settings.spacing;
     preset.stroke.smoothing = settings.smoothing;
+    preset
+        .set_path_stabilizer(
+            settings.pulled_string,
+            settings.stabilizer_distance_px,
+            settings.catch_up_on_end,
+        )
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
     let pressure_curve = ResponseCurve {
         points: decode_editor_curve(&settings.pressure_curve_points, settings.pressure_curve)?,
     };
@@ -958,7 +1707,19 @@ fn apply_brush_draft_to_preset(
             combine: CombineOp::Multiply,
         });
     }
-    match &mut preset.tip {
+    apply_brush_tip_settings(&mut preset.tip, settings);
+    apply_brush_paint_settings(&mut preset.paint, settings);
+    if let Some(grain) = &mut preset.grain {
+        grain.scale = settings.texture_scale;
+        grain.depth = settings.scatter;
+    }
+    preset
+        .validate()
+        .map_err(|error| EngineError::InvalidCommand(error.to_string()))
+}
+
+fn apply_brush_tip_settings(tip: &mut TipBehavior, settings: &BrushDraftSettings) {
+    match tip {
         TipBehavior::Stamp(tip) => {
             tip.diameter_px = settings.diameter_px;
             tip.editor_scatter = settings.scatter;
@@ -976,13 +1737,16 @@ fn apply_brush_draft_to_preset(
             tip.lag = (tip.lag + settings.smoothing * 0.25).clamp(0.0, 1.0);
         }
     }
-    match &mut preset.tip {
+    match tip {
         TipBehavior::Stamp(tip) => tip.hardness = settings.hardness,
         TipBehavior::Spray(tip) => tip.hardness = settings.hardness,
         TipBehavior::Ribbon(_) => {}
         TipBehavior::Bristle(tip) => tip.stiffness = settings.hardness,
     }
-    match &mut preset.paint {
+}
+
+fn apply_brush_paint_settings(paint: &mut PaintBehavior, settings: &BrushDraftSettings) {
+    match paint {
         PaintBehavior::Solid(paint) => {
             paint.opacity = settings.opacity;
             paint.flow = (1.0 - settings.wetness * 0.5).clamp(0.01, 1.0);
@@ -1007,13 +1771,6 @@ fn apply_brush_draft_to_preset(
             paint.granulation = ((settings.texture_scale - 0.01) / 63.99).clamp(0.0, 1.0);
         }
     }
-    if let Some(grain) = &mut preset.grain {
-        grain.scale = settings.texture_scale;
-        grain.depth = settings.scatter;
-    }
-    preset
-        .validate()
-        .map_err(|error| EngineError::InvalidCommand(error.to_string()))
 }
 
 pub(crate) fn set_brush_paint_color(paint: &mut PaintBehavior, color: ink_model::Rgba8) {

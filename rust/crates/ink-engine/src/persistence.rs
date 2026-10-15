@@ -21,14 +21,41 @@ pub(super) fn map_to_stored_state(layers: &BTreeMap<LayerId, LayerState>) -> Sto
                     bytes,
                 }),
         );
-        vectors.extend(state.vectors.iter().map(|(stroke, vector)| {
-            let bytes = serde_json::to_vec(vector).expect("validated vector stroke must serialize");
-            VectorRecord {
-                layer: state.layer.id,
-                stroke: stroke.0,
-                bytes,
+        let mut fallback_order = state
+            .vectors
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(state.bezier_paths.iter().map(|(id, _, _)| *id))
+            .collect::<Vec<_>>();
+        let order = if state.vector_order.len() == fallback_order.len() {
+            state.vector_order.clone()
+        } else {
+            std::mem::take(&mut fallback_order)
+        };
+        for id in &order {
+            if let Some((_, stroke)) = state.vectors.iter().find(|(candidate, _)| candidate == id) {
+                vectors.push(VectorRecord {
+                    layer: state.layer.id,
+                    stroke: id.0,
+                    bytes: serde_json::to_vec(stroke)
+                        .expect("validated legacy vector must serialize"),
+                });
+            } else if let Some((_, path, source)) = state
+                .bezier_paths
+                .iter()
+                .find(|(candidate, _, _)| candidate == id)
+            {
+                vectors.push(VectorRecord {
+                    layer: state.layer.id,
+                    stroke: id.0,
+                    bytes: serde_json::to_vec(&ink_model::VectorObject::BezierPath {
+                        path: path.clone(),
+                        source: source.clone(),
+                    })
+                    .expect("validated Bézier path must serialize"),
+                });
             }
-        }));
+        }
     }
     StoredState {
         layers: stored_layers,
@@ -58,6 +85,8 @@ pub(super) fn stored_to_map(
                 layer,
                 tiles: TileStore::default(),
                 vectors: Vec::new(),
+                bezier_paths: Vec::new(),
+                vector_order: Vec::new(),
             },
         );
         if previous.is_some() {
@@ -98,13 +127,35 @@ pub(super) fn stored_to_map(
                 "vector stroke references a non-vector layer".into(),
             ));
         }
-        let decoded: VectorStroke = serde_json::from_slice(&vector.bytes).map_err(|error| {
-            EngineError::InvalidCommand(format!("invalid vector stroke payload: {error}"))
-        })?;
-        validate_vector_stroke(&decoded, spec)?;
-        layer
-            .vectors
-            .push((ink_model::StrokeId::from_u128(vector.stroke), decoded));
+        let id = ink_model::StrokeId::from_u128(vector.stroke);
+        let object = if let Ok(object) =
+            serde_json::from_slice::<ink_model::VectorObject>(&vector.bytes)
+        {
+            object
+        } else {
+            let stroke: VectorStroke = serde_json::from_slice(&vector.bytes).map_err(|error| {
+                EngineError::InvalidCommand(format!("invalid vector stroke payload: {error}"))
+            })?;
+            ink_model::VectorObject::LegacyInk { stroke }
+        };
+        match object {
+            ink_model::VectorObject::LegacyInk { stroke } => {
+                validate_vector_stroke(&stroke, spec)?;
+                layer.vectors.push((id, stroke));
+            }
+            ink_model::VectorObject::BezierPath { path, source } => {
+                ink_model::validate_vector_object(
+                    &ink_model::VectorObject::BezierPath {
+                        path: path.clone(),
+                        source: source.clone(),
+                    },
+                    spec,
+                )
+                .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+                layer.bezier_paths.push((id, path, source));
+            }
+        }
+        layer.vector_order.push(id);
     }
     Ok(layers)
 }

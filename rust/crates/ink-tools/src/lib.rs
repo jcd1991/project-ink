@@ -10,6 +10,7 @@
 )]
 
 use ink_model::Rgba8;
+pub use ink_model::{VectorPoint, VectorStroke};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
@@ -563,6 +564,12 @@ impl Affine2D {
     }
 }
 
+impl ink_model::VectorAffineTransform for Affine2D {
+    fn apply_vector_point(self, point: (f32, f32)) -> (f32, f32) {
+        self.apply(point)
+    }
+}
+
 /// A bounded bilinear perspective transform for a selected quadrilateral.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PerspectiveTransform {
@@ -692,24 +699,24 @@ fn lerp_point(left: (f32, f32), right: (f32, f32), amount: f32) -> (f32, f32) {
     )
 }
 
-/// A pressure-aware editable vector-ink stroke.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VectorStroke {
-    pub points: Vec<VectorPoint>,
-    pub closed: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VectorPoint {
-    pub x: f32,
-    pub y: f32,
-    pub pressure: f32,
-    pub tilt: f32,
-}
-
-impl VectorStroke {
+/// Operations that preserve the sampled legacy stroke representation.
+pub trait VectorStrokeOperations {
     #[must_use]
-    pub fn simplify(&self, tolerance: f32) -> Self {
+    fn simplify(&self, tolerance: f32) -> Self
+    where
+        Self: Sized;
+    fn width_at(&self, index: usize, min_width: f32, max_width: f32) -> f32;
+    fn transform(&mut self, transform: Affine2D);
+    fn connect(&self, other: &Self, tolerance: f32) -> Option<Self>
+    where
+        Self: Sized;
+    fn erase_segment(&self, center: (f32, f32), radius: f32) -> Vec<Self>
+    where
+        Self: Sized;
+}
+
+impl VectorStrokeOperations for VectorStroke {
+    fn simplify(&self, tolerance: f32) -> Self {
         if self.points.len() < 3 || !tolerance.is_finite() || tolerance <= 0.0 {
             return self.clone();
         }
@@ -721,8 +728,7 @@ impl VectorStroke {
         }
     }
 
-    #[must_use]
-    pub fn width_at(&self, index: usize, min_width: f32, max_width: f32) -> f32 {
+    fn width_at(&self, index: usize, min_width: f32, max_width: f32) -> f32 {
         let pressure = self
             .points
             .get(index)
@@ -730,15 +736,14 @@ impl VectorStroke {
         min_width + (max_width - min_width) * pressure
     }
 
-    pub fn transform(&mut self, transform: Affine2D) {
+    fn transform(&mut self, transform: Affine2D) {
         for point in &mut self.points {
             (point.x, point.y) = transform.apply((point.x, point.y));
         }
     }
 
     /// Join two strokes when their endpoints are within the requested gap.
-    #[must_use]
-    pub fn connect(&self, other: &Self, tolerance: f32) -> Option<Self> {
+    fn connect(&self, other: &Self, tolerance: f32) -> Option<Self> {
         let first = self.points.last()?;
         let last = other.points.first()?;
         if (first.x - last.x).hypot(first.y - last.y) > tolerance.max(0.0) {
@@ -754,8 +759,7 @@ impl VectorStroke {
 
     /// Erase a circular segment from vector ink and return the surviving
     /// pieces. Each piece remains editable centerline data.
-    #[must_use]
-    pub fn erase_segment(&self, center: (f32, f32), radius: f32) -> Vec<Self> {
+    fn erase_segment(&self, center: (f32, f32), radius: f32) -> Vec<Self> {
         // Invalid geometry should never turn into an accidental destructive
         // erase. Keep the original stroke intact and let the caller decide
         // how to report malformed input.
@@ -975,6 +979,21 @@ pub struct TimeLapseStroke {
     pub revision: u64,
     pub layer: u128,
     pub brush: u128,
+    /// Source preset revision used to evaluate this stroke; zero denotes a legacy brush.
+    #[serde(default)]
+    pub brush_revision: u32,
+    /// Brush evaluator semantics captured at stroke start; zero denotes a legacy brush.
+    #[serde(default)]
+    pub brush_semantics: u32,
+    /// Whether the captured path used pulled-string conditioning.
+    #[serde(default)]
+    pub pulled_string: bool,
+    /// Pulled-string distance in document pixels, or zero for legacy paths.
+    #[serde(default)]
+    pub stabilizer_distance_px: f32,
+    /// Whether the captured stroke emitted its bounded terminal catch-up sample.
+    #[serde(default)]
+    pub catch_up_on_end: bool,
     pub samples: Vec<TimeLapseSample>,
 }
 
@@ -985,7 +1004,7 @@ pub struct TimeLapseRecording {
 }
 
 impl TimeLapseRecording {
-    pub const FORMAT_VERSION: u32 = 1;
+    pub const FORMAT_VERSION: u32 = 2;
     pub const MAX_STROKES: usize = 100_000;
     pub const MAX_SAMPLES: usize = 2_000_000;
 
@@ -998,6 +1017,9 @@ impl TimeLapseRecording {
     }
 
     pub fn push(&mut self, stroke: TimeLapseStroke) -> Result<(), ToolError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(ToolError::UnsupportedFormat);
+        }
         let samples = self
             .strokes
             .iter()
@@ -1014,6 +1036,20 @@ impl TimeLapseRecording {
             .any(|sample| !sample.x.is_finite() || !sample.y.is_finite())
         {
             return Err(ToolError::InvalidDimensions);
+        }
+        let stabilizer_valid = stroke.stabilizer_distance_px.is_finite()
+            && (0.0..=100.0).contains(&stroke.stabilizer_distance_px);
+        let brush_metadata_valid = match stroke.brush_semantics {
+            0 | 2000 => {
+                !stroke.pulled_string
+                    && stroke.stabilizer_distance_px.to_bits() == 0.0_f32.to_bits()
+                    && !stroke.catch_up_on_end
+            }
+            2001 => stroke.brush_revision > 0 && stroke.pulled_string,
+            _ => false,
+        };
+        if !stabilizer_valid || !brush_metadata_valid {
+            return Err(ToolError::InvalidStrokeMetadata);
         }
         self.strokes.push(stroke);
         Ok(())
@@ -1065,6 +1101,8 @@ impl Ruler {
 pub enum ToolError {
     InvalidDimensions,
     InvalidPixelLength,
+    InvalidStrokeMetadata,
+    UnsupportedFormat,
 }
 
 impl std::fmt::Display for ToolError {
@@ -1072,6 +1110,8 @@ impl std::fmt::Display for ToolError {
         f.write_str(match self {
             Self::InvalidDimensions => "tool dimensions are invalid",
             Self::InvalidPixelLength => "pixel buffer does not match tool dimensions",
+            Self::InvalidStrokeMetadata => "time-lapse stroke metadata is invalid",
+            Self::UnsupportedFormat => "time-lapse format version is unsupported",
         })
     }
 }
@@ -1426,6 +1466,11 @@ mod tests {
                 revision: 1,
                 layer: 1,
                 brush: 2,
+                brush_revision: 3,
+                brush_semantics: 2001,
+                pulled_string: true,
+                stabilizer_distance_px: 12.5,
+                catch_up_on_end: true,
                 samples: vec![TimeLapseSample {
                     x: 0.0,
                     y: 0.0,
@@ -1437,7 +1482,78 @@ mod tests {
                 }],
             })
             .expect("record");
-        assert!(!recording.to_json().expect("json").is_empty());
+        let bytes = recording.to_json().expect("json");
+        assert!(!bytes.is_empty());
+        let decoded: TimeLapseRecording = serde_json::from_slice(&bytes).expect("decode v2");
+        assert_eq!(decoded.format_version, 2);
+        assert_eq!(decoded.strokes[0].brush_revision, 3);
+        assert_eq!(decoded.strokes[0].brush_semantics, 2001);
+        assert!(decoded.strokes[0].pulled_string);
+        assert_eq!(
+            decoded.strokes[0].stabilizer_distance_px.to_bits(),
+            12.5_f32.to_bits()
+        );
+        assert!(decoded.strokes[0].catch_up_on_end);
+    }
+
+    #[test]
+    fn time_lapse_v1_strokes_default_new_brush_metadata() {
+        let legacy =
+            r#"{"format_version":1,"strokes":[{"revision":1,"layer":1,"brush":2,"samples":[]}]}"#;
+        let decoded: TimeLapseRecording = serde_json::from_str(legacy).expect("decode v1");
+        assert_eq!(decoded.format_version, 1);
+        assert_eq!(decoded.strokes[0].brush_revision, 0);
+        assert_eq!(decoded.strokes[0].brush_semantics, 0);
+        assert!(!decoded.strokes[0].pulled_string);
+        assert_eq!(
+            decoded.strokes[0].stabilizer_distance_px.to_bits(),
+            0.0_f32.to_bits()
+        );
+        assert!(!decoded.strokes[0].catch_up_on_end);
+    }
+
+    #[test]
+    fn time_lapse_rejects_unsupported_or_inconsistent_stroke_metadata() {
+        let mut recording = TimeLapseRecording::new();
+        let mut stroke = TimeLapseStroke {
+            revision: 1,
+            layer: 1,
+            brush: 2,
+            brush_revision: 1,
+            brush_semantics: 2001,
+            pulled_string: true,
+            stabilizer_distance_px: 10.0,
+            catch_up_on_end: true,
+            samples: Vec::new(),
+        };
+        stroke.brush_semantics = 9999;
+        assert_eq!(
+            recording.push(stroke.clone()),
+            Err(ToolError::InvalidStrokeMetadata)
+        );
+
+        stroke.brush_semantics = 2001;
+        stroke.stabilizer_distance_px = f32::NAN;
+        assert_eq!(
+            recording.push(stroke),
+            Err(ToolError::InvalidStrokeMetadata)
+        );
+
+        recording.format_version = 1;
+        assert_eq!(
+            recording.push(TimeLapseStroke {
+                revision: 1,
+                layer: 1,
+                brush: 2,
+                brush_revision: 0,
+                brush_semantics: 0,
+                pulled_string: false,
+                stabilizer_distance_px: 0.0,
+                catch_up_on_end: false,
+                samples: Vec::new(),
+            }),
+            Err(ToolError::UnsupportedFormat)
+        );
     }
 
     #[test]

@@ -12,9 +12,10 @@
     clippy::too_many_lines
 )]
 
-use ink_command::decode_command;
+use ink_command::{EditorCommand, VectorPatchEdit, decode_command};
 use ink_model::{
     ColorSpace, DocumentId, DocumentSpec, Layer, LayerBlendMode, LayerId, LayerKind, Rgba8,
+    VectorObject, validate_vector_object,
 };
 use ink_raster::{TILE_SIZE, TileCoord};
 use rusqlite::{Connection, OpenFlags, params};
@@ -29,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Native extension for Project Ink documents.
 pub const EXTENSION: &str = "inkproj";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 8;
 const MIN_READER_VERSION: &str = "0.1.0";
 const TILE_BYTES: usize = (TILE_SIZE * TILE_SIZE * 4) as usize;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -316,6 +317,8 @@ struct Manifest {
     revision: u64,
     #[serde(default)]
     layer_panel_state: LayerPanelState,
+    #[serde(default)]
+    vector_semantics: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -879,6 +882,19 @@ fn load_project_contents_with_budget(
     if manifest.format_version == 0 || manifest.format_version > FORMAT_VERSION {
         return Err(StorageError::UnsupportedFormat(manifest.format_version));
     }
+    if manifest.format_version >= 8 && manifest.vector_semantics != Some(1) {
+        return Err(StorageError::InvalidManifest(
+            "format 8 requires vector_semantics 1".into(),
+        ));
+    }
+    if manifest
+        .vector_semantics
+        .is_some_and(|semantics| semantics != 1)
+    {
+        return Err(StorageError::InvalidManifest(
+            "unsupported vector semantics".into(),
+        ));
+    }
     if manifest.color_space != "sRGB" {
         return Err(StorageError::InvalidManifest(
             "v1 documents must use the sRGB color space".into(),
@@ -1236,6 +1252,11 @@ fn load_project_contents_with_budget(
         });
     }
     let vectors_relative = Path::new("vectors.json.zst");
+    if manifest.format_version >= 8 && !source.join(vectors_relative).is_file() {
+        return Err(StorageError::InvalidManifest(
+            "format 8 vector sidecar is missing".into(),
+        ));
+    }
     let vectors = if source.join(vectors_relative).is_file() {
         let encoded = read_project_file_bounded(
             source,
@@ -1250,7 +1271,11 @@ fn load_project_contents_with_budget(
             project_budget,
         )?;
         let vectors: Vec<VectorRecord> = serde_json::from_slice(&decoded)?;
-        validate_vectors(&vectors, &layer_ids)?;
+        if manifest.format_version >= 8 {
+            validate_vector_records(&vectors, &layers, spec, Some(true))?;
+        } else {
+            validate_vector_records(&vectors, &layers, spec, Some(false))?;
+        }
         vectors
     } else {
         Vec::new()
@@ -1275,9 +1300,10 @@ fn load_project_contents_with_budget(
             return Err(StorageError::LimitExceeded("command journal payload size"));
         }
         project_budget.retain(payload.len().saturating_add(std::mem::size_of::<Vec<u8>>()))?;
-        decode_command(&payload).map_err(|error| {
+        let command = decode_command(&payload).map_err(|error| {
             StorageError::InvalidManifest(format!("invalid command journal: {error}"))
         })?;
+        validate_journal_vector_command(&command, &layers, spec)?;
         journal.push(payload);
     }
     let history_relative = Path::new("history.json.zst");
@@ -1520,6 +1546,7 @@ fn write_snapshot(
         minimum_reader_version: MIN_READER_VERSION.into(),
         revision: snapshot.revision,
         layer_panel_state: snapshot.layer_panel_state.clone(),
+        vector_semantics: Some(1),
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     if manifest_bytes.len() > usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX) {
@@ -1629,9 +1656,17 @@ fn write_snapshot(
     #[cfg(test)]
     maybe_crash(CrashPoint::Sqlite);
     let history_window = bounded_history_window(&snapshot.history, history_limit)?;
+    let normalized_undo = snapshot.history.undo[history_window.undo_start..]
+        .iter()
+        .map(normalize_stored_vectors)
+        .collect::<Result<Vec<_>, _>>()?;
+    let normalized_redo = snapshot.history.redo[history_window.redo_start..]
+        .iter()
+        .map(normalize_stored_vectors)
+        .collect::<Result<Vec<_>, _>>()?;
     let history_json = serde_json::to_vec(&HistorySnapshotView {
-        undo: &snapshot.history.undo[history_window.undo_start..],
-        redo: &snapshot.history.redo[history_window.redo_start..],
+        undo: &normalized_undo,
+        redo: &normalized_redo,
         history_truncated: snapshot.history.truncated_on_load
             || history_window.undo_start > 0
             || history_window.redo_start > 0,
@@ -1650,7 +1685,8 @@ fn write_snapshot(
     maybe_fail(fail_after, SaveStage::History)?;
     #[cfg(test)]
     maybe_crash(CrashPoint::History);
-    let vector_json = serde_json::to_vec(&snapshot.vectors)?;
+    let tagged_vectors = tagged_vectors_for_storage(&snapshot.vectors)?;
+    let vector_json = serde_json::to_vec(&tagged_vectors)?;
     if u64::try_from(vector_json.len()).unwrap_or(u64::MAX) > MAX_VECTOR_LIBRARY_BYTES {
         return Err(StorageError::LimitExceeded("vector library"));
     }
@@ -1759,6 +1795,8 @@ fn validate_snapshot_with_history_limit(
         &snapshot.vectors,
         snapshot.spec,
     )?;
+    let tagged_vectors = tagged_vectors_for_storage(&snapshot.vectors)?;
+    validate_vector_records(&tagged_vectors, &snapshot.layers, snapshot.spec, Some(true))?;
     let layer_ids = snapshot
         .layers
         .iter()
@@ -1806,9 +1844,10 @@ fn validate_snapshot_with_history_limit(
         if payload.len() > MAX_JOURNAL_PAYLOAD_BYTES {
             return Err(StorageError::LimitExceeded("command journal payload size"));
         }
-        decode_command(payload).map_err(|error| {
+        let command = decode_command(payload).map_err(|error| {
             StorageError::InvalidManifest(format!("invalid command journal: {error}"))
         })?;
+        validate_journal_vector_command(&command, &snapshot.layers, snapshot.spec)?;
     }
     if snapshot.brushes.len() > MAX_BRUSHES
         || snapshot
@@ -2009,6 +2048,7 @@ fn validate_history(history: &HistorySnapshot, spec: DocumentSpec) -> Result<(),
     let mut history_tile_bytes = 0usize;
     for state in history.undo.iter().chain(&history.redo) {
         validate_stored_state(&state.layers, &state.tiles, &state.vectors, spec)?;
+        validate_vector_records(&state.vectors, &state.layers, spec, None)?;
         history_tile_bytes = history_tile_bytes
             .checked_add(state.tiles.len().saturating_mul(TILE_BYTES))
             .ok_or(StorageError::LimitExceeded("undo history tile bytes"))?;
@@ -2043,13 +2083,144 @@ fn validate_vectors(
             return Err(StorageError::LimitExceeded("vector stroke payload"));
         }
         serde_json::from_slice::<serde_json::Value>(&vector.bytes).map_err(|_| {
-            StorageError::InvalidManifest("vector stroke payload is not valid JSON".into())
+            StorageError::InvalidManifest("vector payload is not valid JSON".into())
         })?;
         total = total
             .checked_add(u64::try_from(vector.bytes.len()).unwrap_or(u64::MAX))
             .ok_or(StorageError::LimitExceeded("vector library"))?;
         if total > MAX_VECTOR_LIBRARY_BYTES {
             return Err(StorageError::LimitExceeded("vector library"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_journal_vector_command(
+    command: &EditorCommand,
+    layers: &[Layer],
+    spec: DocumentSpec,
+) -> Result<(), StorageError> {
+    let EditorCommand::ApplyVectorPatch { layer, edits } = command else {
+        return Ok(());
+    };
+    if edits.is_empty() || edits.len() > 4_096 {
+        return Err(StorageError::InvalidManifest(
+            "vector patch edit count is outside limits".into(),
+        ));
+    }
+    if !layers
+        .iter()
+        .any(|candidate| candidate.id == *layer && candidate.kind == LayerKind::VectorInk)
+    {
+        return Err(StorageError::InvalidManifest(
+            "vector patch references a missing or non-vector layer".into(),
+        ));
+    }
+    let mut ids = HashSet::with_capacity(edits.len());
+    for edit in edits {
+        let (id, object) = match edit {
+            VectorPatchEdit::Insert {
+                object_id,
+                position,
+                object,
+            } => {
+                if *position as usize > MAX_VECTORS {
+                    return Err(StorageError::LimitExceeded("vector patch position"));
+                }
+                (*object_id, Some(object))
+            }
+            VectorPatchEdit::Replace { object_id, object } => (*object_id, Some(object)),
+            VectorPatchEdit::Remove { object_id } => (*object_id, None),
+        };
+        if id.0 == 0 || !ids.insert(id) {
+            return Err(StorageError::InvalidManifest(
+                "vector patch IDs must be nonzero and unique".into(),
+            ));
+        }
+        if let Some(object) = object {
+            validate_vector_object(object, spec)
+                .map_err(|error| StorageError::InvalidManifest(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn tagged_vectors_for_storage(vectors: &[VectorRecord]) -> Result<Vec<VectorRecord>, StorageError> {
+    let mut tagged = Vec::new();
+    tagged
+        .try_reserve(vectors.len())
+        .map_err(|_| StorageError::LimitExceeded("vector object library"))?;
+    for record in vectors {
+        let object = if let Ok(object) = serde_json::from_slice::<VectorObject>(&record.bytes) {
+            object
+        } else {
+            let stroke: ink_model::VectorStroke = serde_json::from_slice(&record.bytes)
+                .map_err(|_| StorageError::InvalidManifest("vector payload is invalid".into()))?;
+            VectorObject::LegacyInk { stroke }
+        };
+        tagged.push(VectorRecord {
+            layer: record.layer,
+            stroke: record.stroke,
+            bytes: serde_json::to_vec(&object)?,
+        });
+    }
+    Ok(tagged)
+}
+
+fn normalize_stored_vectors(state: &StoredState) -> Result<StoredState, StorageError> {
+    Ok(StoredState {
+        layers: state.layers.clone(),
+        tiles: state.tiles.clone(),
+        vectors: tagged_vectors_for_storage(&state.vectors)?,
+    })
+}
+
+fn validate_vector_records(
+    vectors: &[VectorRecord],
+    layers: &[Layer],
+    spec: DocumentSpec,
+    tagged_only: Option<bool>,
+) -> Result<(), StorageError> {
+    let layer_ids = layers.iter().map(|layer| layer.id).collect::<HashSet<_>>();
+    let vector_layer_ids = layers
+        .iter()
+        .filter(|layer| layer.kind == LayerKind::VectorInk)
+        .map(|layer| layer.id)
+        .collect::<HashSet<_>>();
+    validate_vectors(vectors, &layer_ids)?;
+    for record in vectors {
+        if !vector_layer_ids.contains(&record.layer) {
+            return Err(StorageError::InvalidManifest(
+                "vector record references a non-vector layer".into(),
+            ));
+        }
+        let object = serde_json::from_slice::<VectorObject>(&record.bytes);
+        match (tagged_only, object) {
+            (Some(true) | None, Ok(object)) => {
+                validate_vector_object(&object, spec)
+                    .map_err(|error| StorageError::InvalidManifest(error.to_string()))?;
+            }
+            (Some(true), Err(_)) => {
+                return Err(StorageError::InvalidManifest(
+                    "format 8 vector payload is not tagged".into(),
+                ));
+            }
+            (Some(false), _) => {
+                let stroke: ink_model::VectorStroke = serde_json::from_slice(&record.bytes)
+                    .map_err(|_| {
+                        StorageError::InvalidManifest("legacy vector payload is invalid".into())
+                    })?;
+                validate_vector_object(&VectorObject::LegacyInk { stroke }, spec)
+                    .map_err(|error| StorageError::InvalidManifest(error.to_string()))?;
+            }
+            (None, Err(_)) => {
+                let stroke: ink_model::VectorStroke = serde_json::from_slice(&record.bytes)
+                    .map_err(|_| {
+                        StorageError::InvalidManifest("legacy vector payload is invalid".into())
+                    })?;
+                validate_vector_object(&VectorObject::LegacyInk { stroke }, spec)
+                    .map_err(|error| StorageError::InvalidManifest(error.to_string()))?;
+            }
         }
     }
     Ok(())
@@ -2492,6 +2663,7 @@ mod tests {
     use super::*;
     use ink_command::{EditorCommand, encode_command};
     use ink_model::ColorSpace;
+    use proptest::prelude::*;
     use std::process::Command;
 
     #[test]
@@ -2766,7 +2938,7 @@ mod tests {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("read v6 manifest"))
                 .expect("parse v6 manifest");
-        assert_eq!(manifest["format_version"], serde_json::json!(6));
+        assert_eq!(manifest["format_version"], serde_json::json!(8));
         manifest["format_version"] = serde_json::json!(5);
         fs::write(
             &manifest_path,
@@ -2919,16 +3091,39 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("temp root");
-        let destination = root.join("adjustment.inkproj");
         let mut expected = snapshot();
         expected.layers[0].kind = LayerKind::Adjustment;
-        expected.layers[0].adjustment = Some(ink_model::LayerAdjustment::BrightnessContrast {
-            brightness: -35,
-            contrast: 80,
-        });
-        save_project(&destination, &expected).expect("save adjustment layer");
-        let actual = load_project(&destination).expect("load adjustment layer");
-        assert_eq!(actual, expected);
+        let adjustments = [
+            ink_model::LayerAdjustment::BrightnessContrast {
+                brightness: -35,
+                contrast: 80,
+            },
+            ink_model::LayerAdjustment::Levels {
+                input_black: 4,
+                input_white: 247,
+                gamma_hundredths: 125,
+                output_black: 3,
+                output_white: 250,
+            },
+            ink_model::LayerAdjustment::Curves {
+                master: ink_model::AdjustmentCurve::identity(),
+                red: ink_model::AdjustmentCurve::identity(),
+                green: ink_model::AdjustmentCurve::identity(),
+                blue: ink_model::AdjustmentCurve::identity(),
+            },
+            ink_model::LayerAdjustment::HueSaturation {
+                hue_degrees: -45,
+                saturation: 22,
+                lightness: -12,
+            },
+        ];
+        for (index, adjustment) in adjustments.into_iter().enumerate() {
+            expected.layers[0].adjustment = Some(adjustment);
+            let destination = root.join(format!("adjustment-{index}.inkproj"));
+            save_project(&destination, &expected).expect("save adjustment layer");
+            let actual = load_project(&destination).expect("load adjustment layer");
+            assert_eq!(actual, expected);
+        }
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -2997,6 +3192,108 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup");
     }
 
+    fn generated_bezier_object(x: i16, y: i16, alpha: u8) -> VectorObject {
+        let x = f64::from(x);
+        let y = f64::from(y);
+        VectorObject::BezierPath {
+            path: ink_model::BezierPath {
+                subpaths: vec![ink_model::BezierSubpath {
+                    anchors: vec![
+                        ink_model::BezierAnchor {
+                            x,
+                            y,
+                            incoming: [x, y],
+                            outgoing: [x, y],
+                            kind: ink_model::AnchorKind::Corner,
+                        },
+                        ink_model::BezierAnchor {
+                            x: x + 24.0,
+                            y,
+                            incoming: [x + 24.0, y],
+                            outgoing: [x + 24.0, y],
+                            kind: ink_model::AnchorKind::Smooth,
+                        },
+                        ink_model::BezierAnchor {
+                            x: x + 12.0,
+                            y: y + 24.0,
+                            incoming: [x + 12.0, y + 24.0],
+                            outgoing: [x + 12.0, y + 24.0],
+                            kind: ink_model::AnchorKind::Corner,
+                        },
+                    ],
+                    closed: true,
+                }],
+                style: ink_model::VectorStyle {
+                    fill: Some(Rgba8 {
+                        r: 12,
+                        g: 34,
+                        b: 56,
+                        a: alpha,
+                    }),
+                    stroke: None,
+                    stroke_width: 0.0,
+                    cap: ink_model::StrokeCap::Round,
+                    join: ink_model::StrokeJoin::Round,
+                    miter_limit: 4.0,
+                    fill_rule: ink_model::FillRule::EvenOdd,
+                },
+            },
+            source: None,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn generated_format_8_vector_records_round_trip(
+            x in -500_i16..500,
+            y in -500_i16..500,
+            alpha in any::<u8>(),
+            second_x in -500_i16..500,
+        ) {
+            static CASE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let case_id = CASE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "project-ink-proptest-v8-{}-{case_id}", std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).expect("create property-test directory");
+            let destination = root.join("vectors.inkproj");
+            let mut expected = snapshot();
+            let layer = Layer::new(LayerId::from_u128(2), LayerKind::VectorInk, "Vectors");
+            expected.layers.push(layer.clone());
+            expected.vectors = vec![
+                VectorRecord {
+                    layer: layer.id,
+                    stroke: 9,
+                    bytes: serde_json::to_vec(&generated_bezier_object(x, y, alpha))
+                        .expect("serialize first generated object"),
+                },
+                VectorRecord {
+                    layer: layer.id,
+                    stroke: 3,
+                    bytes: serde_json::to_vec(&generated_bezier_object(second_x, y, 255 - alpha))
+                        .expect("serialize second generated object"),
+                },
+            ];
+            save_project(&destination, &expected).expect("save generated format-8 project");
+            let actual = load_project(&destination).expect("load generated format-8 project");
+            prop_assert_eq!(&actual.vectors, &expected.vectors);
+            prop_assert_eq!(
+                actual.vectors.iter().map(|record| record.stroke).collect::<Vec<_>>(),
+                vec![9, 3],
+                "record ordering is preserved"
+            );
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(destination.join("manifest.json")).expect("read manifest")
+            ).expect("parse manifest");
+            prop_assert_eq!(manifest["format_version"].as_u64(), Some(8));
+            prop_assert_eq!(manifest["vector_semantics"].as_u64(), Some(1));
+            fs::remove_dir_all(root).expect("remove property-test directory");
+        }
+    }
+
     #[test]
     fn vector_sidecar_round_trip_is_bounded_and_lossless() {
         let root = std::env::temp_dir().join(format!(
@@ -3017,8 +3314,59 @@ mod tests {
         });
         save_project(&destination, &expected).expect("save");
         let actual = load_project(&destination).expect("load");
-        assert_eq!(actual.vectors, expected.vectors);
+        assert_eq!(actual.vectors.len(), 1);
+        assert_eq!(actual.vectors[0].stroke, 3);
+        assert!(matches!(
+            serde_json::from_slice::<VectorObject>(&actual.vectors[0].bytes)
+                .expect("decode tagged object"),
+            VectorObject::LegacyInk { stroke }
+                if stroke.points[0].x.to_bits() == 1.0_f32.to_bits()
+                    && stroke.points[0].y.to_bits() == 2.0_f32.to_bits()
+        ));
         assert!(destination.join("vectors.json.zst").is_file());
+
+        let manifest_path = destination.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read v8 manifest"))
+                .expect("parse v8 manifest");
+        manifest["format_version"] = serde_json::json!(7);
+        manifest
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("vector_semantics");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode v7 manifest"),
+        )
+        .expect("write v7 manifest");
+        let encoded = fs::read(destination.join("vectors.json.zst")).expect("read vector data");
+        let decoded = zstd::stream::decode_all(encoded.as_slice()).expect("decode v8 vectors");
+        let mut records: Vec<VectorRecord> = serde_json::from_slice(&decoded).expect("records");
+        let object: VectorObject =
+            serde_json::from_slice(&records[0].bytes).expect("tagged object");
+        let VectorObject::LegacyInk { stroke } = object else {
+            panic!("expected legacy ink record");
+        };
+        records[0].bytes = serde_json::to_vec(&stroke).expect("encode legacy payload");
+        let old_json = serde_json::to_vec(&records).expect("encode v7 vector records");
+        let old_zstd =
+            zstd::stream::encode_all(old_json.as_slice(), 3).expect("compress v7 vectors");
+        fs::write(destination.join("vectors.json.zst"), old_zstd).expect("write v7 vectors");
+        let source_before_open = project_file_bytes(&destination);
+        let legacy = load_project(&destination).expect("read v7 vectors");
+        assert_eq!(legacy.vectors.len(), 1);
+        assert!(
+            serde_json::from_slice::<ink_model::VectorStroke>(&legacy.vectors[0].bytes).is_ok()
+        );
+        assert_eq!(project_file_bytes(&destination), source_before_open);
+
+        let migrated_path = root.join("migrated.inkproj");
+        save_project(&migrated_path, &legacy).expect("write migrated v8 project");
+        let migrated = load_project(&migrated_path).expect("read migrated v8 project");
+        assert!(matches!(
+            serde_json::from_slice::<VectorObject>(&migrated.vectors[0].bytes),
+            Ok(VectorObject::LegacyInk { .. })
+        ));
         fs::remove_dir_all(root).expect("cleanup");
     }
 

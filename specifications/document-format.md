@@ -1,4 +1,4 @@
-# `.inkproj` storage format (root v6)
+# `.inkproj` storage format (root v8)
 
 The native document is a directory/archive containing `manifest.json`,
 `document.sqlite`, compressed raster tiles under `tiles/<layer>/<x>_<y>.tile.zst`,
@@ -11,8 +11,19 @@ multi-page writer/loader. A studio project stores each page beneath
 `pages/<page_id>/` using the same SQLite, tile, vector, history, and recovery
 schema as a standalone document. The bridge exposes one
 `StudioProjectHandle`, which owns the comic metadata and all page workers.
-Standalone v1/v2/v3/v4/v5 documents remain readable; saves write v6. Readers reject
+Standalone formats 2 through 7 remain readable; saves write v8. Readers reject
 newer format versions instead of dropping fields they do not understand.
+
+Root v8 adds `vector_semantics: 1` to the manifest. Its `vectors.json.zst`
+records are tagged `ink_model::VectorObject` payloads (`LegacyInk` or
+`BezierPath`) with stable object IDs in the existing record-ID field. Record
+sequence within each layer is the explicit stacking order and is retained by
+checkpoints and history. Formats 2–7 continue to decode vector payloads as
+legacy sampled strokes; the v8 writer wraps those strokes as `LegacyInk` when
+migrating on save. Unknown semantics, unknown object kinds, invalid geometry,
+and malformed source archives are rejected before engine binding. Loading an
+older project is read-only; only an explicit save writes the migrated v8
+format. Comic metadata and rendering remain on comic format 3.
 
 App startup recovery selects the loader from the root manifest: standalone
 documents use the document loader, while Studio packages use the complete
@@ -34,6 +45,20 @@ journals. Older manifests default to no stored primary target or collapsed
 groups. V6 readers validate every ID against the saved layer tree before
 opening, and older readers reject V6 rather than silently discarding it.
 
+Root v7 records the comic lettering renderer contract through comic format v3,
+including `render_semantics: 1`. Comic text remains editable source data;
+shaped glyph outlines are derived at render and export time. The renderer uses
+bundled Noto Sans/Serif CJK JP fonts and does not consult system fonts. The
+minimum reader version for root v7 is 0.1.0, matching the current alpha package
+version. Raise it together with a product-version bump.
+
+Root v7 layer adjustment payloads retain the existing Brightness/Contrast
+variant and add Levels, Curves, and Hue/Saturation. Curves store four fixed
+16-point channels with a canonical zero representation for unused points.
+Unsupported adjustment values are rejected before document mutation. Brush
+presets may use format 3 only with evaluator semantics 2001 for pulled-string
+stabilization; existing format-2 presets remain on semantics 2000.
+
 `document.sqlite` contains the layer tree, sparse tile index, checkpoint
 revision, and append-only v1 command journal. Journal payloads are versioned
 binary commands. The engine can decode and replay the journal against a fresh
@@ -42,8 +67,19 @@ reconstruct raster pixels: high-frequency pointer packets are intentionally
 not journaled, so checkpoint tiles remain the source of pixel truth.
 Explicit raster commands such as panel-frame application are journaled and do
 replay their bounded pixel edits; this does not change the pointer-packet rule.
+Command tag 32 retains subtype 0 for Brightness/Contrast. Subtypes 1, 2, and 3
+encode Levels, Curves, and Hue/Saturation respectively, using bounded
+little-endian fields and pre-mutation validation.
 `history.json.zst` stores bounded reversible layer/tile snapshots so undo and
 redo remain available after reopening a project.
+
+In-memory history snapshots share each `TileStore` sparse map and dirty set
+through standard-library copy-on-write handles. Tile pixel buffers remain
+independently copy-on-write. A write detaches only the touched layer's sparse
+containers, and only touched tile pixels; snapshots and the on-disk format are
+unchanged. History byte estimates intentionally count shared payloads in every
+snapshot as a conservative logical upper bound, and are not a measurement of
+unique resident allocations.
 
 Layer stacking is deterministic within each parent: lower `order` values are
 behind higher values. The SQLite writer stores siblings in that canonical order
@@ -122,6 +158,22 @@ Command-journal tag `51` clears all raster or vector paint from one layer as a
 single undoable operation. It keeps the layer and any comic panel metadata in
 place, allowing standard brush erasing or Clear layer to remove applied panel
 borders without deleting the editable panel layout.
+Command-journal tag `52` applies one atomic mixed-vector patch to one vector
+layer. It contains the layer ID, a non-empty bounded edit count, and ordered
+insert/replace/remove edits. Insert records carry an explicit object ID and
+position; insert/replace carry a tagged little-endian vector object; remove
+carries the object ID. The tag is followed by `vector_semantics: 1`. Legacy
+objects encode closed state and up to 8,192 sampled `(x, y, pressure, tilt)`
+records. Bézier objects encode optional fill/stroke RGBA8 values, stroke
+settings, fill rule, bounded subpath/anchor records, and an optional archived
+legacy stroke. Unknown semantics or tags, non-finite values, invalid style
+enums, malformed archives, and invalid path structure are rejected while
+decoding. The complete payload is capped at 256 KiB and 4,096 edits; encoding
+checks size and structure before engine mutation or journal allocation. The
+engine validates edits against a candidate layer, rasterizes its complete
+resulting path set, and publishes geometry, tiles, revision and one history
+entry only after every edit succeeds. Journal replay stores resolved object
+geometry; it never reruns recognition or fitting.
 
 Layer kind value `6` is a nondestructive `Adjustment` node. The nullable SQLite
 `layers.adjustment` column stores a bounded JSON `LayerAdjustment` payload;

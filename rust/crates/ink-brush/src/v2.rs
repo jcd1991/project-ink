@@ -19,6 +19,8 @@ use std::fmt;
 
 /// Pixel-affecting semantics version for the Phase 2 CPU renderer.
 pub const CPU_BRUSH_V2: u32 = 2_000;
+/// Pixel-affecting semantics for version-3 brushes using pulled-string paths.
+pub const CPU_BRUSH_V3: u32 = 2_001;
 /// Maximum number of dynamic bindings on one preset.
 pub const MAX_BINDINGS: usize = 64;
 /// Maximum number of curve points on one response curve.
@@ -81,6 +83,16 @@ pub enum ToolBehavior {
     Clone,
 }
 
+/// Position-conditioning policy captured when a stroke begins.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PathStabilizer {
+    /// Preserve the format-2 smoothing and streamline evaluator.
+    #[default]
+    Legacy,
+    /// Constrain the conditioned path behind the confirmed stylus position.
+    PulledString,
+}
+
 /// Stroke-path controls shared by all brush engines.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrokeBehavior {
@@ -92,6 +104,15 @@ pub struct StrokeBehavior {
     pub taper_end: f32,
     pub stationary_rate_hz: f32,
     pub corner_preservation: f32,
+    /// Path-conditioning algorithm; missing in legacy serialized presets.
+    #[serde(default)]
+    pub stabilizer: PathStabilizer,
+    /// Maximum string distance in document pixels.
+    #[serde(default)]
+    pub distance_px: f32,
+    /// Catch the conditioned endpoint up to the final confirmed sample.
+    #[serde(default)]
+    pub catch_up_on_end: bool,
 }
 
 impl Default for StrokeBehavior {
@@ -105,6 +126,9 @@ impl Default for StrokeBehavior {
             taper_end: 0.0,
             stationary_rate_hz: 0.0,
             corner_preservation: 0.0,
+            stabilizer: PathStabilizer::Legacy,
+            distance_px: 0.0,
+            catch_up_on_end: false,
         }
     }
 }
@@ -474,7 +498,11 @@ pub struct BrushPresetV2 {
 #[derive(Clone, Debug)]
 pub struct CompiledBrush {
     pub source_id: BrushId,
+    pub source_revision: u32,
     pub semantics: EngineSemantics,
+    pub pulled_string: bool,
+    pub stabilizer_distance_px: f32,
+    pub catch_up_on_end: bool,
     pub tool: ToolBehavior,
     pub stroke: StrokeBehavior,
     pub tip: TipBehavior,
@@ -494,6 +522,7 @@ pub struct CompiledBrush {
 #[derive(Clone, Debug, Default)]
 pub struct CompiledBrushState {
     conditioned_anchor: Option<PointerSample>,
+    pulled_string_position: Option<(f32, f32)>,
     path_anchor: Option<PathPoint>,
     stroke_start_position: Option<(f32, f32)>,
     stroke_has_moved: bool,
@@ -514,6 +543,7 @@ impl CompiledBrushState {
     pub fn clone_for_prediction(&self) -> Self {
         Self {
             conditioned_anchor: self.conditioned_anchor,
+            pulled_string_position: self.pulled_string_position,
             path_anchor: self.path_anchor,
             stroke_start_position: self.stroke_start_position,
             stroke_has_moved: self.stroke_has_moved,
@@ -653,10 +683,57 @@ impl fmt::Display for BrushValidationError {
 impl std::error::Error for BrushValidationError {}
 
 impl BrushPresetV2 {
+    /// Select the versioned path conditioner and validate the complete preset.
+    pub fn set_path_stabilizer(
+        &mut self,
+        pulled_string: bool,
+        distance_px: f32,
+        catch_up_on_end: bool,
+    ) -> Result<(), BrushValidationError> {
+        let mut candidate = self.clone();
+        if pulled_string {
+            candidate.format_version = 3;
+            candidate.engine_semantics = EngineSemantics(CPU_BRUSH_V3);
+            candidate.stroke.stabilizer = PathStabilizer::PulledString;
+            candidate.stroke.distance_px = distance_px;
+            candidate.stroke.catch_up_on_end = catch_up_on_end;
+        } else {
+            candidate.format_version = 2;
+            candidate.engine_semantics = EngineSemantics(CPU_BRUSH_V2);
+            candidate.stroke.stabilizer = PathStabilizer::Legacy;
+            candidate.stroke.distance_px = 0.0;
+            candidate.stroke.catch_up_on_end = false;
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Enable pulled-string stabilization and atomically upgrade this preset
+    /// to its versioned evaluator contract.
+    pub fn set_pulled_string(
+        &mut self,
+        distance_px: f32,
+        catch_up_on_end: bool,
+    ) -> Result<(), BrushValidationError> {
+        let mut candidate = self.clone();
+        candidate.set_path_stabilizer(true, distance_px, catch_up_on_end)?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Validate untrusted or editor-created preset data before compilation.
     pub fn validate(&self) -> Result<(), BrushValidationError> {
-        if self.format_version != 2 {
+        if !matches!(self.format_version, 2 | 3) {
             return Err(BrushValidationError::UnsupportedFormat(self.format_version));
+        }
+        let supported_semantics = match (self.format_version, self.engine_semantics.0) {
+            (2, CPU_BRUSH_V2) => self.stroke.stabilizer == PathStabilizer::Legacy,
+            (3, CPU_BRUSH_V3) => self.stroke.stabilizer == PathStabilizer::PulledString,
+            _ => false,
+        };
+        if !supported_semantics {
+            return Err(BrushValidationError::InvalidRange("brush semantics"));
         }
         if self.metadata.name.is_empty()
             || self.metadata.name.len() > MAX_METADATA_NAME_BYTES
@@ -702,6 +779,7 @@ impl BrushPresetV2 {
             0.0,
             1.0,
         )?;
+        finite_range("stroke.distance_px", self.stroke.distance_px, 0.0, 100.0)?;
         if self.dynamics.len() > MAX_BINDINGS {
             return Err(BrushValidationError::TooManyBindings);
         }
@@ -760,7 +838,11 @@ impl BrushPresetV2 {
         self.validate()?;
         Ok(CompiledBrush {
             source_id: self.id,
+            source_revision: self.revision,
             semantics: self.engine_semantics,
+            pulled_string: self.stroke.stabilizer == PathStabilizer::PulledString,
+            stabilizer_distance_px: self.stroke.distance_px,
+            catch_up_on_end: self.stroke.catch_up_on_end,
             tool: self.tool,
             stroke: self.stroke.clone(),
             tip: self.tip.clone(),
@@ -1062,6 +1144,34 @@ impl CompiledBrush {
         samples: &[PointerSample],
         state: &mut CompiledBrushState,
     ) -> Result<Vec<BrushDab>, BrushValidationError> {
+        let has_predicted = samples
+            .iter()
+            .any(|sample| sample.flags & ink_input::flags::PREDICTED != 0);
+        if has_predicted {
+            let mut output = Vec::new();
+            let mut start = 0;
+            while start < samples.len() {
+                let predicted = samples[start].flags & ink_input::flags::PREDICTED != 0;
+                let mut end = start + 1;
+                while end < samples.len()
+                    && (samples[end].flags & ink_input::flags::PREDICTED != 0) == predicted
+                {
+                    end += 1;
+                }
+                if predicted {
+                    // Predictions render against a clone at the current
+                    // confirmed boundary and never commit conditioner state.
+                    let mut prediction_state = state.clone_for_prediction();
+                    output.extend(
+                        self.render_incremental_inner(&samples[start..end], &mut prediction_state)?,
+                    );
+                } else {
+                    output.extend(self.render_incremental(&samples[start..end], state)?);
+                }
+                start = end;
+            }
+            return Ok(output);
+        }
         // Keep deferred dual and start dabs out of the per-packet state clone.
         // New dabs are staged separately and appended only after the current
         // batch succeeds.
@@ -1145,9 +1255,15 @@ impl CompiledBrush {
             .any(|sample| sample.phase == ink_input::Phase::Cancel);
         let path = state.append_path(
             samples,
-            (self.stroke.smoothing.max(self.stroke.streamline) * 0.92).clamp(0.0, 0.95),
             spacing,
             self.limits.max_dabs,
+            PathConditioning {
+                smoothing_amount: (self.stroke.smoothing.max(self.stroke.streamline) * 0.92)
+                    .clamp(0.0, 0.95),
+                stabilizer: self.stroke.stabilizer,
+                distance_px: self.stroke.distance_px,
+                catch_up_on_end: self.stroke.catch_up_on_end,
+            },
         )?;
         if path.is_empty() {
             if cancels_stroke {
@@ -1265,25 +1381,62 @@ impl CompiledBrush {
                     let rotation = point.twist * std::f32::consts::TAU
                         + self.dynamic_for_point(ParameterId::Rotation, point, progress)
                         - 1.0;
-                    radius = tip.width_px * 0.5 * dynamic.max(0.02);
-                    result.push(BrushDab {
-                        x: point.x,
-                        y: point.y,
-                        radius_x: radius,
-                        radius_y: radius,
-                        angle: if tip.follow_direction {
-                            point.azimuth
-                        } else {
-                            rotation
-                        },
-                        opacity,
-                        flow: self.flow(),
-                        grain: self.grain_stamp(),
-                        tip_resource_hash: self.tip_resource_hash(),
-                        color: self.color(),
-                        tool: self.tool,
-                        paint: self.paint_dab(),
-                    });
+                    if self.source_revision < 3 {
+                        // Keep format-2 ribbons on their original continuous
+                        // dab path; only the revised built-in opts into links.
+                        radius = tip.width_px * 0.5 * dynamic.max(0.02);
+                        result.push(BrushDab {
+                            x: point.x,
+                            y: point.y,
+                            radius_x: radius,
+                            radius_y: radius,
+                            angle: if tip.follow_direction {
+                                point.azimuth
+                            } else {
+                                rotation
+                            },
+                            opacity,
+                            flow: self.flow(),
+                            grain: self.grain_stamp(),
+                            tip_resource_hash: self.tip_resource_hash(),
+                            color: self.color(),
+                            tool: self.tool,
+                            paint: self.paint_dab(),
+                        });
+                    } else {
+                        // The global path index makes this repeated pattern
+                        // independent of input packet boundaries.
+                        let repeat_every =
+                            ((tip.repeat_spacing_px / spacing).round().max(1.0)) as usize;
+                        let repeat_index = first_path_index + local_index;
+                        if repeat_index.is_multiple_of(repeat_every) {
+                            let link_index = repeat_index / repeat_every;
+                            let weave = if link_index.is_multiple_of(2) {
+                                0.65
+                            } else {
+                                -0.65
+                            };
+                            let width_scale = dynamic.max(0.02);
+                            result.push(BrushDab {
+                                x: point.x,
+                                y: point.y,
+                                radius_x: (tip.repeat_spacing_px * 0.56 * width_scale).max(0.25),
+                                radius_y: (tip.width_px * 0.14 * width_scale).max(0.25),
+                                angle: if tip.follow_direction {
+                                    point.azimuth + weave
+                                } else {
+                                    rotation + weave
+                                },
+                                opacity,
+                                flow: self.flow(),
+                                grain: self.grain_stamp(),
+                                tip_resource_hash: self.tip_resource_hash(),
+                                color: self.color(),
+                                tool: self.tool,
+                                paint: self.paint_dab(),
+                            });
+                        }
+                    }
                 }
                 TipBehavior::Bristle(tip) => {
                     let rotation = point.twist * std::f32::consts::TAU
@@ -1517,18 +1670,63 @@ struct PathPoint {
     seed: u64,
 }
 
+#[derive(Clone, Copy)]
+struct PathConditioning {
+    smoothing_amount: f32,
+    stabilizer: PathStabilizer,
+    distance_px: f32,
+    catch_up_on_end: bool,
+}
+
 impl CompiledBrushState {
     fn append_path(
         &mut self,
         samples: &[PointerSample],
-        smoothing_amount: f32,
         spacing: f32,
         limit: usize,
+        conditioning: PathConditioning,
     ) -> Result<Vec<PathPoint>, BrushValidationError> {
         let mut result = Vec::new();
+        let mut pulled_position = self.pulled_string_position;
         for sample in samples {
-            let conditioned = if let Some(previous) = self.conditioned_anchor {
-                let keep = 1.0 - smoothing_amount;
+            if conditioning.stabilizer == PathStabilizer::PulledString
+                && sample.phase == ink_input::Phase::Cancel
+            {
+                continue;
+            }
+            let conditioned = if conditioning.stabilizer == PathStabilizer::PulledString {
+                let mut output = *sample;
+                let position = if conditioning.distance_px == 0.0 {
+                    (sample.canvas_x, sample.canvas_y)
+                } else {
+                    let (anchor_x, anchor_y) =
+                        pulled_position.unwrap_or((sample.canvas_x, sample.canvas_y));
+                    let dx = sample.canvas_x - anchor_x;
+                    let dy = sample.canvas_y - anchor_y;
+                    let distance = dx.hypot(dy);
+                    let next = if distance > conditioning.distance_px {
+                        let ratio = (distance - conditioning.distance_px) / distance;
+                        (anchor_x + dx * ratio, anchor_y + dy * ratio)
+                    } else {
+                        (anchor_x, anchor_y)
+                    };
+                    if sample.phase == ink_input::Phase::Up && conditioning.catch_up_on_end {
+                        (sample.canvas_x, sample.canvas_y)
+                    } else {
+                        next
+                    }
+                };
+                output.canvas_x = position.0;
+                output.canvas_y = position.1;
+                if sample.flags & ink_input::flags::PREDICTED == 0 {
+                    self.pulled_string_position = Some(position);
+                    pulled_position = Some(position);
+                } else {
+                    pulled_position = Some(position);
+                }
+                output
+            } else if let Some(previous) = self.conditioned_anchor {
+                let keep = 1.0 - conditioning.smoothing_amount;
                 let mut filtered = *sample;
                 filtered.canvas_x =
                     previous.canvas_x + (sample.canvas_x - previous.canvas_x) * keep;
@@ -1542,7 +1740,9 @@ impl CompiledBrushState {
             } else {
                 *sample
             };
-            self.conditioned_anchor = Some(conditioned);
+            if conditioning.stabilizer == PathStabilizer::Legacy {
+                self.conditioned_anchor = Some(conditioned);
+            }
 
             let Some(mut anchor) = self.path_anchor else {
                 let point = PathPoint {
@@ -1593,6 +1793,32 @@ impl CompiledBrushState {
                     speed: anchor.speed + sample_speed(anchor, &conditioned) * fraction,
                     timestamp_ns: conditioned.timestamp_ns,
                     seed: u64::from(conditioned.sequence).wrapping_add(step as u64),
+                });
+            }
+            if sample.phase == ink_input::Phase::Up
+                && conditioning.stabilizer == PathStabilizer::PulledString
+                && conditioning.catch_up_on_end
+                && result.last().is_none_or(|point| {
+                    (point.x - conditioned.canvas_x).hypot(point.y - conditioned.canvas_y) > 0.001
+                })
+            {
+                if self
+                    .segment_path_points_emitted
+                    .saturating_add(result.len())
+                    >= limit
+                {
+                    return Err(BrushValidationError::WorkLimitExceeded);
+                }
+                result.push(PathPoint {
+                    x: conditioned.canvas_x,
+                    y: conditioned.canvas_y,
+                    pressure: f32::from(conditioned.pressure) / f32::from(u16::MAX),
+                    tilt: conditioned.tilt_x.hypot(conditioned.tilt_y).clamp(0.0, 1.0),
+                    azimuth: conditioned.azimuth,
+                    twist: conditioned.twist,
+                    speed: sample_speed(anchor, &conditioned),
+                    timestamp_ns: conditioned.timestamp_ns,
+                    seed: u64::from(conditioned.sequence),
                 });
             }
             anchor = PathPoint {
@@ -1723,18 +1949,26 @@ fn pressure_binding(target: ParameterId, amount: f32) -> ParameterBinding {
 
 fn technical_pen_pressure_binding() -> ParameterBinding {
     let mut binding = pressure_binding(ParameterId::Diameter, 1.0);
+    // For the technical inker, pressure sets diameter within the preset's
+    // base size instead of adding a small variation to an already-full-width
+    // stroke. Keep a visible floor at zero force; this is especially useful
+    // for light S Pen contact and for Apple Pencil's low-force range.
+    binding.combine = CombineOp::Replace;
     binding.curve = ResponseCurve {
         points: vec![
-            CurvePoint { x: 0.0, y: 0.0 },
-            CurvePoint { x: 0.003, y: 0.005 },
-            CurvePoint { x: 0.006, y: 0.02 },
-            CurvePoint { x: 0.01, y: 0.08 },
-            CurvePoint { x: 0.015, y: 0.3 },
-            CurvePoint { x: 0.02, y: 0.45 },
-            CurvePoint { x: 0.04, y: 0.65 },
-            CurvePoint { x: 0.08, y: 0.78 },
-            CurvePoint { x: 0.15, y: 0.91 },
-            CurvePoint { x: 0.3, y: 0.99 },
+            CurvePoint { x: 0.0, y: 0.12 },
+            CurvePoint { x: 0.003, y: 0.13 },
+            CurvePoint { x: 0.006, y: 0.15 },
+            CurvePoint { x: 0.01, y: 0.2 },
+            CurvePoint { x: 0.015, y: 0.24 },
+            CurvePoint { x: 0.02, y: 0.27 },
+            CurvePoint { x: 0.04, y: 0.32 },
+            CurvePoint { x: 0.08, y: 0.36 },
+            CurvePoint { x: 0.12, y: 0.4 },
+            CurvePoint { x: 0.2, y: 0.56 },
+            CurvePoint { x: 0.3, y: 0.75 },
+            CurvePoint { x: 0.42, y: 0.9 },
+            CurvePoint { x: 0.55, y: 0.96 },
             CurvePoint { x: 1.0, y: 1.0 },
         ],
     };
@@ -1756,7 +1990,7 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             "Technical Pen",
             &["ink", "technical"],
             TipBehavior::Stamp(StampTip {
-                diameter_px: 4.0,
+                diameter_px: 12.0,
                 ..StampTip::default()
             }),
             PaintBehavior::Solid(SolidPaint {
@@ -1911,14 +2145,14 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             &["effect", "spatter"],
             TipBehavior::Spray(SprayTip {
                 diameter_px: 30.0,
-                particle_count: 18,
-                particle_size_px: 3.0,
+                particle_count: 12,
+                particle_size_px: 4.0,
                 scatter: 1.0,
                 hardness: 0.8,
             }),
             PaintBehavior::Solid(SolidPaint {
                 color: dark,
-                opacity: 0.65,
+                opacity: 0.9,
                 flow: 0.8,
                 accumulation: AccumulationMode::BuildUp,
             }),
@@ -2098,13 +2332,16 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             }),
         ),
     ]);
-    // Keep the ordinary Apple Pencil force range useful, then vary the
-    // response strength and affected property by brush family. Deliberately
-    // steady brushes (Opaque Round, Marker, Ribbon Chain) retain fixed output.
+    // Keep ordinary stylus force ranges useful, then vary response strength
+    // and affected properties by brush family. Every built-in must produce a
+    // visible pressure response; some families change opacity as well as size.
     let pressure_bindings = [
         (1, ParameterId::Diameter, 0.55), // HB Sketch Pencil
         (1, ParameterId::Opacity, 0.35),
+        (2, ParameterId::Diameter, 0.8),  // Opaque Round
         (3, ParameterId::Opacity, 0.85),  // Soft Airbrush
+        (4, ParameterId::Diameter, 0.55), // Marker
+        (4, ParameterId::Opacity, 0.3),
         (5, ParameterId::Diameter, 0.85), // G-Pen
         (6, ParameterId::Diameter, 0.25), // Dry Gouache
         (6, ParameterId::Opacity, 0.35),
@@ -2112,6 +2349,8 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
         (8, ParameterId::Diameter, 0.2), // Watercolor Blender
         (8, ParameterId::Opacity, 0.4),
         (9, ParameterId::Diameter, 0.45),  // Ink Spatter
+        (9, ParameterId::Opacity, 0.8),    // Ink Spatter particle strength
+        (10, ParameterId::Diameter, 0.65), // Ribbon Chain width
         (11, ParameterId::Diameter, 0.45), // Acrylic Rake
         (12, ParameterId::Diameter, 0.62), // Soft Graphite
         (12, ParameterId::Opacity, 0.35),
@@ -2131,7 +2370,19 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             .dynamics
             .push(pressure_binding(target, amount));
     }
+    // Bump preset revisions where a previously fixed-response built-in now
+    // changes its pixels under pressure. Recorded strokes retain their
+    // captured revision and existing user overrides remain untouched.
+    presets[2].revision = 2; // Opaque Round
+    presets[4].revision = 2; // Marker
+    presets[9].revision = 3; // Ink Spatter particle contrast
+    presets[10].revision = 3; // Ribbon Chain links
     presets[0].dynamics.push(technical_pen_pressure_binding());
+    // Revision 4 maps Technical Pen diameter across its preset size instead
+    // of lightly scaling full width. Revision 5 sets the artist-facing
+    // default to 12 document pixels, matching the editor's initial brush
+    // size. The curve spans the Galaxy S Pen's measured pressure range.
+    presets[0].revision = 5;
     // Pressure-bound brushes share the distance-based start ramp so input
     // pressure cannot turn the first resampled dab into a visible dot.
     for preset in &mut presets {
@@ -2190,11 +2441,6 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
         amount: 0.5,
         combine: CombineOp::Add,
     });
-    let dual_component = presets[0].clone();
-    presets[10].dual = Some(DualBrush {
-        secondary: Box::new(dual_component),
-        multiply_coverage: true,
-    });
     presets[7]
         .post_effects
         .push(PostEffect::DigitalWatercolorEdge {
@@ -2233,6 +2479,15 @@ mod tests {
         }
     }
 
+    fn technical_pen_fixture_at_size(size_px: f32) -> BrushPresetV2 {
+        let mut preset = builtin_library().remove(0);
+        let TipBehavior::Stamp(tip) = &mut preset.tip else {
+            panic!("Technical Pen fixture must remain a stamp tip");
+        };
+        tip.diameter_px = size_px;
+        preset
+    }
+
     #[test]
     fn builtin_library_contains_deterministic_phase_two_brushes() {
         let library = builtin_library();
@@ -2259,7 +2514,6 @@ mod tests {
     #[test]
     fn builtin_pressure_defaults_follow_brush_families() {
         let library = builtin_library();
-        let fixed_response = ["Opaque Round", "Marker", "Ribbon Chain"];
 
         for preset in &library {
             let pressure_bindings = preset
@@ -2267,17 +2521,12 @@ mod tests {
                 .iter()
                 .filter(|binding| binding.sensor == SensorId::Pressure)
                 .collect::<Vec<_>>();
-            if fixed_response.contains(&preset.metadata.name.as_str()) {
-                assert!(pressure_bindings.is_empty(), "{}", preset.metadata.name);
-                assert!(preset.stroke.taper_start.abs() < f32::EPSILON);
-            } else {
-                assert!(
-                    !pressure_bindings.is_empty(),
-                    "{} should respond to stylus pressure",
-                    preset.metadata.name
-                );
-                assert!((preset.stroke.taper_start - 1.0).abs() < f32::EPSILON);
-            }
+            assert!(
+                !pressure_bindings.is_empty(),
+                "{} should respond to stylus pressure",
+                preset.metadata.name
+            );
+            assert!((preset.stroke.taper_start - 1.0).abs() < f32::EPSILON);
             assert!(pressure_bindings.iter().all(|binding| {
                 binding
                     .curve
@@ -2302,6 +2551,69 @@ mod tests {
         assert!(pencil.dynamics.iter().any(|binding| {
             binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
         }));
+
+        for (name, revision) in [
+            ("Opaque Round", 2),
+            ("Marker", 2),
+            ("Ink Spatter", 3),
+            ("Ribbon Chain", 3),
+        ] {
+            assert_eq!(
+                library
+                    .iter()
+                    .find(|preset| preset.metadata.name == name)
+                    .expect("updated built-in")
+                    .revision,
+                revision,
+                "{name} preset revision must identify its pressure response"
+            );
+        }
+    }
+
+    #[test]
+    fn pressure_changes_visible_output_for_every_builtin_brush() {
+        // These values represent the user's observed light and firm S Pen
+        // strokes. Compare rendered dabs so bindings that only change an
+        // internal scatter value cannot satisfy this contract by themselves.
+        let light_pressure = (0.064 * f32::from(u16::MAX)).round() as u16;
+        let firm_pressure = (0.732 * f32::from(u16::MAX)).round() as u16;
+
+        for preset in builtin_library() {
+            let compiled = preset.compile().expect("valid built-in brush");
+            let light = compiled
+                .render(&[
+                    sample(0.0, light_pressure, 1),
+                    sample(24.0, light_pressure, 2),
+                ])
+                .expect("light-pressure output");
+            let firm = compiled
+                .render(&[
+                    sample(0.0, firm_pressure, 1),
+                    sample(24.0, firm_pressure, 2),
+                ])
+                .expect("firm-pressure output");
+            assert!(
+                !light.is_empty() && !firm.is_empty(),
+                "{} should render output for both pressure levels",
+                preset.metadata.name
+            );
+            let maximum_radius = |dabs: &[BrushDab]| {
+                dabs.iter()
+                    .map(|dab| dab.radius_x.max(dab.radius_y))
+                    .fold(0.0_f32, f32::max)
+            };
+            let mean_opacity = |dabs: &[BrushDab]| {
+                dabs.iter().map(|dab| dab.opacity).sum::<f32>() / dabs.len() as f32
+            };
+            let radius_changed = (maximum_radius(&firm) - maximum_radius(&light)).abs() > 0.01;
+            let opacity_changed = (mean_opacity(&firm) - mean_opacity(&light)).abs() > 0.001;
+
+            assert!(
+                radius_changed || opacity_changed,
+                "{} pressure must change visible dab radius or opacity",
+                preset.metadata.name
+            );
+        }
     }
 
     #[test]
@@ -2377,8 +2689,8 @@ mod tests {
                 binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
             })
             .expect("technical pen pressure size binding");
-        let ordinary = 1.0 + binding.curve.evaluate(0.015);
-        let firm = 1.0 + binding.curve.evaluate(0.08);
+        let ordinary = 1.0 + binding.curve.evaluate(0.08);
+        let firm = 1.0 + binding.curve.evaluate(0.3);
 
         assert!((binding.amount - 1.0).abs() < f32::EPSILON);
         assert!(firm > ordinary * 1.15);
@@ -2386,8 +2698,7 @@ mod tests {
 
     #[test]
     fn technical_pen_tapers_moving_start_dab_but_keeps_stationary_tap() {
-        let compiled = builtin_library()
-            .remove(0)
+        let compiled = technical_pen_fixture_at_size(4.0)
             .compile()
             .expect("valid technical pen");
         let mut down = sample(0.0, u16::MAX / 2, 1);
@@ -2542,6 +2853,31 @@ mod tests {
     }
 
     #[test]
+    fn technical_pen_revision_five_uses_twelve_pixel_default_and_s_pen_range() {
+        let preset = builtin_library().remove(0);
+        assert_eq!(preset.revision, 5);
+        assert!(matches!(
+            &preset.tip,
+            TipBehavior::Stamp(tip) if (tip.diameter_px - 12.0).abs() < f32::EPSILON
+        ));
+        let compiled = preset.compile().expect("valid technical pen");
+        let light = compiled
+            .render(&[sample(0.0, 6_960, 1), sample(20.0, 7_100, 2)])
+            .expect("light S Pen stroke");
+        let firm = compiled
+            .render(&[sample(0.0, 28_500, 1), sample(20.0, 28_600, 2)])
+            .expect("firm S Pen stroke");
+        let max_radius =
+            |dabs: &[BrushDab]| dabs.iter().map(|dab| dab.radius_x).fold(0.0_f32, f32::max);
+        let light_radius = max_radius(&light);
+        let firm_radius = max_radius(&firm);
+        assert!(
+            firm_radius >= light_radius * 2.0,
+            "firm S Pen marks across the observed p10-p90 range should be at least twice as wide: light={light_radius}, firm={firm_radius}"
+        );
+    }
+
+    #[test]
     fn starter_pressure_curve_expands_the_observed_low_force_range() {
         for name in ["Technical Pen", "HB Sketch Pencil", "G-Pen"] {
             let preset = builtin_library()
@@ -2557,8 +2893,15 @@ mod tests {
                 .expect("starter pressure size binding");
             let light = 0.005;
             let firm = 0.016;
-            let light_size = 1.0 + binding.amount * binding.curve.evaluate(light);
-            let firm_size = 1.0 + binding.amount * binding.curve.evaluate(firm);
+            let size_at = |pressure| match binding.combine {
+                CombineOp::Multiply => 1.0 + binding.amount * binding.curve.evaluate(pressure),
+                CombineOp::Replace => binding.amount * binding.curve.evaluate(pressure),
+                CombineOp::Add | CombineOp::Minimum | CombineOp::Maximum => {
+                    binding.amount * binding.curve.evaluate(pressure)
+                }
+            };
+            let light_size = size_at(light);
+            let firm_size = size_at(firm);
 
             assert!(
                 firm_size > light_size * 1.1,
@@ -2749,7 +3092,7 @@ mod tests {
 
     #[test]
     fn pressure_curve_reaches_its_endpoint_without_wrapping() {
-        let mut preset = builtin_library().remove(0);
+        let mut preset = technical_pen_fixture_at_size(4.0);
         preset.dynamics.push(ParameterBinding {
             target: ParameterId::Diameter,
             base: 0.1,
@@ -2771,7 +3114,7 @@ mod tests {
 
     #[test]
     fn binding_base_is_used_as_the_initial_value() {
-        let mut preset = builtin_library().remove(0);
+        let mut preset = technical_pen_fixture_at_size(4.0);
         // Keep this regression focused on the binding under test. Starter
         // presets already define a pressure-to-diameter binding, whose base
         // correctly becomes the initial value when it appears first.
@@ -2855,5 +3198,113 @@ mod tests {
             preset.validate(),
             Err(BrushValidationError::TooManyPostEffects)
         );
+    }
+
+    fn pulled_string_preset(catch_up: bool) -> BrushPresetV2 {
+        let mut preset = builtin_library().remove(0);
+        preset
+            .set_pulled_string(10.0, catch_up)
+            .expect("valid pulled-string settings");
+        preset
+    }
+
+    fn stroke_samples() -> [PointerSample; 3] {
+        let mut down = sample(0.0, 12_000, 1);
+        down.phase = Phase::Down;
+        let moved = sample(20.0, 32_000, 2);
+        let mut up = sample(50.0, 56_000, 3);
+        up.phase = Phase::Up;
+        [down, moved, up]
+    }
+
+    #[test]
+    fn pulled_string_is_chunk_independent_and_catches_up_at_end() {
+        let compiled = pulled_string_preset(true).compile().expect("compile");
+        let samples = stroke_samples();
+        let whole = compiled.render(&samples).expect("whole stroke");
+
+        let mut state = CompiledBrushState::default();
+        let mut chunked = compiled
+            .render_incremental(&samples[..2], &mut state)
+            .expect("first chunk");
+        chunked.extend(
+            compiled
+                .render_incremental(&samples[2..], &mut state)
+                .expect("terminal chunk"),
+        );
+        chunked.extend(
+            compiled
+                .finish_incremental(&mut state)
+                .expect("finish")
+                .into_iter()
+                .map(|(dab, _)| dab),
+        );
+        assert_eq!(whole, chunked);
+        assert!(whole.iter().any(|dab| (dab.x - 50.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn pulled_string_without_catch_up_keeps_the_endpoint_lag_and_cancel_does_not_catch_up() {
+        let samples = stroke_samples();
+        let compiled = pulled_string_preset(false).compile().expect("compile");
+        let dabs = compiled.render(&samples).expect("render");
+        assert!(
+            dabs.iter()
+                .map(|dab| dab.x)
+                .fold(f32::NEG_INFINITY, f32::max)
+                <= 40.0
+        );
+
+        let mut cancelled = samples;
+        cancelled[2].phase = Phase::Cancel;
+        let compiled = pulled_string_preset(true).compile().expect("compile");
+        let dabs = compiled.render(&cancelled).expect("cancelled render");
+        assert!(
+            dabs.iter()
+                .map(|dab| dab.x)
+                .fold(f32::NEG_INFINITY, f32::max)
+                < 50.0
+        );
+    }
+
+    #[test]
+    fn predicted_samples_do_not_change_pulled_string_committed_state() {
+        let compiled = pulled_string_preset(false).compile().expect("compile");
+        let mut down = sample(0.0, 12_000, 1);
+        down.phase = Phase::Down;
+        let mut prediction = sample(80.0, 55_000, 2);
+        prediction.flags = ink_input::flags::PREDICTED;
+        let confirmed = sample(20.0, 32_000, 3);
+
+        let mut with_prediction = CompiledBrushState::default();
+        let mut baseline = CompiledBrushState::default();
+        compiled
+            .render_incremental(&[down], &mut with_prediction)
+            .expect("down");
+        compiled
+            .render_incremental(&[down], &mut baseline)
+            .expect("baseline down");
+        compiled
+            .render_incremental(&[prediction], &mut with_prediction)
+            .expect("ephemeral prediction");
+        let actual = compiled
+            .render_incremental(&[confirmed], &mut with_prediction)
+            .expect("confirmed after prediction");
+        let expected = compiled
+            .render_incremental(&[confirmed], &mut baseline)
+            .expect("baseline confirmed");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pulled_string_uses_versioned_semantics_and_rejects_bad_upgrade_transactionally() {
+        let mut preset = builtin_library().remove(0);
+        let original = preset.clone();
+        assert!(preset.set_pulled_string(101.0, true).is_err());
+        assert_eq!(preset, original);
+        preset.set_pulled_string(8.0, true).expect("upgrade");
+        assert_eq!(preset.format_version, 3);
+        assert_eq!(preset.engine_semantics, EngineSemantics(CPU_BRUSH_V3));
+        assert!(preset.validate().is_ok());
     }
 }
