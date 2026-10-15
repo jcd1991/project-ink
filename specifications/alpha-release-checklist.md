@@ -172,6 +172,13 @@ and untested development platforms can be disclosed or omitted.
 
 ## Candidate evidence record
 
+Local preparation and exact remaining gates are recorded in
+[alpha-candidate-verification.md](alpha-candidate-verification.md). Packaging,
+release-note and feedback templates exist; no GitHub repository was created
+because the owner requested local preparation only. Rebuilt packages include
+the layout and document destination fixes; the evidence record distinguishes
+current results from earlier package tests.
+
 Fill one row for each offered artifact; leave a platform out of the release's
 download list if its row is incomplete. An existing pass can be reused when
 its code/input path has not changed, but the final package still needs an
@@ -179,9 +186,9 @@ installation/start and basic save/reopen smoke check.
 
 | Platform | Source commit / artifact SHA-256 | OS / device / input | Install + artist journey | Exit / recovery evidence | Distribution channel / signing | Decision |
 |---|---|---|---|---|---|---|
-| macOS | Pending | Pending | Pending final package | Prior manual matrix; candidate scope pending | Pending | Candidate |
-| Android | Pending | Galaxy S23 Ultra / S Pen; candidate OS pending | Named save/fresh-process reopen pending | Redo/recovery observed; earlier missing-work report unresolved | Signed APK pending | Candidate |
-| iOS/iPadOS | Pending | Pending | Physical acceptance pending | Pending | Provisioning/install pending | Add when ready |
+| macOS | `1d09f7f` plus preparation patch; hashes in candidate record | ARM Mac / macOS 27 / mouse | Rebuilt app draw/save/quit/reopen/export passed with exact saved-pixel comparison | Native Quit verified; untouched blank startup prompt remains | Universal ZIP, ad hoc; Gatekeeper assessment rejected | Withhold until installation channel verified |
+| Android | `1d09f7f` plus preparation patch; hashes in candidate record | Galaxy S23 Ultra / Android 16 / S Pen | Rebuilt APK updated without data reset; user saved android-final outside existing packages, stored pixels verified; latest reopen/export requested | Earlier long-stroke force-stop recovery observed; historical cause unproven | Dedicated alpha key, arm64 APK; signature verified | Final pressure/workspace/provider matrix open |
+| iOS/iPadOS | Current provider changes compile | No device acceptance in this preparation | Debug/no-codesign build only | Pending | Provisioning/install pending | No download included |
 
 Record the date, result, evidence path and any reproduced failure beside each
 completed launch check. Keep private artwork and traces outside public release

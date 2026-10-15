@@ -1,0 +1,21 @@
+name: Artist workflow request
+description: Describe an illustration or comic workflow the alpha cannot complete.
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to make?
+      description: Describe the artist workflow and the step that blocks it.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Useful behavior
+      description: Explain the expected result and any current workaround.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and input

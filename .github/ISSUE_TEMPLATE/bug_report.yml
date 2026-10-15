@@ -1,0 +1,45 @@
+name: Alpha bug report
+description: Report a broken drawing, document, or export workflow.
+title: "[Alpha]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep artwork, recovery files, and raw diagnostic logs private. Report security problems through SECURITY.md rather than a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version and download filename
+      placeholder: 0.1.0, APK or macOS ZIP filename, source commit if built locally
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device, OS, and input
+      placeholder: Galaxy S23 Ultra, Android 16, S Pen
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the active layer, tool, and whether the project was new or reopened.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: persistence
+    attributes:
+      label: Save and recovery behavior
+      description: Did explicit Save finish? Did the work survive quit/reopen? Was a recovery checkpoint restored? Do not force-close valuable unsaved work to investigate.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional safe evidence
+      description: A redacted screenshot or a disposable reproduction is useful. Share private files only through an agreed private route.

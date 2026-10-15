@@ -10,12 +10,12 @@ user instead of silently changing document authority.
 Dirty tiles arrive through a fixed-width binary FRB packet, are decoded off the
 paint path, and are composed into the transformed document canvas with
 revision-aware caching.
-On iOS/iPadOS, Android, and macOS, stylus-only native adapters publish packet v1
-over `org.projectink.studio/pointer_packets_v1`; Dart transforms those
-coordinates and routes them through the same Rust engine API.
-The iOS, macOS, and Android adapter seams encode pointer packet v1 in
-little-endian binary form. Keep the Rust engine as the only document/pixel
-authority.
+On iOS/iPadOS and macOS, stylus-only native adapters publish packet v1 over
+`org.projectink.studio/pointer_packets_v1`; Dart transforms those coordinates
+and routes them through the same Rust engine API. Android S Pen drawing stays
+on Flutter's hit-tested pointer path so stylus taps reach toolbar and layer
+controls; Android native input is used for discrete S Pen button commands. Keep
+the Rust engine as the only document/pixel authority.
 
 The Dart engine contract exposes native `.inkproj` open through
 `FrbEngineApi.open(path)`, atomic save-as through `saveAs(path)`, and PNG
@@ -40,6 +40,11 @@ implicitly; an embedder that wants cleanup must supply an explicit deletion
 callback and enforce its own ownership boundary.
 
 `DocumentPicker` is the platform seam for directory-backed project selection.
+New local saves reject folders inside existing `.inkproj` packages or their
+`.inkproj.bak` backups. Atomic replacement and backup rotation can remove a
+nested project, so choose a containing folder outside those packages. A rejected
+location is shown as a document-action error without falling back to another
+save location; opening an existing nested package remains supported.
 When supplied to `ProjectInkApp`, it enables Open, Save, and Export PNG toolbar
 actions; the picker implementation owns platform storage and dialog behavior.
 `PlatformDocumentPicker` is native-first: desktop uses native directory/save
@@ -76,8 +81,8 @@ traces and artwork on the Mac. Simulated or injected stylus packets verify the
 adapter/rendering path; only physical Pencil input completes the hardware
 acceptance checks.
 
-For a repeatable physical-iPad brush rendering check, pass the Procreate and
-Clip Studio brush fixtures to `tool/run_brush_device_gallery.sh` from `app/`:
+For a repeatable physical-iPad brush rendering check, pass external brush-format
+fixtures to `tool/run_brush_device_gallery.sh` from `app/`:
 
 ```sh
 ./tool/run_brush_device_gallery.sh DEVICE_UDID /path/to/sample.brush /path/to/sample.sut
@@ -375,3 +380,6 @@ Review the complete generated diff after changing exported Rust signatures,
 and keep the generated Rust/Dart API, `api.dart` adapter calls, and platform
 native-host interfaces in sync. Do not upgrade only one runtime package or
 regenerate with an unpinned global generator.
+
+Provider picker document bindings, new-canvas release, and path-scoped PNG
+export are documented in [document-picker.md](../specifications/document-picker.md).

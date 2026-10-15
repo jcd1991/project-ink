@@ -40,7 +40,7 @@ mouse runs, and physical pen acceptance are separate evidence.
 
 ## Explicit non-goals
 
-- Full feature parity with Clip Studio Paint, Procreate, or ibisPaint.
+- Full feature parity with established illustration and comic suites.
 - Claiming support for platforms that have not passed their own install and
   real-use acceptance gates.
 - Promising final print color management, typography parity, or a broad suite

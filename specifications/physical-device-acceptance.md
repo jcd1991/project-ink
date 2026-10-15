@@ -63,7 +63,7 @@ app-private directory by supplying an absolute path in a non-release build:
 
 ```sh
 flutter build apk --profile --target-platform android-arm64 \
-  --dart-define=PROJECT_INK_TEST_DOCUMENTS_PATH=/data/user/0/org.projectink.studio/files/ProjectInkAlphaValidation/android-s23
+  --dart-define=PROJECT_INK_TEST_DOCUMENTS_PATH=/data/user/0/org.projectink.studio.debug/files/ProjectInkAlphaValidation/android-s23
 ```
 
 Profile and debug builds honor this override; release builds ignore it. Use a
@@ -76,8 +76,23 @@ Android:
 flutter build apk --debug --target-platform android-arm64 \
   --dart-define=PROJECT_INK_TRACE=true
 adb install -r app/build/app/outputs/flutter-apk/app-debug.apk
-adb shell dumpsys meminfo org.projectink.studio > android-meminfo.txt
+adb shell dumpsys meminfo org.projectink.studio.debug > android-meminfo.txt
 ```
+
+For an optimized Rust latency capture, use the profile variant:
+
+```sh
+flutter build apk --profile --target-platform=android-arm64 \
+  --dart-define=PROJECT_INK_TRACE=true
+adb install -r app/build/app/outputs/flutter-apk/app-profile.apk
+```
+
+Both trace-enabled Android debug and profile variants use the parallel package
+ID `org.projectink.studio.debug`; they can be installed beside a signed alpha
+without uninstalling it or clearing its artwork. Profile mode keeps local
+diagnostics readable through `run-as` while building the Rust bridge with
+release optimization. Use this package ID for trace retrieval, launch, and
+memory commands during acceptance.
 
 ### Android touch Undo/Redo check
 
@@ -97,9 +112,44 @@ After the run, list and copy the trace from the app sandbox (the exact file
 name is printed by the app):
 
 ```sh
-adb shell run-as org.projectink.studio find files -path '*phase1-traces/*.jsonl'
-adb exec-out run-as org.projectink.studio cat files/phase1-traces/TRACE.jsonl > phase1.jsonl
+adb shell run-as org.projectink.studio.debug find files -path '*phase1-traces/*.jsonl'
+adb exec-out run-as org.projectink.studio.debug cat files/phase1-traces/TRACE.jsonl > phase1.jsonl
 ```
+
+#### Galaxy S23 Ultra run record — 2026-10-11
+
+The current-source arm64 profile build was installed as
+`org.projectink.studio.debug`. The user made a real S Pen stroke on the blank
+canvas and reported two-finger Undo, three-finger Redo, and second-finger touch
+cancellation working. On an attached mask, a real black S Pen stroke hid a
+segment of the existing line; hiding the mask restored the base line. A real
+white stroke revealed the segment, and the named `.inkproj` was saved and
+reopened from Recents with the revealed composite visible. The exact
+Undo → canceled touch stroke → Redo sequence left the line restored with no
+stray touch mark, and the project was saved afterward. The phone brush-controls
+sheet showed Technical Pen context and Stroke/Pressure routes. Selecting
+Pressure for this built-in brush returned to the library; source behavior
+requires duplicating factory brushes before editing their pressure curves. No
+brush was duplicated or changed. Studio portrait also opened and reported
+compact controls at the phone width, with the mask target legible. The test
+project remains at `/storage/emulated/0/Documents/untitled.inkproj` on the
+device.
+
+The copied short-run trace contained 2,060 confirmed samples, zero predicted
+samples, zero sequence gaps, zero rejected packets, and a worst recorded p95 of
+17.179 ms against the 40 ms S23 target. The trace report passed its latency and
+confirmed-delivery checks. `dumpsys meminfo` after this small project reported
+252,172 kB PSS and 317,480 kB RSS. After the user performed Undo → canceled
+touch stroke → Redo in that order, the final screenshot showed the original line
+restored with no stray touch mark, confirming the earlier Redo branch survived
+cancellation. The named project was saved afterward. Studio portrait opened
+with compact controls and a legible target header. This remains a bounded
+interaction record, not full device acceptance: the 4096×4096 document with 20
+raster layers, one-hour drawing session, custom-brush pressure/long-stroke
+checks, scenario-matched RSS evidence, landscape layout, and tablet Studio
+checks remain open. No
+physical iPad/Pencil is connected; the iOS simulator run remains below the 18
+GiB free-space floor.
 
 Collect `dumpsys meminfo` immediately after the 4096×4096/20-layer scenario and
 again after a one-hour drawing session. Keep the trace file with the run ID.

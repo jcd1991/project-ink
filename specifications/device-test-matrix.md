@@ -4,8 +4,8 @@
 | --- | --- | --- | --- |
 | iPadOS 17 | iPad Pro M1 11/12.9, Apple Pencil 2 | UIKit coalesced/predicted touches | ≤40 ms p95 visible update |
 | iPadOS 17 | iPad Pro M4 13, Apple Pencil Pro | UIKit + hover/squeeze/rotation | ≤25 ms p95 visible update |
-| Android API 29+ | Galaxy S23 Ultra, S Pen | MotionEvent history/hover/buttons | ≤40 ms p95 visible update |
-| Android API 29+ | Samsung tablet | MotionEvent fallback | no dropped confirmed samples |
+| Android API 29+ | Galaxy S23 Ultra, S Pen | Flutter hit-tested pointer events; native button edge | ≤40 ms p95 visible update |
+| Android API 29+ | Samsung tablet | Flutter hit-tested stylus events | no dropped confirmed samples |
 | macOS 14+ | Apple Silicon/Intel Mac | NSEvent tablet points | draw/save/reopen |
 | Windows 10/11 | Wacom/Huion/XP-Pen | WM_POINTER, runtime WinTab fallback | tablet pressure/eraser; no duplicate strokes |
 | Ubuntu 22.04+ | Wayland/X11 tablet | Flutter then libinput/Wayland | pressure or explicit fallback |
