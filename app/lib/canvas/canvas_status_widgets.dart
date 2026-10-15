@@ -73,6 +73,7 @@ class CanvasEditorStatusBar extends StatelessWidget {
     required this.documentHeight,
     required this.selected,
     required this.saveStatus,
+    this.onRetrySave,
   });
 
   final String brushName;
@@ -84,6 +85,7 @@ class CanvasEditorStatusBar extends StatelessWidget {
   final int documentHeight;
   final bool selected;
   final String saveStatus;
+  final VoidCallback? onRetrySave;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -107,7 +109,17 @@ class CanvasEditorStatusBar extends StatelessWidget {
             context,
             '${(rotation * 180 / math.pi).round()}°${mirrored ? '  •  Mirrored' : ''}',
           ),
-          _status(context, saveStatus),
+          if (saveStatus == 'Recovery save failed' && onRetrySave != null)
+            Tooltip(
+              message: 'Retry recovery checkpoint',
+              child: TextButton.icon(
+                onPressed: onRetrySave,
+                icon: const Icon(Icons.refresh, size: 14),
+                label: Text(saveStatus),
+              ),
+            )
+          else
+            _status(context, saveStatus),
         ],
       ),
     ),

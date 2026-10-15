@@ -11,7 +11,6 @@ class CanvasDrawAndHoldSnapshot {
     required this.constraintActive,
     required this.constraintStart,
     required this.stylusPosition,
-    required this.inputAgeMicros,
     required this.nativeDrainScheduled,
     required this.pendingNativePackets,
     required this.strokeWorkQueueDepth,
@@ -22,7 +21,6 @@ class CanvasDrawAndHoldSnapshot {
   final bool constraintActive;
   final Offset? constraintStart;
   final Offset? stylusPosition;
-  final int inputAgeMicros;
   final bool nativeDrainScheduled;
   final int pendingNativePackets;
   final int strokeWorkQueueDepth;
@@ -42,9 +40,17 @@ class CanvasDrawAndHoldCoordinator {
   final void Function(Map<String, Object?> event) recordActivation;
   final void Function(InkGesture? gesture) dispatch;
   final Duration holdDuration;
+  final Stopwatch _arrivalClock = Stopwatch()..start();
 
   Timer? _timer;
+  int _lastInputArrivalUs = 0;
   bool _disposed = false;
+
+  void recordInputArrival() {
+    if (_disposed) return;
+    _lastInputArrivalUs = _arrivalClock.elapsedMicroseconds;
+    cancel();
+  }
 
   void arm(Offset position) {
     cancel();
@@ -58,9 +64,11 @@ class CanvasDrawAndHoldCoordinator {
     }
     if ((position - constraintStart).distance < 8) return;
 
+    final inputAgeMicros =
+        _arrivalClock.elapsedMicroseconds - _lastInputArrivalUs;
     final remainingMicros = math.max(
       0,
-      holdDuration.inMicroseconds - current.inputAgeMicros,
+      holdDuration.inMicroseconds - inputAgeMicros,
     );
     _timer = Timer(Duration(microseconds: remainingMicros), () {
       if (_disposed) return;
@@ -68,14 +76,17 @@ class CanvasDrawAndHoldCoordinator {
       if (!latest.strokeActive ||
           latest.stylusPosition != position ||
           latest.nativeDrainScheduled ||
-          latest.pendingNativePackets > 0) {
+          latest.pendingNativePackets > 0 ||
+          _arrivalClock.elapsedMicroseconds - _lastInputArrivalUs <
+              holdDuration.inMicroseconds) {
         return;
       }
       recordActivation({
         'gesture': latest.gesture?.name,
         'triggerPosition': {'x': position.dx, 'y': position.dy},
         'constraintStart': {'x': constraintStart.dx, 'y': constraintStart.dy},
-        'latestInputAgeUs': latest.inputAgeMicros,
+        'latestInputAgeUs':
+            _arrivalClock.elapsedMicroseconds - _lastInputArrivalUs,
         'nativePacketQueueDepth': latest.pendingNativePackets,
         'strokeWorkQueueDepth': latest.strokeWorkQueueDepth,
       });

@@ -30,6 +30,7 @@ class CanvasLayerActionHost {
     required this.setSoloLayerId,
     required this.selectLayerContents,
     required this.showMessage,
+    required this.setAdjustmentEditActive,
   });
 
   final EngineApi Function() engine;
@@ -45,6 +46,7 @@ class CanvasLayerActionHost {
   final ValueChanged<int?> setSoloLayerId;
   final void Function() selectLayerContents;
   final void Function(String message) showMessage;
+  final ValueChanged<bool> setAdjustmentEditActive;
 }
 
 /// Owns Rust-backed layer commands and preserves their serialized UI state.
@@ -60,18 +62,22 @@ class CanvasLayerActions {
   set soloLayerId(int? value) => host.setSoloLayerId(value);
   Future<void> get panelStateQueue => _panelStateQueue;
   Future<void> get opacityQueue => _opacityQueue;
+  Future<void> get adjustmentQueue => _adjustmentQueue;
   bool get hasActiveOpacityEdit => _activeOpacityGesture != null;
 
   Future<void> loadPhase2Projections() => host.loadPhase2Projections();
   Future<void> refreshTiles() => host.refreshTiles();
   Future<void> get idle async {
     await _opacityQueue;
+    await _adjustmentQueue;
     await _panelStateQueue;
   }
 
   Future<void> _panelStateQueue = Future<void>.value();
   Future<void> _opacityQueue = Future<void>.value();
+  Future<void> _adjustmentQueue = Future<void>.value();
   _LayerOpacityGesture? _activeOpacityGesture;
+  int? _activeAdjustmentEditId;
 
   Future<void> addLayer(LayerKind kind) async {
     final wireKind = switch (kind) {
@@ -551,6 +557,69 @@ class CanvasLayerActions {
     } finally {
       if (host.mounted()) await loadPhase2Projections();
     }
+  }
+
+  Future<int> beginLayerAdjustmentEdit(int layerId) async {
+    host.setAdjustmentEditActive(true);
+    try {
+      final editId = await _queueAdjustmentOperation(
+        () => engine.beginLayerAdjustmentEdit(layerId: layerId),
+      );
+      _activeAdjustmentEditId = editId;
+      return editId;
+    } on Object {
+      host.setAdjustmentEditActive(false);
+      rethrow;
+    }
+  }
+
+  Future<void> updateLayerAdjustmentEdit(int editId, String adjustmentJson) =>
+      _queueAdjustmentOperation(() async {
+        await engine.updateLayerAdjustmentEdit(
+          editId: editId,
+          adjustmentJson: adjustmentJson,
+        );
+        if (host.mounted()) {
+          await refreshTiles();
+        }
+      });
+
+  Future<void> commitLayerAdjustmentEdit(int editId) =>
+      _queueAdjustmentOperation(() async {
+        await engine.commitLayerAdjustmentEdit(editId: editId);
+        _finishAdjustmentEdit(editId);
+        if (host.mounted()) {
+          host.markDirty();
+          await refreshTiles();
+          await loadPhase2Projections();
+        }
+      });
+
+  Future<void> cancelLayerAdjustmentEdit(int editId) =>
+      _queueAdjustmentOperation(() async {
+        await engine.cancelLayerAdjustmentEdit(editId: editId);
+        _finishAdjustmentEdit(editId);
+        if (host.mounted()) {
+          await refreshTiles();
+          await loadPhase2Projections();
+        }
+      });
+
+  void _finishAdjustmentEdit(int editId) {
+    if (_activeAdjustmentEditId != editId) return;
+    _activeAdjustmentEditId = null;
+    host.setAdjustmentEditActive(false);
+  }
+
+  Future<T> _queueAdjustmentOperation<T>(Future<T> Function() operation) {
+    final next = _adjustmentQueue
+        .catchError((Object _) {})
+        .then((_) => operation());
+    _adjustmentQueue = next.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return next;
   }
 
   Future<void> commitLayerChange(LayerView changed) async {

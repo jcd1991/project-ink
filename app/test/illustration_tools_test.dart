@@ -31,6 +31,29 @@ void main() {
     },
   );
 
+  testWidgets('vector eraser explains that it only edits legacy ink', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: IllustrationToolPalette(
+            selected: IllustrationTool.vectorEraser,
+            onSelected: (_) {},
+            onClearSelection: () {},
+            onTransformPreset: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Vector pen'), findsOneWidget);
+    expect(find.text('Vector transform'), findsOneWidget);
+    expect(find.text('Vector eraser'), findsOneWidget);
+    expect(find.text('Legacy ink only; not Bézier paths'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Panel tool exposes the shared 2/3/4 layout presets', (
     tester,
   ) async {

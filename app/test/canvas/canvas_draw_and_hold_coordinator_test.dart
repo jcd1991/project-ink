@@ -13,7 +13,6 @@ void main() {
         strokeActive: true,
         constraintStart: start,
         stylusPosition: position,
-        inputAgeMicros: 0,
       );
       final events = <String>[];
       Map<String, Object?>? diagnostic;
@@ -23,11 +22,12 @@ void main() {
         onDispatch: (gesture) => events.add('dispatch:${gesture?.name}'),
       );
 
+      coordinator.recordInputArrival();
       coordinator.arm(position);
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(events, ['dispatch:straighten']);
-      expect(diagnostic?['latestInputAgeUs'], 0);
+      expect(diagnostic?['latestInputAgeUs'], greaterThanOrEqualTo(1000));
       expect(diagnostic?['strokeWorkQueueDepth'], 0);
       coordinator.dispose();
     },
@@ -41,13 +41,11 @@ void main() {
           strokeActive: true,
           constraintStart: start,
           stylusPosition: const Offset(21, 20),
-          inputAgeMicros: 0,
         ),
         _snapshot(
           strokeActive: true,
           constraintStart: start,
           stylusPosition: position,
-          inputAgeMicros: 0,
           pendingNativePackets: 1,
         ),
       ]) {
@@ -55,13 +53,13 @@ void main() {
           strokeActive: true,
           constraintStart: start,
           stylusPosition: position,
-          inputAgeMicros: 0,
         );
         var dispatched = false;
         final coordinator = _coordinator(
           state: () => state,
           onDispatch: (_) => dispatched = true,
         );
+        coordinator.recordInputArrival();
         coordinator.arm(position);
         state = changed;
         await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -100,6 +98,62 @@ void main() {
       }
     },
   );
+
+  test('new pointer input restarts the quiet interval', () async {
+    var state = _snapshot(
+      strokeActive: true,
+      constraintStart: start,
+      stylusPosition: position,
+    );
+    var dispatched = false;
+    final coordinator = _coordinator(
+      state: () => state,
+      holdDuration: const Duration(milliseconds: 50),
+      onDispatch: (_) => dispatched = true,
+    );
+
+    coordinator.recordInputArrival();
+    coordinator.arm(position);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    coordinator.recordInputArrival();
+    state = _snapshot(
+      strokeActive: true,
+      constraintStart: start,
+      stylusPosition: position,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(dispatched, isFalse);
+
+    coordinator.arm(position);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(dispatched, isTrue);
+    coordinator.dispose();
+  });
+
+  test('does not fire when new input arrives at the timer boundary', () async {
+    var state = _snapshot(
+      strokeActive: true,
+      constraintStart: start,
+      stylusPosition: position,
+    );
+    var dispatched = false;
+    final coordinator = _coordinator(
+      state: () => state,
+      holdDuration: const Duration(milliseconds: 10),
+      onDispatch: (_) => dispatched = true,
+    );
+    coordinator.recordInputArrival();
+    coordinator.arm(position);
+    coordinator.recordInputArrival();
+    state = _snapshot(
+      strokeActive: true,
+      constraintStart: start,
+      stylusPosition: position,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 15));
+    expect(dispatched, isFalse);
+    coordinator.dispose();
+  });
 }
 
 CanvasDrawAndHoldSnapshot _snapshot({
@@ -107,7 +161,6 @@ CanvasDrawAndHoldSnapshot _snapshot({
   required Offset? constraintStart,
   Offset? stylusPosition,
   bool constraintActive = false,
-  int inputAgeMicros = 0,
   bool nativeDrainScheduled = false,
   int pendingNativePackets = 0,
 }) => CanvasDrawAndHoldSnapshot(
@@ -115,7 +168,6 @@ CanvasDrawAndHoldSnapshot _snapshot({
   constraintActive: constraintActive,
   constraintStart: constraintStart,
   stylusPosition: stylusPosition,
-  inputAgeMicros: inputAgeMicros,
   nativeDrainScheduled: nativeDrainScheduled,
   pendingNativePackets: pendingNativePackets,
   strokeWorkQueueDepth: 0,
@@ -126,9 +178,10 @@ CanvasDrawAndHoldCoordinator _coordinator({
   required CanvasDrawAndHoldSnapshot Function() state,
   void Function(Map<String, Object?>)? onActivation,
   void Function(InkGesture?)? onDispatch,
+  Duration holdDuration = const Duration(milliseconds: 1),
 }) => CanvasDrawAndHoldCoordinator(
   snapshot: state,
   recordActivation: onActivation ?? (_) {},
   dispatch: onDispatch ?? (_) {},
-  holdDuration: const Duration(milliseconds: 1),
+  holdDuration: holdDuration,
 );

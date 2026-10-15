@@ -107,6 +107,9 @@ class _RecordingBrushEngine extends InMemoryEngineApi {
     required double rotationJitter,
     required double smudge,
     required double wetness,
+    required bool pulledString,
+    required double stabilizerDistancePx,
+    required bool catchUpOnEnd,
   }) async {
     settings.add(_BrushSettingsCall(brushId, diameter, opacity));
     await super.updateBrushSettings(
@@ -125,6 +128,9 @@ class _RecordingBrushEngine extends InMemoryEngineApi {
       rotationJitter: rotationJitter,
       smudge: smudge,
       wetness: wetness,
+      pulledString: pulledString,
+      stabilizerDistancePx: stabilizerDistancePx,
+      catchUpOnEnd: catchUpOnEnd,
     );
   }
 }

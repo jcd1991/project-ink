@@ -80,6 +80,8 @@ CanvasTileSynchronization _createSynchronization(
             required int packetMicros,
             required Duration tileDecode,
             required int dirtyTiles,
+            required int commitId,
+            required int revision,
           }) {},
     ),
   );

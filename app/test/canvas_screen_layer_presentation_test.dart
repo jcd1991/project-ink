@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/app/project_ink_app.dart';
 import 'package:project_ink/bridge/engine_api.dart';
+import 'package:project_ink/layers/layer_panel.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
@@ -44,7 +45,10 @@ void main() {
 
     await tester.tap(find.byTooltip('Layers').first);
     await tester.pumpAndSettle();
-    expect(find.text('Ink'), findsOneWidget);
+    expect(
+      find.descendant(of: find.byType(LayerPanel), matching: find.text('Ink')),
+      findsOneWidget,
+    );
 
     await tester.tap(find.byTooltip('Layer options').first);
     await tester.pumpAndSettle();
@@ -55,7 +59,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(engine.layerName, 'Highlights');
-    expect(find.text('Highlights'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(LayerPanel),
+        matching: find.text('Highlights'),
+      ),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 }

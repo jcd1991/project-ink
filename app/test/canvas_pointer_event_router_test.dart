@@ -5,6 +5,23 @@ import 'package:project_ink/canvas/canvas_pointer_event_router.dart';
 import 'package:project_ink/tools/illustration_tools.dart';
 
 void main() {
+  test('records stylus arrivals using the shared quiet-gesture clock', () {
+    var arrivals = 0;
+    final router = CanvasPointerEventRouter(
+      _host(onRecordInputArrival: () => arrivals++),
+    );
+
+    router.handle(
+      const PointerDownEvent(
+        pointer: 3,
+        kind: PointerDeviceKind.stylus,
+        position: Offset(5, 8),
+      ),
+    );
+
+    expect(arrivals, 1);
+  });
+
   test('router owns pointer tracking and can retire stale contacts', () {
     final router = CanvasPointerEventRouter(_host());
 
@@ -32,40 +49,42 @@ void main() {
   });
 }
 
-CanvasPointerEventRouterHost _host() => CanvasPointerEventRouterHost(
-  documentReplacementActive: () => false,
-  nativePencilContactActive: () => false,
-  recordTouchGesture: (_) {},
-  touchGestureCounts: () => (active: 0, tracked: 0),
-  activeTool: () => IllustrationTool.brush,
-  colorSamplerArmed: () => false,
-  disarmColorSampler: () {},
-  sampleCanvasColor: (_) async {},
-  handleToolEvent: (_) async {},
-  nativePointerEnabled: () => true,
-  strokeActive: () => false,
-  activeStrokeIsTouch: () => false,
-  singleFingerNavigation: () => false,
-  touchDrawingStrokeActive: () => false,
-  setTouchDrawingStrokeActive: (_) {},
-  cancelTouchDrawingStroke: ({required reason}) {},
-  beginStrokeAutosaveHold: () {},
-  nextPointerSequence: () => 0,
-  prepareDrawingPosition: (event) => event.localPosition,
-  updatePreview:
-      (
-        position, {
-        required isDown,
-        required isUp,
-        required pressure,
-        required sourceSequence,
-      }) => 0,
-  pointerPressure: (_) => 1,
-  schedulePreviewFrameDiagnostic: () {},
-  enqueueStrokeWork: (_) {},
-  handleDrawingEvent: (_, _, _) async {},
-  previewPerformanceTimingEnabled: () => false,
-  nowMicros: () => 0,
-  markPreviewUpdated: ({required startedMicros}) {},
-  diagnostics: CanvasDiagnosticRecorder.instance,
-);
+CanvasPointerEventRouterHost _host({void Function()? onRecordInputArrival}) =>
+    CanvasPointerEventRouterHost(
+      documentReplacementActive: () => false,
+      nativePencilContactActive: () => false,
+      recordTouchGesture: (_) {},
+      touchGestureCounts: () => (active: 0, tracked: 0),
+      activeTool: () => IllustrationTool.brush,
+      colorSamplerArmed: () => false,
+      disarmColorSampler: () {},
+      sampleCanvasColor: (_) async {},
+      handleToolEvent: (_) async {},
+      nativePointerEnabled: () => true,
+      strokeActive: () => false,
+      activeStrokeIsTouch: () => false,
+      singleFingerNavigation: () => false,
+      touchDrawingStrokeActive: () => false,
+      setTouchDrawingStrokeActive: (_) {},
+      cancelTouchDrawingStroke: ({required reason}) {},
+      beginStrokeAutosaveHold: () {},
+      recordInputArrival: onRecordInputArrival ?? () {},
+      nextPointerSequence: () => 0,
+      prepareDrawingPosition: (event) => event.localPosition,
+      updatePreview:
+          (
+            position, {
+            required isDown,
+            required isUp,
+            required pressure,
+            required sourceSequence,
+          }) => 0,
+      pointerPressure: (_) => 1,
+      schedulePreviewFrameDiagnostic: () {},
+      enqueueStrokeWork: (_) {},
+      handleDrawingEvent: (_, _, _) async {},
+      previewPerformanceTimingEnabled: () => false,
+      nowMicros: () => 0,
+      markPreviewUpdated: ({required startedMicros}) {},
+      diagnostics: CanvasDiagnosticRecorder.instance,
+    );

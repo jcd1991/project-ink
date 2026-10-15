@@ -19,6 +19,7 @@ class CanvasPhoneBottomControls extends StatelessWidget {
     required this.onEyedropper,
     required this.onTools,
     required this.onBrushes,
+    required this.onBrushEditorSection,
     required this.onSelectBrush,
     required this.onLayers,
     required this.activeColor,
@@ -37,6 +38,7 @@ class CanvasPhoneBottomControls extends StatelessWidget {
   final VoidCallback onEyedropper;
   final VoidCallback onTools;
   final VoidCallback onBrushes;
+  final ValueChanged<BrushEditorSection> onBrushEditorSection;
   final VoidCallback onSelectBrush;
   final VoidCallback onLayers;
   final Color activeColor;
@@ -46,16 +48,17 @@ class CanvasPhoneBottomControls extends StatelessWidget {
   final VoidCallback onTransparentColor;
   final VoidCallback onSelectEraser;
 
-  void _showBrushControls(BuildContext context) {
+  Future<void> _showBrushControls(BuildContext context) async {
     final brush = selectedBrush;
     if (brush == null) return;
-    showCanvasPhoneBrushControlsSheet(
+    final section = await showCanvasPhoneBrushControlsSheet(
       context,
       brush: brush,
       onBrushChanged: onBrushChanged,
       onSizeChangeEnd: onBrushSizeChangeEnd,
       onOpacityChangeEnd: onBrushOpacityChangeEnd,
     );
+    if (section != null) onBrushEditorSection(section);
   }
 
   void _handleMore(_PhoneMoreAction action) {
@@ -244,7 +247,7 @@ class _PhoneColorIcon extends StatelessWidget {
   );
 }
 
-Future<void> showCanvasPhoneBrushControlsSheet(
+Future<BrushEditorSection?> showCanvasPhoneBrushControlsSheet(
   BuildContext context, {
   required BrushPresetView brush,
   required ValueChanged<BrushPresetView> onBrushChanged,
@@ -262,7 +265,7 @@ Future<void> showCanvasPhoneBrushControlsSheet(
           .toDouble();
 
   var current = brush;
-  await showModalBottomSheet<void>(
+  return showModalBottomSheet<BrushEditorSection>(
     context: context,
     useSafeArea: true,
     showDragHandle: true,
@@ -271,66 +274,101 @@ Future<void> showCanvasPhoneBrushControlsSheet(
           builder:
               (context, setSheetState) => SafeArea(
                 bottom: true,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Text(
-                        'Brush controls',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          const Expanded(child: Text('Brush size')),
-                          Text('${current.size.toStringAsFixed(1)} px'),
-                        ],
-                      ),
-                      Semantics(
-                        label: 'Brush size',
-                        child: Slider(
-                          semanticFormatterCallback:
-                              (value) =>
-                                  '${brushSize(value).toStringAsFixed(1)} pixels',
-                          value: sizeSliderValue(current.size),
-                          min: 0,
-                          max: 1,
-                          onChanged: (value) {
-                            final next = current.copyWith(
-                              size: brushSize(value),
-                            );
-                            setSheetState(() => current = next);
-                            onBrushChanged(next);
-                          },
-                          onChangeEnd:
-                              (value) => onSizeChangeEnd(brushSize(value)),
+                child: SingleChildScrollView(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          'Brush controls',
+                          style: Theme.of(context).textTheme.titleMedium,
                         ),
-                      ),
-                      Row(
-                        children: [
-                          const Expanded(child: Text('Brush opacity')),
-                          Text('${(current.opacity * 100).round()}%'),
-                        ],
-                      ),
-                      Semantics(
-                        label: 'Brush opacity',
-                        child: Slider(
-                          semanticFormatterCallback:
-                              (value) => '${(value * 100).round()} percent',
-                          value: current.opacity,
-                          min: 0,
-                          max: 1,
-                          onChanged: (value) {
-                            final next = current.copyWith(opacity: value);
-                            setSheetState(() => current = next);
-                            onBrushChanged(next);
-                          },
-                          onChangeEnd: onOpacityChangeEnd,
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            const Expanded(child: Text('Brush size')),
+                            Text('${current.size.toStringAsFixed(1)} px'),
+                          ],
                         ),
-                      ),
-                    ],
+                        Semantics(
+                          label: 'Brush size',
+                          child: Slider(
+                            semanticFormatterCallback:
+                                (value) =>
+                                    '${brushSize(value).toStringAsFixed(1)} pixels',
+                            value: sizeSliderValue(current.size),
+                            min: 0,
+                            max: 1,
+                            onChanged: (value) {
+                              final next = current.copyWith(
+                                size: brushSize(value),
+                              );
+                              setSheetState(() => current = next);
+                              onBrushChanged(next);
+                            },
+                            onChangeEnd:
+                                (value) => onSizeChangeEnd(brushSize(value)),
+                          ),
+                        ),
+                        Row(
+                          children: [
+                            const Expanded(child: Text('Brush opacity')),
+                            Text('${(current.opacity * 100).round()}%'),
+                          ],
+                        ),
+                        Semantics(
+                          label: 'Brush opacity',
+                          child: Slider(
+                            semanticFormatterCallback:
+                                (value) => '${(value * 100).round()} percent',
+                            value: current.opacity,
+                            min: 0,
+                            max: 1,
+                            onChanged: (value) {
+                              final next = current.copyWith(opacity: value);
+                              setSheetState(() => current = next);
+                              onBrushChanged(next);
+                            },
+                            onChangeEnd: onOpacityChangeEnd,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Settings for ${current.name}',
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                        Text(
+                          'Smoothing ${(current.stabilization * 100).round()}% · '
+                          'Pulled string ${current.pulledString ? 'on' : 'off'}',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed:
+                                  () => Navigator.of(
+                                    context,
+                                  ).pop(BrushEditorSection.stroke),
+                              icon: const Icon(Icons.gesture),
+                              label: const Text('Stroke settings'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed:
+                                  () => Navigator.of(
+                                    context,
+                                  ).pop(BrushEditorSection.pressure),
+                              icon: const Icon(Icons.show_chart),
+                              label: const Text('Pressure settings'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

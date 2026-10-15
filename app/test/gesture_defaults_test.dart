@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:project_ink/canvas/gesture_defaults.dart';
 
 void main() {
-  test('Clip Studio and Procreate-style defaults are present', () {
+  test('gesture defaults include undo, redo, and canvas rotation', () {
     const defaults = GestureDefaults();
     expect(defaults.bindings['twoFingerTap'], InkGesture.undo);
     expect(defaults.bindings['threeFingerTap'], InkGesture.redo);

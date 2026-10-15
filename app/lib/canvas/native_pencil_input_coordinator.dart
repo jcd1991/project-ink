@@ -57,7 +57,7 @@ class NativePencilInputHost {
   final int? Function(int sequence) previewIndexForSequence;
   final String Function() strokeConstraintMode;
   final ValueChanged<Offset> setStylusLastPosition;
-  final ValueChanged<int> recordInputArrival;
+  final VoidCallback recordInputArrival;
   final ValueChanged<Offset> armDrawAndHold;
   final Future<void> Function(Uint8List packet) handleSerialPacket;
   final Future<void> Function() abortStrokeAfterPacketError;
@@ -195,7 +195,7 @@ class NativePencilInputCoordinator {
     );
     if (latestConfirmedPosition != null) {
       host.setStylusLastPosition(latestConfirmedPosition);
-      host.recordInputArrival(_arrivalClock.elapsedMicroseconds);
+      host.recordInputArrival();
       if (!hasDown && !hasUp && !hasCancel) {
         host.armDrawAndHold(latestConfirmedPosition);
       }

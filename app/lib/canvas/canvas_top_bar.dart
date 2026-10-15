@@ -127,8 +127,10 @@ class CanvasTopBar extends StatelessWidget {
     required this.activeToolLabel,
     required this.activeBrushLabel,
     required this.saveStatusLabel,
+    this.onRetrySave,
     required this.documentActionsEnabled,
     required this.documentActionRunning,
+    this.adjustmentEditActive = false,
     required this.onOpen,
     required this.onSave,
     required this.onExportMenu,
@@ -167,8 +169,10 @@ class CanvasTopBar extends StatelessWidget {
   final String activeToolLabel;
   final String activeBrushLabel;
   final String saveStatusLabel;
+  final VoidCallback? onRetrySave;
   final bool documentActionsEnabled;
   final bool documentActionRunning;
+  final bool adjustmentEditActive;
   final VoidCallback onOpen;
   final VoidCallback onSave;
   final VoidCallback onExportMenu;
@@ -207,6 +211,7 @@ class CanvasTopBar extends StatelessWidget {
         action: action,
         documentActionsEnabled: documentActionsEnabled,
         documentActionRunning: documentActionRunning,
+        adjustmentEditActive: adjustmentEditActive,
       );
 
   @override
@@ -528,12 +533,24 @@ class CanvasTopBar extends StatelessWidget {
               children: [
                 Expanded(
                   child: Tooltip(
-                    message: status,
-                    child: Text(
-                      status,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelLarge,
+                    message:
+                        saveStatusLabel == 'Recovery save failed'
+                            ? 'Tap to retry the recovery checkpoint. $status'
+                            : status,
+                    child: InkWell(
+                      onTap:
+                          saveStatusLabel == 'Recovery save failed'
+                              ? onRetrySave
+                              : null,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          status,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                      ),
                     ),
                   ),
                 ),

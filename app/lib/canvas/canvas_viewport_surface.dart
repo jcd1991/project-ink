@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 
 import '../layers/layer_panel_model.dart';
 import '../tools/illustration_tools.dart';
+import '../bridge/engine_api.dart';
 import 'canvas_painters.dart';
+import 'canvas_smart_guides.dart';
 import 'live_preview_controller.dart';
 import 'live_stroke_coordinator.dart';
 import 'mac_live_surface_controller.dart';
@@ -25,6 +27,9 @@ class CanvasViewportPaintState {
     required this.selection,
     required this.selectionTool,
     required this.previewPoints,
+    this.vectorCandidate,
+    this.vectorEditObject,
+    this.smartGuides,
     required this.rulerStart,
     required this.rulerEnd,
   });
@@ -39,6 +44,9 @@ class CanvasViewportPaintState {
   final Rect? selection;
   final IllustrationTool? selectionTool;
   final List<Offset> previewPoints;
+  final VectorCandidateView? vectorCandidate;
+  final VectorObjectSummaryView? vectorEditObject;
+  final CanvasSmartGuideResult? smartGuides;
   final Offset? rulerStart;
   final Offset? rulerEnd;
 }
@@ -60,6 +68,7 @@ class CanvasViewportSurface extends StatelessWidget {
     required this.onScaleEnd,
     required this.onSlowPreviewPaint,
     this.comicPreview,
+    this.showStrokePreview = true,
     super.key,
   });
 
@@ -81,6 +90,7 @@ class CanvasViewportSurface extends StatelessWidget {
   )
   onSlowPreviewPaint;
   final Widget? comicPreview;
+  final bool showStrokePreview;
 
   @override
   Widget build(BuildContext context) {
@@ -131,6 +141,9 @@ class CanvasViewportSurface extends StatelessWidget {
                     selection: paintState.selection,
                     selectionTool: paintState.selectionTool,
                     previewPoints: paintState.previewPoints,
+                    vectorCandidate: paintState.vectorCandidate,
+                    vectorEditObject: paintState.vectorEditObject,
+                    smartGuides: paintState.smartGuides,
                     rulerStart: paintState.rulerStart,
                     rulerEnd: paintState.rulerEnd,
                   ),
@@ -165,7 +178,7 @@ class CanvasViewportSurface extends StatelessWidget {
                     final showCpuPreview =
                         !nativeDabRendererExpected &&
                         livePreviewSurface?.gpuFrameReady.value != true;
-                    if (!showCpuPreview || preview.isEmpty) {
+                    if (!showStrokePreview || !showCpuPreview || preview.isEmpty) {
                       return const SizedBox.shrink();
                     }
                     return RepaintBoundary(

@@ -26,21 +26,18 @@ class ComicPageCanvasPainter extends CustomPainter {
     canvas.translate((size.width - page.widthPx * scale) / 2, 4);
     canvas.scale(scale, scale);
     final panelFill = Paint()..color = const Color.fromRGBO(55, 100, 160, .12);
-    final panelBorder =
-        Paint()
-          ..color = const Color(0xff234f7d)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 4 / scale;
+    final panelBorder = Paint()
+      ..color = const Color(0xff234f7d)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4 / scale;
     final balloonFill = Paint()..color = const Color(0xeeffffff);
-    final balloonBorder =
-        Paint()
-          ..color = const Color(0xff252525)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 3 / scale;
-    final guide =
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2 / scale;
+    final balloonBorder = Paint()
+      ..color = const Color(0xff252525)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3 / scale;
+    final guide = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2 / scale;
     guide.color = const Color(0xff2563eb);
     canvas.drawRect(
       Rect.fromLTWH(page.trimX, page.trimY, page.trimWidth, page.trimHeight),
@@ -141,26 +138,9 @@ class ComicPageCanvasPainter extends CustomPainter {
         canvas.drawOval(rect, balloonFill);
         canvas.drawOval(rect, balloonBorder);
       }
-      final previewText =
-          balloon.text.length > 80
-              ? '${balloon.text.substring(0, 80)}…'
-              : balloon.text;
-      final textPainter = TextPainter(
-        text: TextSpan(
-          text: previewText,
-          style: const TextStyle(color: Colors.black, fontSize: 26),
-        ),
-        textDirection: TextDirection.ltr,
-        maxLines: 3,
-        ellipsis: '…',
-      )..layout(maxWidth: (rect.width - 24).clamp(1, 2000).toDouble());
-      textPainter.paint(
-        canvas,
-        Offset(
-          rect.center.dx - textPainter.width / 2,
-          rect.center.dy - textPainter.height / 2,
-        ),
-      );
+      // Dialogue is supplied by the Rust-rendered page preview when available.
+      // This fallback painter intentionally draws only editable geometry so it
+      // cannot show a second, platform-shaped or truncated version of text.
     }
     canvas.restore();
   }
@@ -181,15 +161,13 @@ class PanelSplitPreviewPainter extends CustomPainter {
     final background = Paint()..color = const Color(0xfff5f7fb);
     final first = Paint()..color = const Color(0xffdbeafe);
     final second = Paint()..color = const Color(0xffede9fe);
-    final border =
-        Paint()
-          ..color = const Color(0xff475569)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2;
-    final divider =
-        Paint()
-          ..color = const Color(0xff1d4ed8)
-          ..strokeWidth = 4;
+    final border = Paint()
+      ..color = const Color(0xff475569)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    final divider = Paint()
+      ..color = const Color(0xff1d4ed8)
+      ..strokeWidth = 4;
     final rect = Offset.zero & size;
     canvas.drawRRect(
       RRect.fromRectAndRadius(rect, const Radius.circular(8)),
@@ -232,11 +210,10 @@ class ComicThumbnailPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final pagePaint = Paint()..color = const Color(0xfffafafa);
-    final borderPaint =
-        Paint()
-          ..color = const Color(0xff616161)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1;
+    final borderPaint = Paint()
+      ..color = const Color(0xff616161)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
     final pageRect = Offset.zero & size;
     canvas.drawRRect(
       RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
@@ -255,16 +232,14 @@ class ComicThumbnailPainter extends CustomPainter {
     canvas.translate(3, 3);
     canvas.scale(scale, scale);
     final panelFill = Paint()..color = const Color.fromRGBO(80, 120, 180, .12);
-    final panelBorder =
-        Paint()
-          ..color = const Color(0xff355a89)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 3 / scale;
-    final maskBorder =
-        Paint()
-          ..color = const Color(0xffc77c00)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2 / scale;
+    final panelBorder = Paint()
+      ..color = const Color(0xff355a89)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3 / scale;
+    final maskBorder = Paint()
+      ..color = const Color(0xffc77c00)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2 / scale;
     for (final panel in page.panels) {
       final rect = Rect.fromLTWH(panel.x, panel.y, panel.width, panel.height);
       canvas.drawRect(rect, panelFill);
@@ -285,11 +260,10 @@ class ComicThumbnailPainter extends CustomPainter {
       }
     }
     final balloonFill = Paint()..color = const Color(0xeeffffff);
-    final balloonBorder =
-        Paint()
-          ..color = const Color(0xff303030)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2 / scale;
+    final balloonBorder = Paint()
+      ..color = const Color(0xff303030)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2 / scale;
     for (final balloon in page.balloons) {
       final rect = Rect.fromLTWH(
         balloon.x,
@@ -390,10 +364,9 @@ class PrintGuidePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final pagePaint = Paint()..color = const Color(0xfffafafa);
-    final border =
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1;
+    final border = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
     canvas.drawRect(Offset.zero & size, pagePaint);
     if (page.widthPx <= 0 || page.heightPx <= 0) return;
     final scale = math.min(
@@ -482,10 +455,8 @@ class ComicPageThumbnail extends StatelessWidget {
         child: Center(
           child: Text(
             '${page.pageNumber}',
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: Colors.black54,
-              fontWeight: FontWeight.bold,
-            ),
+            style: Theme.of(context).textTheme.labelSmall
+                ?.copyWith(color: Colors.black54, fontWeight: FontWeight.bold),
           ),
         ),
       ),

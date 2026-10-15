@@ -389,6 +389,10 @@ class _ToolGroup extends StatelessWidget {
         for (final tool in tools)
           InkInspectorRow(
             title: tool.label,
+            subtitle:
+                tool == IllustrationTool.vectorEraser
+                    ? 'Legacy ink only; not Bézier paths'
+                    : null,
             icon: Icon(tool.icon, size: 18),
             selected: selected == tool,
             onTap: () => onSelected(tool),

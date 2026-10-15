@@ -129,6 +129,25 @@ void main() {
     await tester.tap(find.text('History'));
     expect(selectedPanel, 'history');
   });
+
+  testWidgets('recovery failure status invokes the retry callback', (
+    tester,
+  ) async {
+    var retried = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: _topBar(
+            saveStatusLabel: 'Recovery save failed',
+            onRetrySave: () => retried = true,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.textContaining('Recovery save failed'));
+    expect(retried, isTrue);
+  });
 }
 
 CanvasTopBar _topBar({
@@ -137,12 +156,15 @@ CanvasTopBar _topBar({
   EditorMode editorMode = EditorMode.simple,
   bool phoneLayout = true,
   bool professionalDesktop = false,
+  String saveStatusLabel = 'Saved',
+  VoidCallback? onRetrySave,
   ValueChanged<String> onSelectPanel = _ignoreString,
 }) => CanvasTopBar(
   documentName: 'Untitled',
   activeToolLabel: 'Brush',
   activeBrushLabel: 'Opaque Round',
-  saveStatusLabel: 'Saved',
+  saveStatusLabel: saveStatusLabel,
+  onRetrySave: onRetrySave,
   documentActionsEnabled: true,
   documentActionRunning: false,
   onOpen: _noop,

@@ -1,7 +1,7 @@
 # Native pointer transport v1
 
-The iOS/iPadOS, Android, and macOS adapters publish the existing pointer packet
-v1 through the Flutter event channel:
+The iOS/iPadOS and macOS adapters publish the existing pointer packet v1
+through the Flutter event channel:
 
 `org.projectink.studio/pointer_packets_v1`
 
@@ -45,13 +45,19 @@ drawing input. Hover end/cancel clears the crosshair.
 
 ## Android
 
-`MainActivity` intercepts stylus and eraser `MotionEvent`s only; ordinary touch
-events continue through Flutter. Move packets include historical samples as
-coalesced records. Pressure, tilt, orientation, stylus buttons, and eraser
-tool type are normalized to packet v1. A rising S Pen primary-button edge
-publishes `toggleEraser` on the discrete command channel; holding the button
-does not repeat the command. The EventChannels are registered from
-`configureFlutterEngine`.
+Canvas S Pen input uses Flutter's hit-tested pointer path. `MainActivity` must
+always pass the original `MotionEvent` to `FlutterActivity`; activity-level
+dispatch cannot distinguish the drawing surface from toolbar, dialog, and
+layer controls, so consuming the event prevents those controls from receiving
+stylus taps. Android does not subscribe to the native packet/readiness channels
+for canvas drawing. The generic Flutter path remains the sole Android stroke
+source and routes only contacts hit-tested by the canvas surface.
+
+`MainActivity` still watches for the rising edge of the S Pen primary-button
+state and publishes `toggleEraser` on the discrete command channel; holding the
+button does not repeat the command. Do not re-enable native Android canvas
+packets without a canvas-capture contract that excludes editor controls and
+preserves single-source stroke delivery.
 
 ## macOS
 

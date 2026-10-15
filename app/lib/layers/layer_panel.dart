@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../design_system/ink_components.dart';
+import 'layer_adjustment_editor.dart';
 import 'layer_panel_model.dart';
 
 LayerBlendMode _blendModeFromWire(String value) => switch (value) {
@@ -88,6 +89,10 @@ class LayerPanel extends StatelessWidget {
     this.onOpacityEditCancelled,
     this.onPresentationChanged,
     this.onAdjustmentChanged,
+    this.onBeginAdjustmentEdit,
+    this.onUpdateAdjustmentEdit,
+    this.onCommitAdjustmentEdit,
+    this.onCancelAdjustmentEdit,
     this.onAddLayer,
     this.onMoveLayer,
     this.onReorderLayer,
@@ -127,6 +132,10 @@ class LayerPanel extends StatelessWidget {
   final ValueChanged<LayerView>? onOpacityEditCancelled;
   final ValueChanged<LayerView>? onPresentationChanged;
   final ValueChanged<LayerView>? onAdjustmentChanged;
+  final BeginAdjustmentEdit? onBeginAdjustmentEdit;
+  final UpdateAdjustmentEdit? onUpdateAdjustmentEdit;
+  final FinishAdjustmentEdit? onCommitAdjustmentEdit;
+  final FinishAdjustmentEdit? onCancelAdjustmentEdit;
   final ValueChanged<LayerKind>? onAddLayer;
   final void Function(LayerView layer, int delta)? onMoveLayer;
   final void Function(LayerView layer, int index)? onReorderLayer;
@@ -215,6 +224,10 @@ class LayerPanel extends StatelessWidget {
                               onOpacityEditCancelled: onOpacityEditCancelled,
                               onPresentationChanged: onPresentationChanged,
                               onAdjustmentChanged: onAdjustmentChanged,
+                              onBeginAdjustmentEdit: onBeginAdjustmentEdit,
+                              onUpdateAdjustmentEdit: onUpdateAdjustmentEdit,
+                              onCommitAdjustmentEdit: onCommitAdjustmentEdit,
+                              onCancelAdjustmentEdit: onCancelAdjustmentEdit,
                             ),
                           ),
                 ),
@@ -914,7 +927,7 @@ class LayerPanel extends StatelessWidget {
       } else if (starts.length == 1 &&
           averageDelta.dx > 72 &&
           averageDelta.dy.abs() < 48) {
-        // Clip Studio-style right swipe: additive selection.
+        // horizontal swipe: additive selection.
         selection.toggleSecondary(layer.id);
         onSelectionChanged?.call(selection.selected.toSet());
       } else if (starts.length == 1 &&
@@ -1048,9 +1061,10 @@ class LayerPanel extends StatelessWidget {
           ),
         ),
         title: Text(layer.name),
-        subtitle: Row(
+        subtitle: Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            Flexible(child: Text(_friendlyStatus(layer, orderedLayers))),
+            Text(_friendlyStatus(layer, orderedLayers)),
             if (selection.primaryId == layer.id) const _ActiveLayerBadge(),
             if (soloLayerId == layer.id)
               const _LayerBadge(icon: Icons.filter_center_focus, label: 'Solo'),
@@ -1407,6 +1421,14 @@ class LayerPanel extends StatelessWidget {
                             canEditProperties ? onPresentationChanged : null,
                         onAdjustmentChanged:
                             canEditProperties ? onAdjustmentChanged : null,
+                        onBeginAdjustmentEdit:
+                            canEditProperties ? onBeginAdjustmentEdit : null,
+                        onUpdateAdjustmentEdit:
+                            canEditProperties ? onUpdateAdjustmentEdit : null,
+                        onCommitAdjustmentEdit:
+                            canEditProperties ? onCommitAdjustmentEdit : null,
+                        onCancelAdjustmentEdit:
+                            canEditProperties ? onCancelAdjustmentEdit : null,
                       ),
                     ),
                   _option(
@@ -2384,6 +2406,10 @@ class _LayerProperties extends StatelessWidget {
     required this.onOpacityEditCancelled,
     required this.onPresentationChanged,
     required this.onAdjustmentChanged,
+    required this.onBeginAdjustmentEdit,
+    required this.onUpdateAdjustmentEdit,
+    required this.onCommitAdjustmentEdit,
+    required this.onCancelAdjustmentEdit,
   });
 
   final LayerView layer;
@@ -2394,6 +2420,10 @@ class _LayerProperties extends StatelessWidget {
   final ValueChanged<LayerView>? onOpacityEditCancelled;
   final ValueChanged<LayerView>? onPresentationChanged;
   final ValueChanged<LayerView>? onAdjustmentChanged;
+  final BeginAdjustmentEdit? onBeginAdjustmentEdit;
+  final UpdateAdjustmentEdit? onUpdateAdjustmentEdit;
+  final FinishAdjustmentEdit? onCommitAdjustmentEdit;
+  final FinishAdjustmentEdit? onCancelAdjustmentEdit;
 
   static const _labels = <LayerBlendMode, String>{
     LayerBlendMode.normal: 'Normal',
@@ -2436,52 +2466,32 @@ class _LayerProperties extends StatelessWidget {
       if (layer.kind == LayerKind.adjustment) ...[
         const SizedBox(height: 8),
         InkInspectorSection(
-          title: 'Brightness / Contrast',
-          child: Column(
-            children: [
-              InkPropertySlider(
-                label: 'Brightness',
-                value: layer.adjustmentBrightness.toDouble(),
-                min: -100,
-                max: 100,
-                divisions: 200,
-                valueLabel: '${layer.adjustmentBrightness}%',
-                onChanged:
-                    (value) => onAdjustmentChanged?.call(
-                      layer.copyWith(adjustmentBrightness: value.round()),
-                    ),
-              ),
-              InkPropertySlider(
-                label: 'Contrast',
-                value: layer.adjustmentContrast.toDouble(),
-                min: -100,
-                max: 100,
-                divisions: 200,
-                valueLabel: '${layer.adjustmentContrast}%',
-                onChanged:
-                    (value) => onAdjustmentChanged?.call(
-                      layer.copyWith(adjustmentContrast: value.round()),
-                    ),
-              ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  key: const ValueKey('reset-adjustment'),
-                  onPressed:
-                      layer.adjustmentBrightness == 0 &&
-                              layer.adjustmentContrast == 0
-                          ? null
-                          : () => onAdjustmentChanged?.call(
-                            layer.copyWith(
-                              adjustmentBrightness: 0,
-                              adjustmentContrast: 0,
+          title: 'Adjustment',
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              key: const ValueKey('edit-adjustment'),
+              onPressed:
+                  onBeginAdjustmentEdit == null ||
+                          onUpdateAdjustmentEdit == null ||
+                          onCommitAdjustmentEdit == null ||
+                          onCancelAdjustmentEdit == null
+                      ? null
+                      : () => showDialog<void>(
+                        context: context,
+                        barrierDismissible: false,
+                        builder:
+                            (context) => LayerAdjustmentEditor(
+                              layer: layer,
+                              beginEdit: onBeginAdjustmentEdit!,
+                              updateEdit: onUpdateAdjustmentEdit!,
+                              commitEdit: onCommitAdjustmentEdit!,
+                              cancelEdit: onCancelAdjustmentEdit!,
                             ),
-                          ),
-                  icon: const Icon(Icons.restart_alt),
-                  label: const Text('Reset'),
-                ),
-              ),
-            ],
+                      ),
+              icon: const Icon(Icons.tune),
+              label: const Text('Edit adjustment…'),
+            ),
           ),
         ),
       ],

@@ -49,6 +49,7 @@ class LayerView {
     this.thumbnailHeight = 48,
     this.adjustmentBrightness = 0,
     this.adjustmentContrast = 0,
+    this.adjustmentJson = '{"BrightnessContrast":{"brightness":0,"contrast":0}}',
     this.canDrag = true,
     this.dragReason,
     this.canReceiveLayers = true,
@@ -89,6 +90,7 @@ class LayerView {
   final int thumbnailHeight;
   final int adjustmentBrightness;
   final int adjustmentContrast;
+  final String adjustmentJson;
   final bool canDrag;
   final String? dragReason;
   final bool canReceiveLayers;
@@ -122,6 +124,7 @@ class LayerView {
     int? thumbnailHeight,
     int? adjustmentBrightness,
     int? adjustmentContrast,
+    String? adjustmentJson,
     bool? maskEnabled,
     bool? maskInverted,
   }) => LayerView(
@@ -147,6 +150,7 @@ class LayerView {
     thumbnailHeight: thumbnailHeight ?? this.thumbnailHeight,
     adjustmentBrightness: adjustmentBrightness ?? this.adjustmentBrightness,
     adjustmentContrast: adjustmentContrast ?? this.adjustmentContrast,
+    adjustmentJson: adjustmentJson ?? this.adjustmentJson,
     canDrag: canDrag,
     dragReason: dragReason,
     canReceiveLayers: canReceiveLayers,

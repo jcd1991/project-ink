@@ -86,6 +86,25 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('brush dynamics are reachable beside phone size and opacity', (
+    tester,
+  ) async {
+    BrushEditorSection? selectedSection;
+    await tester.pumpWidget(
+      _host(onBrushEditorSection: (section) => selectedSection = section),
+    );
+
+    await tester.tap(find.byTooltip('Brush controls'));
+    await tester.pumpAndSettle();
+    expect(find.text('Smoothing 0% · Pulled string off'), findsOneWidget);
+    await tester.ensureVisible(find.text('Pressure settings'));
+    await tester.tap(find.text('Pressure settings'));
+    await tester.pumpAndSettle();
+
+    expect(selectedSection, BrushEditorSection.pressure);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('draw tools move into More on narrow phones', (tester) async {
     var toolsOpened = false;
     await tester.pumpWidget(
@@ -110,6 +129,7 @@ Widget _host({
   VoidCallback? onSelectEraser,
   VoidCallback? onLayers,
   VoidCallback? onMainColor,
+  ValueChanged<BrushEditorSection>? onBrushEditorSection,
 }) => MaterialApp(
   home: Scaffold(
     body: Align(
@@ -126,6 +146,7 @@ Widget _host({
           onEyedropper: () {},
           onTools: onTools ?? () {},
           onBrushes: onBrushes ?? () {},
+          onBrushEditorSection: onBrushEditorSection ?? (_) {},
           onSelectBrush: onSelectBrush ?? () {},
           onLayers: onLayers ?? () {},
           activeColor: Colors.black,

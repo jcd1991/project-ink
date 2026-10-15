@@ -105,10 +105,32 @@ class _RecordingPointerEngine extends InMemoryEngineApi {
 }
 
 class _TwoRasterLayerEngine extends _RecordingPointerEngine {
+  int undoCount = 0;
+
   @override
   Future<List<LayerSummaryView>> layerSummaries() async => const [
     LayerSummaryView(id: 1, name: 'Paint Layer 1', kind: 'Raster', order: 0),
     LayerSummaryView(id: 2, name: 'Paint Layer 2', kind: 'Raster', order: 1),
+  ];
+
+  @override
+  Future<void> undo() async {
+    undoCount++;
+    await super.undo();
+  }
+}
+
+class _RasterMaskLayerEngine extends _RecordingPointerEngine {
+  @override
+  Future<List<LayerSummaryView>> layerSummaries() async => const [
+    LayerSummaryView(id: 1, name: 'Paint', kind: 'Raster', order: 0),
+    LayerSummaryView(
+      id: 2,
+      name: 'Paint Mask',
+      kind: 'Mask',
+      order: 1,
+      maskOwner: 1,
+    ),
   ];
 }
 
@@ -296,6 +318,142 @@ class _IncoherentCpuSnapshotEngine extends InMemoryEngineApi {
 }
 
 void main() {
+  testWidgets('Android S Pen taps reach toolbar and layer controls', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _TwoRasterLayerEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.android,
+          workspacePreferences: const WorkspacePreferences(
+            editorMode: EditorMode.studio,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final canvas = find.bySemanticsLabel('Drawing canvas');
+    await _drawStylusStroke(tester, canvas);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(engine.targetLayerIds, [1]);
+
+    await _tapWithStylus(tester, find.byTooltip('Undo'));
+    await tester.pumpAndSettle();
+    expect(engine.undoCount, 1);
+
+    final layer = find.text('Paint Layer 2');
+    await tester.ensureVisible(layer);
+    await _tapWithStylus(tester, layer);
+    await tester.pump();
+
+    await _drawStylusStroke(tester, canvas);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(engine.targetLayerIds, [1, 2]);
+    expect(engine.pushCount, greaterThan(0));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Android S Pen strokes can target the selected mask', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _RasterMaskLayerEngine();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.android,
+          workspacePreferences: const WorkspacePreferences(
+            editorMode: EditorMode.studio,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final maskRow = find.text('Paint Mask').last;
+    await tester.ensureVisible(maskRow);
+    await tester.tap(maskRow);
+    await tester.pump();
+
+    await _drawStylusStroke(tester, find.bySemanticsLabel('Drawing canvas'));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(engine.targetLayerIds, [2]);
+    expect(engine.pushCount, greaterThan(0));
+    expect(engine.endCount, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('native iPad Pencil packets can target the selected mask', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final engine = _RasterMaskLayerEngine();
+    final packets = StreamController<Uint8List>.broadcast();
+    addTearDown(packets.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: CanvasScreen(
+          engine: engine,
+          targetPlatform: TargetPlatform.iOS,
+          workspacePreferences: const WorkspacePreferences(
+            editorMode: EditorMode.studio,
+          ),
+          nativePointerPacketsOverride: packets.stream,
+          nativePointerReadyOverride: Stream<void>.value(null),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final maskRow = find.text('Paint Mask').last;
+    await tester.ensureVisible(maskRow);
+    await tester.tap(maskRow);
+    await tester.pump();
+
+    final center = tester.getCenter(find.bySemanticsLabel('Drawing canvas'));
+    Uint8List packet(InkPointerPhase phase, Offset point, int sequence) =>
+        encodePointerPacket(
+          pointerId: 7,
+          device: InkPointerDevice.stylus,
+          phase: phase,
+          x: point.dx,
+          y: point.dy,
+          pressure: 1,
+          timestampNs: sequence * 1_000_000,
+          sequence: sequence,
+        );
+
+    packets.add(packet(InkPointerPhase.down, center, 1));
+    await tester.pump(const Duration(milliseconds: 30));
+    packets.add(packet(InkPointerPhase.move, center + const Offset(12, 8), 2));
+    await tester.pump(const Duration(milliseconds: 30));
+    packets.add(packet(InkPointerPhase.up, center + const Offset(18, 12), 3));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(engine.targetLayerIds, [2]);
+    expect(engine.pushCount, greaterThan(0));
+    expect(engine.endCount, 1);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('drawing targets the selected raster layer', (tester) async {
     tester.view.physicalSize = const Size(1100, 800);
     tester.view.devicePixelRatio = 1;
@@ -1350,4 +1508,22 @@ void main() {
       await gesture.cancel();
     },
   );
+}
+
+Future<void> _tapWithStylus(WidgetTester tester, Finder target) async {
+  final position = tester.getCenter(target);
+  final gesture = await tester.createGesture(kind: PointerDeviceKind.stylus);
+  await gesture.moveTo(position);
+  await gesture.down(position);
+  await gesture.up();
+  await tester.pump();
+}
+
+Future<void> _drawStylusStroke(WidgetTester tester, Finder canvas) async {
+  final gesture = await tester.createGesture(kind: PointerDeviceKind.stylus);
+  final center = tester.getCenter(canvas);
+  await gesture.moveTo(center);
+  await gesture.down(center);
+  await gesture.moveBy(const Offset(12, 8));
+  await gesture.up();
 }

@@ -517,11 +517,11 @@ void main() {
         lastError: null,
       ),
     );
-    expect(find.text('Unsaved changes'), findsOneWidget);
+    expect(find.text('Changes pending'), findsOneWidget);
     await showStatus(
       const AutosaveState(dirty: false, saving: true, lastError: null),
     );
-    expect(find.text('Saving…'), findsOneWidget);
+    expect(find.text('Saving recovery…'), findsOneWidget);
     await showStatus(
       const AutosaveState(
         dirty: true,
@@ -530,7 +530,7 @@ void main() {
         lastError: null,
       ),
     );
-    expect(find.text('Saving…  •  Changes pending'), findsOneWidget);
+    expect(find.text('Saving recovery…  •  Changes pending'), findsOneWidget);
     await showStatus(
       const AutosaveState(
         dirty: true,
@@ -539,7 +539,7 @@ void main() {
         lastError: 'disk unavailable',
       ),
     );
-    expect(find.text('Save failed'), findsOneWidget);
+    expect(find.text('Recovery save failed'), findsOneWidget);
     await showStatus(
       const AutosaveState(
         dirty: false,
@@ -548,7 +548,7 @@ void main() {
         hasSavedCheckpoint: true,
       ),
     );
-    expect(find.text('Saved'), findsOneWidget);
+    expect(find.text('Project saved'), findsOneWidget);
   });
 
   testWidgets('transformed canvas is clipped before it reaches the UI chrome', (

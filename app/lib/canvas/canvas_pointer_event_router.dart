@@ -35,6 +35,7 @@ class CanvasPointerEventRouterHost {
     required this.setTouchDrawingStrokeActive,
     required this.cancelTouchDrawingStroke,
     required this.beginStrokeAutosaveHold,
+    required this.recordInputArrival,
     required this.nextPointerSequence,
     required this.prepareDrawingPosition,
     required this.updatePreview,
@@ -65,6 +66,7 @@ class CanvasPointerEventRouterHost {
   final ValueChanged<bool> setTouchDrawingStrokeActive;
   final void Function({required String reason}) cancelTouchDrawingStroke;
   final VoidCallback beginStrokeAutosaveHold;
+  final VoidCallback recordInputArrival;
   final int Function() nextPointerSequence;
   final Offset Function(PointerEvent event) prepareDrawingPosition;
   final CanvasPreviewInputUpdate updatePreview;
@@ -137,6 +139,10 @@ class CanvasPointerEventRouter {
       // UIKit reports Pencil and palm contacts together. Ignore finger input
       // during Pencil contact to prevent palm marks and accidental gestures.
       return;
+    }
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus) {
+      host.recordInputArrival();
     }
     _trackPointer(event);
     if (event.kind == PointerDeviceKind.touch) {

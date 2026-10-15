@@ -35,19 +35,26 @@ void main() {
       final events = <String>[];
       LayerView? rejectedLayer;
       var reportedVisibility = true;
+      var reportedLock = true;
       final coordinator = _coordinator(
         events: events,
         layers: const [paintLayer],
         primaryLayerId: null,
-        onRejected: (layer, {required effectivelyVisible}) {
+        onRejected: (
+          layer, {
+          required effectivelyVisible,
+          required effectivelyLocked,
+        }) {
           rejectedLayer = layer;
           reportedVisibility = effectivelyVisible;
+          reportedLock = effectivelyLocked;
         },
       );
 
       expect(await coordinator.begin(), isFalse);
       expect(rejectedLayer, isNull);
       expect(reportedVisibility, isFalse);
+      expect(reportedLock, isFalse);
       expect(events, [
         'hold_begin',
         'persist_size',
@@ -58,7 +65,7 @@ void main() {
   );
 
   test(
-    'rejects hidden and non-raster targets without beginning a stroke',
+    'rejects hidden, locked, and non-paint targets without beginning a stroke',
     () async {
       for (final target in [
         const LayerView(
@@ -68,6 +75,25 @@ void main() {
           visible: false,
         ),
         const LayerView(id: 7, name: 'Group', kind: LayerKind.group),
+        const LayerView(id: 7, name: 'Vector', kind: LayerKind.vectorInk),
+        const LayerView(
+          id: 7,
+          name: 'Hidden mask',
+          kind: LayerKind.mask,
+          visible: false,
+        ),
+        const LayerView(
+          id: 7,
+          name: 'Locked paint',
+          kind: LayerKind.raster,
+          locked: true,
+        ),
+        const LayerView(
+          id: 7,
+          name: 'Locked mask',
+          kind: LayerKind.mask,
+          locked: true,
+        ),
       ]) {
         final events = <String>[];
         LayerView? rejectedLayer;
@@ -76,7 +102,11 @@ void main() {
           layers: [target],
           primaryLayerId: 7,
           visible: target.visible,
-          onRejected: (layer, {required effectivelyVisible}) {
+          onRejected: (
+            layer, {
+            required effectivelyVisible,
+            required effectivelyLocked,
+          }) {
             rejectedLayer = layer;
           },
         );
@@ -88,6 +118,55 @@ void main() {
       }
     },
   );
+
+  test('rejects a paint target beneath a locked group', () async {
+    final events = <String>[];
+    var reportedLock = false;
+    final coordinator = _coordinator(
+      events: events,
+      primaryLayerId: 8,
+      layers: const [
+        LayerView(
+          id: 7,
+          name: 'Locked group',
+          kind: LayerKind.group,
+          locked: true,
+        ),
+        LayerView(id: 8, name: 'Mask', kind: LayerKind.mask, parent: 7),
+      ],
+      onRejected: (
+        _, {
+        required effectivelyVisible,
+        required effectivelyLocked,
+      }) {
+        reportedLock = effectivelyLocked;
+      },
+    );
+
+    expect(await coordinator.begin(), isFalse);
+    expect(reportedLock, isTrue);
+    expect(events, contains('hold_finish:invalid_layer_target'));
+    expect(events.where((event) => event.startsWith('begin:')), isEmpty);
+  });
+
+  test('allows a selected mask through to the Rust stroke path', () async {
+    final events = <String>[];
+    const mask = LayerView(
+      id: 8,
+      name: 'Ink Mask',
+      kind: LayerKind.mask,
+      maskOwner: 7,
+    );
+    final coordinator = _coordinator(
+      events: events,
+      layers: [mask],
+      primaryLayerId: mask.id,
+    );
+
+    expect(await coordinator.begin(), isTrue);
+    expect(events, contains('begin:12:8'));
+    expect(events.where((event) => event.startsWith('reject:')), isEmpty);
+  });
 
   test(
     'a selected panel group routes drawing to its visible Ink layer',
@@ -124,7 +203,11 @@ CanvasStrokeStartCoordinator _coordinator({
   required int? primaryLayerId,
   bool visible = true,
   Future<void>? pendingEdit,
-  void Function(LayerView? layer, {required bool effectivelyVisible})?
+  void Function(
+    LayerView? layer, {
+    required bool effectivelyVisible,
+    required bool effectivelyLocked,
+  })?
   onRejected,
   void Function(int layerId)? onSelectTarget,
 }) => CanvasStrokeStartCoordinator(
@@ -149,9 +232,17 @@ CanvasStrokeStartCoordinator _coordinator({
         events.add('select:$id');
       }
     },
-    showInvalidTarget: (layer, {required effectivelyVisible}) {
+    showInvalidTarget: (
+      layer, {
+      required effectivelyVisible,
+      required effectivelyLocked,
+    }) {
       events.add('reject:${layer?.name}');
-      onRejected?.call(layer, effectivelyVisible: effectivelyVisible);
+      onRejected?.call(
+        layer,
+        effectivelyVisible: effectivelyVisible,
+        effectivelyLocked: effectivelyLocked,
+      );
     },
     selectedBrush: () => null,
     recordStrokeBegin: (brushId, _) => events.add('record:$brushId'),

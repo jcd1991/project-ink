@@ -35,7 +35,7 @@ void main() {
           previewIndexForSequence: (_) => null,
           strokeConstraintMode: () => 'none',
           setStylusLastPosition: (_) {},
-          recordInputArrival: (_) {},
+          recordInputArrival: () {},
           armDrawAndHold: (_) {},
           handleSerialPacket: (_) async {},
           abortStrokeAfterPacketError: () async {},
@@ -91,7 +91,7 @@ void main() {
           previewIndexForSequence: (_) => null,
           strokeConstraintMode: () => 'none',
           setStylusLastPosition: (_) {},
-          recordInputArrival: (_) {},
+          recordInputArrival: () {},
           armDrawAndHold: (_) {},
           handleSerialPacket: (_) async => serialPacketCount++,
           abortStrokeAfterPacketError: () async {},
@@ -144,7 +144,7 @@ void main() {
           previewIndexForSequence: (_) => null,
           strokeConstraintMode: () => 'none',
           setStylusLastPosition: (_) {},
-          recordInputArrival: (_) {},
+          recordInputArrival: () {},
           armDrawAndHold: (_) {},
           handleSerialPacket: (_) async {
             packetCount++;

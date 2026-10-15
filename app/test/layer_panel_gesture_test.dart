@@ -6,6 +6,36 @@ import 'package:project_ink/layers/layer_panel.dart';
 import 'package:project_ink/layers/layer_panel_model.dart';
 
 void main() {
+  testWidgets('active and locked badges fit a narrow layer panel', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 280,
+              child: LayerPanel(
+                layers: const [
+                  LayerView(
+                    id: 1,
+                    name: 'Ink',
+                    kind: LayerKind.raster,
+                    alphaLock: true,
+                    clipping: true,
+                  ),
+                ],
+                selection: LayerSelectionModel()..select(1),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Active'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('drag reorder handle has a named accessible target', (
     tester,
   ) async {
@@ -1867,7 +1897,7 @@ void main() {
     expect(find.text('Hue adjustment'), findsOneWidget);
     expect(tester.getSemantics(find.text('Hue adjustment')), isNotNull);
     expect(tester.getSemantics(find.text('Color pass')), isNotNull);
-    expect(find.text('Brightness / Contrast'), findsOneWidget);
+    expect(find.text('Adjustment'), findsOneWidget);
     expect(tester.takeException(), isNull);
     semanticsHandle.dispose();
   });
@@ -2464,11 +2494,14 @@ void main() {
     );
   });
 
-  testWidgets('adjustment layer exposes bounded brightness and contrast', (
+  testWidgets('adjustment editor previews then commits one transaction', (
     tester,
   ) async {
     final selection = LayerSelectionModel()..select(7);
-    LayerView? changed;
+    final previews = <String>[];
+    var began = 0;
+    var committed = 0;
+    var cancelled = 0;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -2480,34 +2513,55 @@ void main() {
                 kind: LayerKind.adjustment,
                 adjustmentBrightness: -10,
                 adjustmentContrast: 15,
+                adjustmentJson:
+                    '{"BrightnessContrast":{"brightness":-10,"contrast":15}}',
               ),
             ],
             selection: selection,
-            onAdjustmentChanged: (layer) => changed = layer,
+            onBeginAdjustmentEdit: (layerId) async {
+              began = layerId;
+              return 42;
+            },
+            onUpdateAdjustmentEdit: (editId, adjustmentJson) async {
+              expectSync(editId, 42);
+              previews.add(adjustmentJson);
+            },
+            onCommitAdjustmentEdit: (editId) async {
+              expectSync(editId, 42);
+              committed++;
+            },
+            onCancelAdjustmentEdit: (editId) async {
+              expectSync(editId, 42);
+              cancelled++;
+            },
           ),
         ),
       ),
     );
 
-    expect(find.text('Brightness / Contrast'), findsOneWidget);
-    expect(find.text('Brightness'), findsOneWidget);
-    expect(find.text('Contrast'), findsOneWidget);
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is Semantics && widget.properties.label == 'Brightness',
-      ),
-      findsOneWidget,
+    expect(find.text('Edit adjustment…'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('edit-adjustment')));
+    await tester.pumpAndSettle();
+    expect(began, 7);
+    expect(find.text('Edit Adjustment adjustment'), findsOneWidget);
+    final adjustmentType = tester.widget<DropdownButtonFormField<String>>(
+      find.byType(DropdownButtonFormField<String>).last,
     );
-    expect(find.byType(Slider), findsNWidgets(3));
-    tester.widget<Slider>(find.byType(Slider).at(1)).onChanged!(22);
-    expect(changed?.adjustmentBrightness, 22);
-    tester.widget<Slider>(find.byType(Slider).at(2)).onChanged!(-31);
-    expect(changed?.adjustmentContrast, -31);
-    await tester.ensureVisible(find.byKey(const ValueKey('reset-adjustment')));
-    await tester.tap(find.byKey(const ValueKey('reset-adjustment')));
-    expect(changed?.adjustmentBrightness, 0);
-    expect(changed?.adjustmentContrast, 0);
+    adjustmentType.onChanged!('Levels');
+    await tester.pump();
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+    expect(previews, hasLength(1));
+    expect(previews.single, contains('"Levels"'));
+    expect(committed, 1);
+    expect(cancelled, 0);
+
+    await tester.tap(find.byKey(const ValueKey('edit-adjustment')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(committed, 1);
+    expect(cancelled, 1);
   });
 
   testWidgets('group deletion confirms the full descendant count', (

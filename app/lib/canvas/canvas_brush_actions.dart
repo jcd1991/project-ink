@@ -123,6 +123,9 @@ class CanvasBrushActions {
         rotationJitter: preset.rotationJitter,
         smudge: preset.smudge,
         wetness: preset.wetness,
+        pulledString: preset.pulledString,
+        stabilizerDistancePx: preset.stabilizerDistancePx,
+        catchUpOnEnd: preset.catchUpOnEnd,
       );
     });
     _editQueues[brushId] = operation.catchError((
@@ -262,6 +265,9 @@ class CanvasBrushActions {
         rotationJitter: preset.rotationJitter,
         smudge: preset.smudge,
         wetness: preset.wetness,
+        pulledString: preset.pulledString,
+        stabilizerDistancePx: preset.stabilizerDistancePx,
+        catchUpOnEnd: preset.catchUpOnEnd,
       );
       final readBack = await engine.builtinBrushes();
       final savedBrush = readBack.where((entry) => entry.id == brushId);

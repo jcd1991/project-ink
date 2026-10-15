@@ -117,6 +117,9 @@ LayerView _toLayerView(LayerSummaryView layer, Uint8List? thumbnail) =>
       thumbnail: thumbnail,
       adjustmentBrightness: layer.adjustmentBrightness,
       adjustmentContrast: layer.adjustmentContrast,
+      adjustmentJson:
+          layer.adjustmentJson ??
+          '{"BrightnessContrast":{"brightness":${layer.adjustmentBrightness},"contrast":${layer.adjustmentContrast}}}',
       canDrag: layer.canDrag,
       dragReason: layer.dragReason,
       canReceiveLayers: layer.canReceiveLayers,

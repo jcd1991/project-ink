@@ -14,6 +14,7 @@ import '../bridge/generated/api.dart' as rust;
 import '../comics/comic_workspace.dart';
 import '../documents/autosave_coordinator.dart';
 import '../documents/document_picker.dart';
+import '../documents/recent_projects.dart';
 import '../layers/layer_panel_model.dart';
 import '../tools/brush_library.dart';
 import '../tools/illustration_tools.dart';
@@ -34,6 +35,7 @@ import 'canvas_clipboard_palette.dart';
 import 'canvas_color_sampling_coordinator.dart';
 import 'canvas_brush_actions.dart';
 import 'canvas_brush_color_actions.dart';
+import 'canvas_brush_color_dialog.dart';
 import 'canvas_gesture_coordinator.dart';
 import 'canvas_history_actions.dart';
 import 'canvas_brush_projection.dart';
@@ -118,15 +120,6 @@ const bool _disableIpadDabRenderer = bool.fromEnvironment(
   defaultValue: false,
 );
 
-String _autosaveStatusLabel(AutosaveState? state) {
-  if (state == null) return 'Not saved';
-  if (state.lastError != null) return 'Save failed';
-  if (state.saving && state.dirty) return 'Saving…  •  Changes pending';
-  if (state.saving) return 'Saving…';
-  if (state.hasUnsavedChanges) return 'Unsaved changes';
-  return state.hasSavedCheckpoint ? 'Saved' : 'Not saved';
-}
-
 class CanvasScreen extends StatefulWidget
     implements CanvasDocumentActionSession {
   CanvasScreen({
@@ -139,8 +132,11 @@ class CanvasScreen extends StatefulWidget
     this.documentPickerTimeout = const Duration(minutes: 2),
     this.onNewDocument,
     this.onOpenDocument,
+    this.onImportEditablePsd,
     this.activeDocumentPath,
     this.onDocumentSaved,
+    this.loadRecentProjects,
+    this.removeRecentProject,
     this.onBeforeOpenStudioProject,
     this.onStudioProjectOpened,
     this.onDiscardRecovery,
@@ -192,6 +188,8 @@ class CanvasScreen extends StatefulWidget
   /// Parent callback used to replace the current Rust document handle.
   @override
   final Future<void> Function(String path)? onOpenDocument;
+  @override
+  final Future<void> Function(String path)? onImportEditablePsd;
 
   /// Destination selected by the document session after the last successful
   /// Save As. A recovery checkpoint path is deliberately not exposed here.
@@ -202,6 +200,12 @@ class CanvasScreen extends StatefulWidget
   /// destination only after Rust and provider write-back both succeed.
   @override
   final Future<void> Function(String path)? onDocumentSaved;
+
+  @override
+  final Future<List<RecentProjectEntry>> Function()? loadRecentProjects;
+
+  @override
+  final Future<void> Function(String path)? removeRecentProject;
   @override
   final Future<void> Function()? onBeforeOpenStudioProject;
   @override
@@ -264,6 +268,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     'org.projectink.studio/window_close_v1',
   );
   bool _nativeWindowCloseHandlerInstalled = false;
+  bool _adjustmentEditActive = false;
   // Negative IDs cannot collide with persisted UUID-backed layer IDs. They
   // identify the authoritative Rust composite stream in the Flutter cache.
 
@@ -316,6 +321,7 @@ class _CanvasScreenState extends State<CanvasScreen>
               _touchStrokeCancellationCoordinator.setActive,
           cancelTouchDrawingStroke: _touchStrokeCancellationCoordinator.cancel,
           beginStrokeAutosaveHold: _beginStrokeAutosaveHold,
+          recordInputArrival: _drawAndHoldCoordinator.recordInputArrival,
           nextPointerSequence: _nextPointerSequence,
           prepareDrawingPosition:
               (event) => _applyStrokeConstraint(
@@ -386,6 +392,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                       : _activeColor,
           width: () => _brushLibrary.selected?.size ?? 8,
           pressureSize: () => _brushLibrary.selected?.pressureSize ?? 0,
+          pressureSizeReplace:
+              () => _brushLibrary.selected?.pressureSizeReplace ?? false,
           opacity: () => _brushLibrary.selected?.opacity ?? 1,
           pressureOpacity: () => _brushLibrary.selected?.pressureOpacity ?? 0,
           pressureCurvePoints:
@@ -413,7 +421,8 @@ class _CanvasScreenState extends State<CanvasScreen>
   late final CanvasLiveStrokePreviewInput _liveStrokePreviewInput =
       CanvasLiveStrokePreviewInput(
         CanvasLiveStrokePreviewInputHost(
-          livePreviewSurface: () => _livePreviewSurface,
+          livePreviewSurface:
+              () => _activePaintTargetIsMask ? null : _livePreviewSurface,
           strokeActive: () => _strokeActive,
           beginPreview:
               (position, pressure, sequence) =>
@@ -486,9 +495,6 @@ class _CanvasScreenState extends State<CanvasScreen>
           constraintActive: _strokeConstraintController.isActive,
           constraintStart: _strokeConstraintController.strokeStart,
           stylusPosition: _stylusLastPosition,
-          inputAgeMicros:
-              _nativePencilInputCoordinator.elapsedMicroseconds -
-              _lastNativeInputArrivalUs,
           nativeDrainScheduled: _nativePencilInputCoordinator.drainScheduled,
           pendingNativePackets:
               _nativePencilInputCoordinator.pendingPacketCount,
@@ -695,7 +701,7 @@ class _CanvasScreenState extends State<CanvasScreen>
               _strokePreviewActions.previewIndexForSourceSequence,
           strokeConstraintMode: () => _strokeConstraintController.mode,
           setStylusLastPosition: (value) => _stylusLastPosition = value,
-          recordInputArrival: (value) => _lastNativeInputArrivalUs = value,
+          recordInputArrival: _drawAndHoldCoordinator.recordInputArrival,
           armDrawAndHold: _armDrawAndHold,
           handleSerialPacket: _nativePencilStrokeCoordinator.handlePacket,
           abortStrokeAfterPacketError: _abortStrokeAfterPacketError,
@@ -777,7 +783,6 @@ class _CanvasScreenState extends State<CanvasScreen>
   final ValueNotifier<Offset?> _pencilHoverPosition = ValueNotifier<Offset?>(
     null,
   );
-  int _lastNativeInputArrivalUs = 0;
   Color _activeColor = const Color(0xff202124);
   Color _subColor = Colors.white;
   final ValueNotifier<int> _colorPaletteRevision = ValueNotifier<int>(0);
@@ -1074,7 +1079,11 @@ class _CanvasScreenState extends State<CanvasScreen>
         setState(() => _layerSelection.select(layerId));
         _layerActions.queuePanelStatePersistence();
       },
-      showInvalidTarget: (target, {required effectivelyVisible}) {
+      showInvalidTarget: (
+        target, {
+        required effectivelyVisible,
+        required effectivelyLocked,
+      }) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1083,6 +1092,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                   ? 'Choose a layer before drawing.'
                   : !effectivelyVisible
                   ? '“${target.name}” or one of its groups is hidden. Show it before drawing.'
+                  : effectivelyLocked
+                  ? '“${target.name}” or one of its groups is locked. Unlock it before drawing.'
                   : '“${target.name}” cannot receive brush strokes.',
             ),
           ),
@@ -1129,6 +1140,24 @@ class _CanvasScreenState extends State<CanvasScreen>
           (tool) => setState(() => _selectionGeometryTool = tool),
       markDirty: () => widget.autosave?.markDirty(),
       refreshTiles: _refreshTiles,
+      activeColor: () => _activeColor,
+      pickFillColor:
+          (initialColor) => showDialog<Color>(
+            context: context,
+            builder:
+                (_) => CanvasBrushColorDialog(
+                  initialColor: initialColor,
+                  title: 'Fill color',
+                  recentColors:
+                      widget.workspacePreferences?.recentColors ??
+                      const <String>[],
+                ),
+          ),
+      showMessage: (message) {
+        ScaffoldMessenger.maybeOf(
+          context,
+        )?.showSnackBar(SnackBar(content: Text(message)));
+      },
     ),
   );
   late final CanvasWorkspaceLayoutActions _workspaceLayoutActions =
@@ -1286,6 +1315,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   _editorActionRouter = CanvasEditorActionRouter(
     CanvasEditorActionRouterHost(
       isMounted: () => mounted,
+      isAdjustmentEditActive: () => _adjustmentEditActive,
       dispatchDocumentAction: _documentActions.dispatchEditorAction,
       dispatchHistoryAction: _historyActions.dispatchEditorAction,
       dispatchToolAction: _toolEventCoordinator.dispatchEditorAction,
@@ -1315,6 +1345,12 @@ class _CanvasScreenState extends State<CanvasScreen>
   LayerSelectionModel get _layerSelection => _layerPresentationState.selection;
   List<LayerView> get _layers => _layerPresentationState.layers;
   set _layers(List<LayerView> value) => _layerPresentationState.layers = value;
+  bool get _activePaintTargetIsMask =>
+      _layers
+          .where((layer) => layer.id == _layerSelection.primaryId)
+          .firstOrNull
+          ?.kind ==
+      LayerKind.mask;
   int? get _soloLayerId => _layerPresentationState.soloLayerId;
   set _soloLayerId(int? value) => _layerPresentationState.soloLayerId = value;
   final CanvasLayerProjectionService _layerProjectionService =
@@ -1329,6 +1365,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       onStrokesChanged: () => setState(() {}),
       markDirty: () => widget.autosave?.markDirty(),
       refreshTiles: _refreshTiles,
+      viewportScale: () => _viewportController.viewport.scale,
     ),
   );
   late final CanvasPanelToolActions _panelToolActions = CanvasPanelToolActions(
@@ -1367,6 +1404,10 @@ class _CanvasScreenState extends State<CanvasScreen>
           setSelectionGeometry: (value) => _selectionGeometry = value,
           setSelectionGeometryTool: (value) => _selectionGeometryTool = value,
           vectorOperations: _vectorActions,
+          vectorSelectionTolerance:
+              () =>
+                  8.0 /
+                  _viewportController.viewport.scale.clamp(0.1, 32).toDouble(),
           toolActions: _toolActions,
           markDirty:
               ({restartTimer = true}) =>
@@ -1407,6 +1448,11 @@ class _CanvasScreenState extends State<CanvasScreen>
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(message)));
+      },
+      setAdjustmentEditActive: (active) {
+        if (mounted && _adjustmentEditActive != active) {
+          setState(() => _adjustmentEditActive = active);
+        }
       },
     ),
   );
@@ -1467,12 +1513,22 @@ class _CanvasScreenState extends State<CanvasScreen>
     required int packetMicros,
     required Duration tileDecode,
     required int dirtyTiles,
+    required int commitId,
+    required int revision,
   }) {
-    _performanceTrace.markVisibleUpdate(
+    final latencyMicros = _performanceTrace.markVisibleUpdate(
       packetMicros: packetMicros,
       tileDecode: tileDecode,
       dirtyTiles: dirtyTiles,
     );
+    _canvasDiagnostics.record('canvas.pointer_to_visible_sample', {
+      'path': 'cpu_tile_frame',
+      'commitId': commitId,
+      'revision': revision,
+      'packetToVisibleUs': latencyMicros,
+      'tileDecodeUs': tileDecode.inMicroseconds,
+      'dirtyTiles': dirtyTiles,
+    });
     widget.onPerformanceSnapshot?.call(_performanceTrace.snapshot());
   }
 
@@ -1567,14 +1623,13 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     _tileSynchronization.startPolling(interval: _tilePollInterval);
     final platform = widget.targetPlatform ?? defaultTargetPlatform;
-    // Every desktop and mobile target has a native adapter. Keep the generic
-    // Flutter stylus path enabled until the platform EventChannel announces
-    // readiness, then route stylus packets through the native adapter exactly
-    // once. Pencil command events are only registered on platforms that
-    // provide them; Windows/Linux still use their pointer status channel.
+    // iOS and desktop targets have a native pointer adapter. Android S Pen
+    // input stays in Flutter so widget hit testing can distinguish canvas
+    // strokes from toolbar and layer-panel taps; Activity-level MotionEvent
+    // dispatch covers the whole Flutter view. Pencil command events remain
+    // available on Android for S Pen button actions.
     final supportsNativePointer =
         platform == TargetPlatform.iOS ||
-        platform == TargetPlatform.android ||
         platform == TargetPlatform.macOS ||
         platform == TargetPlatform.windows ||
         platform == TargetPlatform.linux;
@@ -1609,8 +1664,17 @@ class _CanvasScreenState extends State<CanvasScreen>
     unawaited(_refreshTiles(initial: true));
   }
 
-  Future<Object?> _handleNativeWindowCloseCall(MethodCall call) =>
-      _documentActions.handleNativeWindowCloseRequest(call.method);
+  Future<Object?> _handleNativeWindowCloseCall(MethodCall call) {
+    if (_adjustmentEditActive) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Apply or cancel the adjustment edit before closing.'),
+        ),
+      );
+      return Future<Object?>.value(false);
+    }
+    return _documentActions.handleNativeWindowCloseRequest(call.method);
+  }
 
   Future<void> _loadPhase2Projections() => _brushProjection.load();
 
@@ -1817,6 +1881,15 @@ class _CanvasScreenState extends State<CanvasScreen>
     _colorPaletteRevision.value++;
   }
 
+  void _openBrushEditorSection(
+    BrushEditorSection section,
+    BuildContext context,
+  ) {
+    _brushLibrary.selectEditorSection(section);
+    if (!_brushLibrary.editorOpen) _brushLibrary.toggleEditor();
+    _selectPanel('brushes', context);
+  }
+
   void _publishActiveColor(Color color) {
     if (!mounted) return;
     setState(() {
@@ -1947,6 +2020,24 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   void _handleNativePacket(Uint8List packet) =>
       _nativePencilInputCoordinator.handlePacket(packet);
+
+  void _retrySave() {
+    if (widget.autosaveState?.lastError != null) {
+      unawaited(
+        widget.autosave?.flush().catchError((Object error) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Recovery checkpoint failed again.'),
+              ),
+            );
+          }
+        }),
+      );
+      return;
+    }
+    unawaited(_documentActions.saveProject());
+  }
 
   int _nextPointerSequence() {
     final sequence = _sequence & 0xffffffff;
@@ -2574,12 +2665,20 @@ class _CanvasScreenState extends State<CanvasScreen>
                         _activeTool == IllustrationTool.panel
                             ? _panelToolPreviewPoints
                             : _toolEventCoordinator.previewPoints,
+                    vectorCandidate: _vectorActions.candidate,
+                    vectorEditObject:
+                        _activeTool == IllustrationTool.vectorTransform
+                            ? _vectorActions.selectedBezierPath
+                            : null,
+                    smartGuides: _vectorActions.smartGuides,
                     rulerStart: _toolEventCoordinator.ruler.start,
                     rulerEnd: _toolEventCoordinator.ruler.end,
                   ),
                   strokePreview: _strokePreview,
                   hoverPosition: _pencilHoverPosition,
-                  livePreviewSurface: _livePreviewSurface,
+                  livePreviewSurface:
+                      _activePaintTargetIsMask ? null : _livePreviewSurface,
+                  showStrokePreview: !_activePaintTargetIsMask,
                   isIpad: platform == TargetPlatform.iOS,
                   onPointerEvent: _handlePointer,
                   onScaleStart: (details) {
@@ -2636,6 +2735,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                             mirrored: _viewportController.mirrored,
                             documentWidth: widget.engine.documentInfo.widthPx,
                             documentHeight: widget.engine.documentInfo.heightPx,
+                            previewBytes:
+                                _comicWorkspace.pageOverlayPreviewBytes,
                             activePanelId: _comicClipPanelId,
                           )
                           : null,
@@ -2652,9 +2753,11 @@ class _CanvasScreenState extends State<CanvasScreen>
                     ),
                     activeToolLabel: _activeTool.label,
                     activeBrushLabel: _brushLibrary.selected?.name ?? 'Brush',
-                    saveStatusLabel: _autosaveStatusLabel(widget.autosaveState),
+                    saveStatusLabel: autosaveStatusLabel(widget.autosaveState),
+                    onRetrySave: _retrySave,
                     documentActionsEnabled: documentActionsEnabled,
                     documentActionRunning: _documentActionRunning,
+                    adjustmentEditActive: _adjustmentEditActive,
                     onOpen: _documentActions.openProject,
                     onSave: _documentActions.saveProject,
                     onExportMenu: _documentActions.exportDocumentMenu,
@@ -2713,6 +2816,9 @@ class _CanvasScreenState extends State<CanvasScreen>
                                       _brushActions
                                           .persistSelectedBrushSettings(),
                               onBrushes: () => _selectPanel('brushes', context),
+                              onBrushEditorSection:
+                                  (section) =>
+                                      _openBrushEditorSection(section, context),
                               onBrushColor:
                                   () => _selectPanel('color', context),
                               onToggleEraser:
@@ -2754,6 +2860,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                         () => _commands.dispatch(EditorActionId.eyedropper),
                     onTools: () => _selectPanel('tools', context),
                     onBrushes: () => _selectPanel('brushes', context),
+                    onBrushEditorSection:
+                        (section) => _openBrushEditorSection(section, context),
                     onSelectBrush:
                         () => _selectTool(
                           IllustrationTool.brush,
@@ -2796,6 +2904,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                         () => _commands.dispatch(EditorActionId.eyedropper),
                     onTools: () => _selectPanel('tools', context),
                     onBrushes: () => _selectPanel('brushes', context),
+                    onBrushEditorSection:
+                        (section) => _openBrushEditorSection(section, context),
                     onSelectBrush: () => _selectTool(IllustrationTool.brush),
                     onLayers: () => _selectPanel('layers', context),
                     activeColor: _activeColor,
@@ -2897,7 +3007,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                     documentWidth: widget.engine.documentInfo.widthPx,
                     documentHeight: widget.engine.documentInfo.heightPx,
                     selected: _selectionGeometry != null,
-                    saveStatus: _autosaveStatusLabel(widget.autosaveState),
+                    saveStatus: autosaveStatusLabel(widget.autosaveState),
+                    onRetrySave: _retrySave,
                   ),
                 ),
                 actions: CanvasDesktopWorkspaceActions(
@@ -3013,11 +3124,21 @@ class _CanvasScreenState extends State<CanvasScreen>
       menus: buildCanvasMacOSApplicationMenus(
         documentActionsEnabled: documentActionsEnabled,
         documentActionRunning: _documentActionRunning,
+        adjustmentEditActive: _adjustmentEditActive,
         onActionSelected: _commands.dispatch,
-        onQuit:
-            () => unawaited(
-              _nativeWindowCloseChannel.invokeMethod<void>('terminate'),
-            ),
+        onQuit: () {
+          if (_adjustmentEditActive) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Apply or cancel the adjustment edit before closing.',
+                ),
+              ),
+            );
+            return;
+          }
+          unawaited(_nativeWindowCloseChannel.invokeMethod<void>('terminate'));
+        },
       ),
       child: editorShell,
     );

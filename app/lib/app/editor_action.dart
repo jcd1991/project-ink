@@ -233,7 +233,9 @@ bool isEditorActionDisabled({
   required EditorActionId action,
   required bool documentActionsEnabled,
   required bool documentActionRunning,
+  bool adjustmentEditActive = false,
 }) =>
+    adjustmentEditActive ||
     (documentActionRunning && action == EditorActionId.newDocument) ||
     (!documentActionsEnabled &&
         const {

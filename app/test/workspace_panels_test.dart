@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -90,6 +91,38 @@ void main() {
       ),
       findsOneWidget,
     );
+    expect(tester.takeException(), isNull);
+    controller.dispose();
+  });
+
+  testWidgets('comic overlay image is shown below the editable panel guide', (
+    tester,
+  ) async {
+    final controller = _PanelGuideWorkspace(_panelProject());
+    final transparentPng = base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5s8AAAAASUVORK5CYII=',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ComicCanvasGuideOverlay(
+            controller: controller,
+            pan: const Offset(12, -8),
+            scale: 1.5,
+            rotation: 0.2,
+            mirrored: false,
+            documentWidth: 1024,
+            documentHeight: 1024,
+            previewBytes: transparentPng,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.byType(CustomPaint), findsNWidgets(2));
     expect(tester.takeException(), isNull);
     controller.dispose();
   });

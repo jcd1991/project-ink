@@ -58,6 +58,8 @@ class CanvasTileSynchronizationEffects {
     required int packetMicros,
     required Duration tileDecode,
     required int dirtyTiles,
+    required int commitId,
+    required int revision,
   })
   markVisibleUpdate;
 }
@@ -660,6 +662,8 @@ class CanvasTileSynchronization {
               packetMicros: packetMicros,
               tileDecode: tileDecode,
               dirtyTiles: dirtyTiles,
+              commitId: cpuCommitBatchId,
+              revision: revision,
             );
           });
         }

@@ -68,7 +68,11 @@ class BrushPresetView {
     this.colorRgba = 0x202124ff,
     this.spacing = 0.1,
     this.stabilization = 0,
+    this.pulledString = false,
+    this.stabilizerDistancePx = 0,
+    this.catchUpOnEnd = false,
     this.pressureSize = 0.55,
+    this.pressureSizeReplace = false,
     this.pressureOpacity = 0,
     this.pressureCurve = 0.5,
     this.pressureCurvePoints = const <BrushCurvePointView>[
@@ -89,6 +93,7 @@ class BrushPresetView {
        assert(opacity >= 0 && opacity <= 1),
        assert(spacing > 0 && spacing <= 4),
        assert(stabilization >= 0 && stabilization <= 1),
+       assert(stabilizerDistancePx >= 0 && stabilizerDistancePx <= 100),
        assert(pressureSize >= 0 && pressureSize <= 1),
        assert(pressureOpacity >= 0 && pressureOpacity <= 1),
        assert(pressureCurve >= 0 && pressureCurve <= 1),
@@ -109,7 +114,11 @@ class BrushPresetView {
   final int colorRgba;
   final double spacing;
   final double stabilization;
+  final bool pulledString;
+  final double stabilizerDistancePx;
+  final bool catchUpOnEnd;
   final double pressureSize;
+  final bool pressureSizeReplace;
   final double pressureOpacity;
   final double pressureCurve;
   final List<BrushCurvePointView> pressureCurvePoints;
@@ -133,7 +142,11 @@ class BrushPresetView {
     colorRgba,
     spacing,
     stabilization,
+    pulledString,
+    stabilizerDistancePx,
+    catchUpOnEnd,
     pressureSize,
+    pressureSizeReplace,
     pressureOpacity,
     pressureCurve,
     pressureCurvePoints.map((point) => <double>[point.x, point.y]).toList(),
@@ -156,7 +169,11 @@ class BrushPresetView {
     int? colorRgba,
     double? spacing,
     double? stabilization,
+    bool? pulledString,
+    double? stabilizerDistancePx,
+    bool? catchUpOnEnd,
     double? pressureSize,
+    bool? pressureSizeReplace,
     double? pressureOpacity,
     double? pressureCurve,
     List<BrushCurvePointView>? pressureCurvePoints,
@@ -180,7 +197,11 @@ class BrushPresetView {
     colorRgba: colorRgba ?? this.colorRgba,
     spacing: spacing ?? this.spacing,
     stabilization: stabilization ?? this.stabilization,
+    pulledString: pulledString ?? this.pulledString,
+    stabilizerDistancePx: stabilizerDistancePx ?? this.stabilizerDistancePx,
+    catchUpOnEnd: catchUpOnEnd ?? this.catchUpOnEnd,
     pressureSize: pressureSize ?? this.pressureSize,
+    pressureSizeReplace: pressureSizeReplace ?? this.pressureSizeReplace,
     pressureOpacity: pressureOpacity ?? this.pressureOpacity,
     pressureCurve: pressureCurve ?? this.pressureCurve,
     pressureCurvePoints: List<BrushCurvePointView>.unmodifiable(

@@ -8,6 +8,20 @@ import 'package:project_ink/tools/brush_library.dart';
 import 'package:project_ink/tools/brush_library_panel.dart';
 
 void main() {
+  test('all in-memory built-in brushes expose stylus pressure response', () async {
+    final summaries = await InMemoryEngineApi().builtinBrushes();
+
+    expect(summaries, hasLength(20));
+    for (final brush in summaries) {
+      expect(
+        brush.pressureSize > 0 || brush.pressureOpacity > 0,
+        isTrue,
+        reason: '${brush.name} should respond to stylus pressure',
+      );
+      expect(brush.pressureCurvePoints, isNotEmpty);
+    }
+  });
+
   test('selection requested before projection is applied when it arrives', () {
     final library = BrushLibraryModel(const <BrushPresetView>[]);
     library.selectWhenAvailable(13);
@@ -428,6 +442,57 @@ void main() {
       ),
     );
     expect(saveButton, findsNothing);
+  });
+
+  testWidgets('pulled-string brush settings are editable in the stroke draft', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final library = BrushLibraryModel(<BrushPresetView>[
+      const BrushPresetView(
+        id: 13,
+        name: 'Ink Pen Copy',
+        family: BrushFamily.ink,
+      ),
+    ])..select(13);
+    library.toggleEditor();
+    BrushPresetView? changed;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushLibraryPanel(
+            library: library,
+            onChanged: (preset) => changed = preset,
+          ),
+        ),
+      ),
+    );
+
+    final stabilizerSwitch = find.text('Pulled-string stabilizer');
+    await tester.ensureVisible(stabilizerSwitch);
+    await tester.tap(stabilizerSwitch);
+    await tester.pumpAndSettle();
+    expect(library.selected!.pulledString, isTrue);
+    expect(find.text('String distance'), findsOneWidget);
+    expect(changed!.pulledString, isTrue);
+
+    final distanceSlider = find.byType(Slider).last;
+    await tester.ensureVisible(distanceSlider);
+    await tester.drag(distanceSlider, const Offset(48, 0));
+    await tester.pumpAndSettle();
+    expect(library.selected!.stabilizerDistancePx, greaterThan(0));
+    expect(changed!.stabilizerDistancePx, greaterThan(0));
+
+    final catchUpSwitch = find.text('Catch up at stroke end');
+    await tester.ensureVisible(catchUpSwitch);
+    await tester.tap(catchUpSwitch);
+    await tester.pumpAndSettle();
+    expect(library.selected!.catchUpOnEnd, isTrue);
+    expect(changed!.catchUpOnEnd, isTrue);
   });
 
   testWidgets('advanced custom brush size stays inside the draft boundary', (

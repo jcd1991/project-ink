@@ -3,8 +3,10 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../bridge/engine_api/engine_api_models.dart';
 import '../layers/layer_panel_model.dart';
 import '../tools/illustration_tools.dart';
+import 'canvas_smart_guides.dart';
 import 'tile_cache.dart';
 
 final Finalizer<List<ui.Image>> _canvasPainterImageFinalizer = Finalizer((
@@ -220,6 +222,9 @@ class CanvasOverlayPainter extends CustomPainter {
     required this.selection,
     required this.selectionTool,
     required this.previewPoints,
+    this.vectorCandidate,
+    this.vectorEditObject,
+    this.smartGuides,
     required this.rulerStart,
     required this.rulerEnd,
   });
@@ -233,6 +238,9 @@ class CanvasOverlayPainter extends CustomPainter {
   final Rect? selection;
   final IllustrationTool? selectionTool;
   final List<Offset> previewPoints;
+  final VectorCandidateView? vectorCandidate;
+  final VectorObjectSummaryView? vectorEditObject;
+  final CanvasSmartGuideResult? smartGuides;
   final Offset? rulerStart;
   final Offset? rulerEnd;
 
@@ -278,6 +286,45 @@ class CanvasOverlayPainter extends CustomPainter {
       }
       canvas.drawPath(path, stroke);
     }
+    final guides = smartGuides;
+    if (guides != null) {
+      final guidePaint =
+          Paint()
+            ..color = const Color(0xff00c9a7).withValues(alpha: 0.9)
+            ..strokeWidth = 1
+            ..style = PaintingStyle.stroke;
+      final verticalX = guides.verticalX;
+      if (verticalX != null) {
+        canvas.drawLine(
+          toScreen(Offset(verticalX, 0), size),
+          toScreen(Offset(verticalX, documentHeight.toDouble()), size),
+          guidePaint,
+        );
+      }
+      final horizontalY = guides.horizontalY;
+      if (horizontalY != null) {
+        canvas.drawLine(
+          toScreen(Offset(0, horizontalY), size),
+          toScreen(Offset(documentWidth.toDouble(), horizontalY), size),
+          guidePaint,
+        );
+      }
+    }
+    final candidate = vectorCandidate;
+    if (candidate != null && candidate.matched) {
+      _paintVectorCandidate(canvas, size, candidate);
+    }
+    final editObject = vectorEditObject;
+    if (editObject != null && editObject.kind == 'BezierPath') {
+      final useCandidate =
+          candidate != null &&
+          candidate.matched &&
+          candidate.sourceId == editObject.id;
+      final geometry = useCandidate ? candidate.geometry : editObject.geometry;
+      final subpathStarts =
+          useCandidate ? candidate.subpathStarts : editObject.subpathStarts;
+      _paintVectorHandles(canvas, size, geometry, subpathStarts);
+    }
     if (rulerStart != null && rulerEnd != null) {
       final start = toScreen(rulerStart!, size);
       final end = toScreen(rulerEnd!, size);
@@ -293,8 +340,153 @@ class CanvasOverlayPainter extends CustomPainter {
       selection != oldDelegate.selection ||
       selectionTool != oldDelegate.selectionTool ||
       previewPoints != oldDelegate.previewPoints ||
+      vectorCandidate != oldDelegate.vectorCandidate ||
+      vectorEditObject != oldDelegate.vectorEditObject ||
+      smartGuides != oldDelegate.smartGuides ||
       rulerStart != oldDelegate.rulerStart ||
       rulerEnd != oldDelegate.rulerEnd;
+
+  void _paintVectorHandles(
+    Canvas canvas,
+    Size size,
+    List<double> geometry,
+    List<int> subpathStarts,
+  ) {
+    if (geometry.length % 6 != 0 || subpathStarts.isEmpty) return;
+    final anchorCount = geometry.length ~/ 6;
+    final handleLine =
+        Paint()
+          ..color = const Color(0xff63d6ff).withValues(alpha: 0.75)
+          ..strokeWidth = 1
+          ..style = PaintingStyle.stroke
+          ..isAntiAlias = true;
+    final handlePaint =
+        Paint()
+          ..color = const Color(0xff63d6ff)
+          ..style = PaintingStyle.fill
+          ..isAntiAlias = true;
+    final anchorPaint =
+        Paint()
+          ..color = const Color(0xffffffff)
+          ..style = PaintingStyle.fill
+          ..isAntiAlias = true;
+    for (var part = 0; part < subpathStarts.length; part++) {
+      final start = subpathStarts[part];
+      final end =
+          part + 1 < subpathStarts.length
+              ? subpathStarts[part + 1]
+              : anchorCount;
+      if (start < 0 || end > anchorCount || end <= start) return;
+      for (var anchor = start; anchor < end; anchor++) {
+        final offset = anchor * 6;
+        final point = _candidatePoint(geometry, offset, size);
+        for (final handleOffset in <int>[2, 4]) {
+          final handle = _candidatePoint(geometry, offset + handleOffset, size);
+          if ((handle - point).distance < 0.25 * scale) continue;
+          canvas.drawLine(point, handle, handleLine);
+          canvas.drawCircle(handle, 3, handlePaint);
+        }
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromCenter(center: point, width: 9, height: 9),
+            const Radius.circular(1.5),
+          ),
+          handleLine..style = PaintingStyle.stroke,
+        );
+        canvas.drawCircle(point, 3, anchorPaint);
+      }
+    }
+  }
+
+  void _paintVectorCandidate(
+    Canvas canvas,
+    Size size,
+    VectorCandidateView candidate,
+  ) {
+    if (candidate.kind == 'LegacyInk') {
+      final points = candidate.points;
+      if (points.length < 4 || points.length % 4 != 0) return;
+      final path = Path();
+      final first = toScreen(Offset(points[0], points[1]), size);
+      path.moveTo(first.dx, first.dy);
+      for (var offset = 4; offset < points.length; offset += 4) {
+        final point = toScreen(
+          Offset(points[offset], points[offset + 1]),
+          size,
+        );
+        path.lineTo(point.dx, point.dy);
+      }
+      final rgba = candidate.strokeRgba;
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = Color.fromARGB(
+            220,
+            (rgba >> 24) & 0xff,
+            (rgba >> 16) & 0xff,
+            (rgba >> 8) & 0xff,
+          )
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3.5 * scale
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true,
+      );
+      return;
+    }
+    final geometry = candidate.geometry;
+    final anchorCount = geometry.length ~/ 6;
+    if (anchorCount == 0 || candidate.subpathStarts.isEmpty) return;
+    final path = Path();
+    for (var part = 0; part < candidate.subpathStarts.length; part++) {
+      final start = candidate.subpathStarts[part];
+      final end =
+          part + 1 < candidate.subpathStarts.length
+              ? candidate.subpathStarts[part + 1]
+              : anchorCount;
+      if (start < 0 || end > anchorCount || end <= start) return;
+      final count = end - start;
+      final first = _candidatePoint(geometry, start * 6, size);
+      path.moveTo(first.dx, first.dy);
+      final isClosed = part < candidate.closed.length && candidate.closed[part];
+      final segmentCount = isClosed ? count : count - 1;
+      for (var offset = 0; offset < segmentCount; offset++) {
+        final from = start + offset;
+        final to = start + ((offset + 1) % count);
+        final outgoing = _candidatePoint(geometry, from * 6 + 4, size);
+        final incoming = _candidatePoint(geometry, to * 6 + 2, size);
+        final endPoint = _candidatePoint(geometry, to * 6, size);
+        path.cubicTo(
+          outgoing.dx,
+          outgoing.dy,
+          incoming.dx,
+          incoming.dy,
+          endPoint.dx,
+          endPoint.dy,
+        );
+      }
+      if (isClosed) path.close();
+    }
+    final rgba = candidate.strokeRgba;
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Color.fromARGB(
+          rgba & 0xff,
+          (rgba >> 24) & 0xff,
+          (rgba >> 16) & 0xff,
+          (rgba >> 8) & 0xff,
+        )
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = candidate.strokeWidth * scale
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true,
+    );
+  }
+
+  Offset _candidatePoint(List<double> geometry, int index, Size size) =>
+      toScreen(Offset(geometry[index], geometry[index + 1]), size);
 }
 
 /// Shows the Apple Pencil's projected tip position without changing the

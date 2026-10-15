@@ -530,8 +530,8 @@ class BrushLibraryPanel extends StatelessWidget {
                   library.editorOpen && !selected.isBuiltin
                       ? null
                       : (value) => onSizeChangeEnd?.call(
-                          _brushSizeFromSliderValue(value),
-                        ),
+                        _brushSizeFromSliderValue(value),
+                      ),
             ),
             InkPropertySlider(
               label: 'Opacity',
@@ -565,7 +565,7 @@ class BrushLibraryPanel extends StatelessWidget {
                     })
                     .toList(growable: false),
               ),
-              if (library.editorSection == BrushEditorSection.stroke)
+              if (library.editorSection == BrushEditorSection.stroke) ...[
                 InkPropertySlider(
                   label: 'Stabilize',
                   value: selected.stabilization,
@@ -579,6 +579,47 @@ class BrushLibraryPanel extends StatelessWidget {
                     onChanged?.call(updated);
                   },
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Pulled-string stabilizer'),
+                  subtitle: const Text(
+                    'Keeps the stroke behind the stylus, then catches up at the end.',
+                  ),
+                  value: selected.pulledString,
+                  onChanged: (value) {
+                    final updated = selected.copyWith(pulledString: value);
+                    library.updateDraft(updated);
+                    onChanged?.call(updated);
+                  },
+                ),
+                if (selected.pulledString) ...[
+                  InkPropertySlider(
+                    label: 'String distance',
+                    value: selected.stabilizerDistancePx,
+                    min: 0,
+                    max: 100,
+                    divisions: 100,
+                    valueLabel: '${selected.stabilizerDistancePx.round()} px',
+                    onChanged: (value) {
+                      final updated = selected.copyWith(
+                        stabilizerDistancePx: value,
+                      );
+                      library.updateDraft(updated);
+                      onChanged?.call(updated);
+                    },
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Catch up at stroke end'),
+                    value: selected.catchUpOnEnd,
+                    onChanged: (value) {
+                      final updated = selected.copyWith(catchUpOnEnd: value);
+                      library.updateDraft(updated);
+                      onChanged?.call(updated);
+                    },
+                  ),
+                ],
+              ],
               if (library.editorSection == BrushEditorSection.pressure) ...[
                 InkPropertySlider(
                   label: 'Pressure size',

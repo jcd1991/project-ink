@@ -82,7 +82,9 @@ class ComicWorkspaceController extends ChangeNotifier {
   rust.ComicProjectView? _snapshot;
   rust.ComicPrintPreviewView? _printPreview;
   Uint8List? _pagePreviewBytes;
+  Uint8List? _pageOverlayPreviewBytes;
   int? _pagePreviewIndex;
+  int _pagePreviewRequest = 0;
   int _lastKnownPageIndex = 0;
   int _nextLocalId = DateTime.now().microsecondsSinceEpoch;
   Uint8List? _lastPersistedJson;
@@ -95,6 +97,8 @@ class ComicWorkspaceController extends ChangeNotifier {
   rust.ComicProjectView? get snapshot => _snapshot;
   rust.ComicPrintPreviewView? get printPreview => _printPreview;
   Uint8List? get pagePreviewBytes => _pagePreviewBytes;
+  Uint8List? get pageOverlayPreviewBytes =>
+      _pagePreviewIndex == activePageIndex ? _pageOverlayPreviewBytes : null;
   int? get pagePreviewIndex => _pagePreviewIndex;
   int get activePageIndex => _pagePreviewIndex ?? _lastKnownPageIndex;
   Object? get error => _error;
@@ -128,12 +132,18 @@ class ComicWorkspaceController extends ChangeNotifier {
     await _publishActivePage();
   }
 
+  void _invalidatePagePreview() {
+    _pagePreviewRequest++;
+    _pagePreviewBytes = null;
+    _pageOverlayPreviewBytes = null;
+    _pagePreviewIndex = null;
+  }
+
   Future<void> _persist() async {
     // A structural edit invalidates the rasterized preview. The next
     // workspace frame will request a fresh Rust-owned preview for the
     // selected page instead of showing stale artwork.
-    _pagePreviewBytes = null;
-    _pagePreviewIndex = null;
+    _invalidatePagePreview();
     final handle = _handle;
     final persist = onPersist;
     if (handle == null) return;
@@ -290,8 +300,7 @@ class ComicWorkspaceController extends ChangeNotifier {
       _snapshot = snapshot;
       _lastKnownPageIndex = 0;
       _printPreview = null;
-      _pagePreviewBytes = null;
-      _pagePreviewIndex = null;
+      _invalidatePagePreview();
       _lastPersistedJson = Uint8List.fromList(
         await rust.studioProjectToJson(handle: handle),
       );
@@ -315,8 +324,7 @@ class ComicWorkspaceController extends ChangeNotifier {
     _illustrationPanelProject = false;
     _snapshot = null;
     _printPreview = null;
-    _pagePreviewBytes = null;
-    _pagePreviewIndex = null;
+    _invalidatePagePreview();
     _canUndo = false;
     _canRedo = false;
     // Keep the last validated checkpoint available for an in-session
@@ -359,8 +367,7 @@ class ComicWorkspaceController extends ChangeNotifier {
       await _publishProject();
       await _publishActivePage();
       _printPreview = null;
-      _pagePreviewBytes = null;
-      _pagePreviewIndex = null;
+      _invalidatePagePreview();
       _canUndo = await rust.projectCanUndo(handle: next);
       _canRedo = await rust.projectCanRedo(handle: next);
       _lastPersistedJson = Uint8List.fromList(persisted);
@@ -404,8 +411,7 @@ class ComicWorkspaceController extends ChangeNotifier {
       await _publishActivePage();
       _lastKnownPageIndex = 0;
       _printPreview = null;
-      _pagePreviewBytes = null;
-      _pagePreviewIndex = null;
+      _invalidatePagePreview();
       _lastPersistedJson = Uint8List.fromList(
         await rust.studioProjectToJson(handle: next),
       );
@@ -497,8 +503,7 @@ class ComicWorkspaceController extends ChangeNotifier {
       await _publishProject();
       await _publishActivePage();
       _lastKnownPageIndex = pageIndex;
-      _pagePreviewBytes = null;
-      _pagePreviewIndex = null;
+      _invalidatePagePreview();
       _error = null;
     } catch (error) {
       _error = error;
@@ -557,8 +562,7 @@ class ComicWorkspaceController extends ChangeNotifier {
               : pageIndex.clamp(0, pages.length - 1);
       await rust.activatePage(handle: handle, pageId: pages[nextIndex].id);
       _lastKnownPageIndex = nextIndex;
-      _pagePreviewBytes = null;
-      _pagePreviewIndex = null;
+      _invalidatePagePreview();
       await _publishProject();
       await _publishActivePage();
       await _persist();
@@ -875,21 +879,22 @@ class ComicWorkspaceController extends ChangeNotifier {
       }
       if (linkedPanel == null) return;
     }
-    final width = linkedPanel == null
-        ? 420.0
-        : math.min(360.0, linkedPanel.width * 0.82);
-    final height = linkedPanel == null
-        ? 180.0
-        : math.min(150.0, linkedPanel.height * 0.22);
-    final tailLength = linkedPanel == null
-        ? 48.0
-        : math.min(48.0, linkedPanel.height * 0.08);
-    final x = linkedPanel == null
-        ? page.widthPx * 0.08
-        : linkedPanel.x + (linkedPanel.width - width) / 2;
-    final y = linkedPanel == null
-        ? page.heightPx * 0.06
-        : linkedPanel.y + linkedPanel.height * 0.08;
+    final width =
+        linkedPanel == null ? 420.0 : math.min(360.0, linkedPanel.width * 0.82);
+    final height =
+        linkedPanel == null
+            ? 180.0
+            : math.min(150.0, linkedPanel.height * 0.22);
+    final tailLength =
+        linkedPanel == null ? 48.0 : math.min(48.0, linkedPanel.height * 0.08);
+    final x =
+        linkedPanel == null
+            ? page.widthPx * 0.08
+            : linkedPanel.x + (linkedPanel.width - width) / 2;
+    final y =
+        linkedPanel == null
+            ? page.heightPx * 0.06
+            : linkedPanel.y + linkedPanel.height * 0.08;
     try {
       _snapshot = await rust.studioAddStyledBalloon(
         handle: handle,
@@ -1407,18 +1412,33 @@ class ComicWorkspaceController extends ChangeNotifier {
   Future<Uint8List?> loadPagePreview(int pageIndex) async {
     final handle = _handle;
     if (handle == null) return null;
+    final request = ++_pagePreviewRequest;
     try {
       _lastKnownPageIndex = pageIndex;
-      _pagePreviewBytes = await rust.studioRenderPagePreview(
+      final pagePreview = await rust.studioRenderPagePreview(
         handle: handle,
         pageIndex: pageIndex,
         maxDimension: 1024,
       );
+      final overlayPreview = await rust.studioRenderPageOverlayPreview(
+        handle: handle,
+        pageIndex: pageIndex,
+        maxDimension: 1024,
+      );
+      if (request != _pagePreviewRequest || !identical(handle, _handle)) {
+        return null;
+      }
+      _pagePreviewBytes = pagePreview;
+      _pageOverlayPreviewBytes = overlayPreview;
       _pagePreviewIndex = pageIndex;
       _error = null;
     } catch (error) {
+      if (request != _pagePreviewRequest || !identical(handle, _handle)) {
+        return null;
+      }
       _error = error;
       _pagePreviewBytes = null;
+      _pageOverlayPreviewBytes = null;
       _pagePreviewIndex = null;
     }
     notifyListeners();
@@ -1443,7 +1463,22 @@ class ComicWorkspaceController extends ChangeNotifier {
     }
   }
 
-  Future<int?> batchExportPages(String directory) async {
+  Future<List<String>?> renderWarnings() async {
+    final handle = _handle;
+    if (handle == null) return const [];
+    try {
+      return await rust.studioComicRenderWarnings(handle: handle);
+    } catch (error) {
+      _error = error;
+      notifyListeners();
+      return null;
+    }
+  }
+
+  Future<int?> batchExportPages(
+    String directory, {
+    bool allowRenderWarnings = false,
+  }) async {
     final handle = _handle;
     if (handle == null || directory.trim().isEmpty) return null;
     try {
@@ -1453,10 +1488,12 @@ class ComicWorkspaceController extends ChangeNotifier {
                 handle: handle,
                 directory: directory,
                 maxHeightPx: 2048,
+                allowRenderWarnings: allowRenderWarnings,
               )
               : await rust.studioBatchExportPages(
                 handle: handle,
                 directory: directory,
+                allowRenderWarnings: allowRenderWarnings,
               );
       _error = null;
       notifyListeners();

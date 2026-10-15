@@ -28,7 +28,11 @@ class CanvasStrokeStartHost {
   final List<LayerView> Function() layers;
   final bool Function(LayerView layer) layerEffectivelyVisible;
   final void Function(int layerId) selectTargetLayer;
-  final void Function(LayerView? target, {required bool effectivelyVisible})
+  final void Function(
+    LayerView? target, {
+    required bool effectivelyVisible,
+    required bool effectivelyLocked,
+  })
   showInvalidTarget;
   final BrushPresetView? Function() selectedBrush;
   final void Function(int brushId, BrushPresetView? selectedBrush)
@@ -53,22 +57,20 @@ class CanvasStrokeStartCoordinator {
     if (pendingBrushEdit != null) await pendingBrushEdit;
 
     final primaryLayerId = host.primaryLayerId();
+    final layers = host.layers();
     var target =
         primaryLayerId == null
             ? null
-            : host
-                .layers()
-                .where((layer) => layer.id == primaryLayerId)
-                .firstOrNull;
-    if (target?.kind == LayerKind.panelGroup) {
-      final panelGroupId = target!.id;
-      final editableChildren = host
-          .layers()
+            : layers.where((layer) => layer.id == primaryLayerId).firstOrNull;
+    if (target?.kind == LayerKind.panelGroup &&
+        !_isEffectivelyLocked(target!, layers)) {
+      final panelGroupId = target.id;
+      final editableChildren = layers
           .where(
             (layer) =>
                 layer.parent == panelGroupId &&
                 layer.kind == LayerKind.raster &&
-                !layer.locked &&
+                !_isEffectivelyLocked(layer, layers) &&
                 host.layerEffectivelyVisible(layer),
           )
           .toList(growable: false);
@@ -80,9 +82,17 @@ class CanvasStrokeStartCoordinator {
       if (target != null) host.selectTargetLayer(target.id);
     }
     final visible = target != null && host.layerEffectivelyVisible(target);
-    if (target == null || !visible || target.kind != LayerKind.raster) {
+    final locked = target != null && _isEffectivelyLocked(target, layers);
+    if (target == null ||
+        !visible ||
+        locked ||
+        (target.kind != LayerKind.raster && target.kind != LayerKind.mask)) {
       host.finishAutosaveHold(reason: 'invalid_layer_target');
-      host.showInvalidTarget(target, effectivelyVisible: visible);
+      host.showInvalidTarget(
+        target,
+        effectivelyVisible: visible,
+        effectivelyLocked: locked,
+      );
       return false;
     }
 
@@ -90,5 +100,22 @@ class CanvasStrokeStartCoordinator {
     host.recordStrokeBegin(brushId, selectedBrush);
     await host.beginBrushStrokeOnLayer(brushId, target.id);
     return true;
+  }
+
+  bool _isEffectivelyLocked(LayerView layer, List<LayerView> layers) {
+    final layersById = <int, LayerView>{
+      for (final candidate in layers) candidate.id: candidate,
+    };
+    final visited = <int>{layer.id};
+    var current = layer;
+    while (true) {
+      if (current.locked) return true;
+      final parentId = current.parent;
+      if (parentId == null) return false;
+      if (!visited.add(parentId)) return true;
+      final parent = layersById[parentId];
+      if (parent == null) return true;
+      current = parent;
+    }
   }
 }

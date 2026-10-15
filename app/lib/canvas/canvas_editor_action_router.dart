@@ -7,6 +7,7 @@ import 'canvas_workspace_panel_selection.dart';
 class CanvasEditorActionRouterHost {
   const CanvasEditorActionRouterHost({
     required this.isMounted,
+    required this.isAdjustmentEditActive,
     required this.dispatchDocumentAction,
     required this.dispatchHistoryAction,
     required this.dispatchToolAction,
@@ -24,6 +25,7 @@ class CanvasEditorActionRouterHost {
   });
 
   final bool Function() isMounted;
+  final bool Function() isAdjustmentEditActive;
   final bool Function(EditorActionId action) dispatchDocumentAction;
   final bool Function(EditorActionId action) dispatchHistoryAction;
   final bool Function(EditorActionId action) dispatchToolAction;
@@ -50,7 +52,7 @@ class CanvasEditorActionRouter {
   final CanvasEditorActionRouterHost host;
 
   void dispatch(EditorActionId action) {
-    if (!host.isMounted()) return;
+    if (!host.isMounted() || host.isAdjustmentEditActive()) return;
     if (host.dispatchDocumentAction(action)) return;
     if (host.dispatchHistoryAction(action)) return;
     if (host.dispatchToolAction(action)) return;

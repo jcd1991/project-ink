@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app/editor_action.dart';
 import '../bridge/engine_api.dart';
@@ -32,6 +33,8 @@ class CanvasToolEventHost {
     required this.setSelectionGeometry,
     required this.setSelectionGeometryTool,
     required this.vectorOperations,
+    required this.vectorSelectionTolerance,
+    this.vectorSelectionAdditive,
     required this.toolActions,
     required this.markDirty,
     required this.onSelectionCleared,
@@ -47,6 +50,8 @@ class CanvasToolEventHost {
   final ValueChanged<Rect?> setSelectionGeometry;
   final ValueChanged<IllustrationTool?> setSelectionGeometryTool;
   final CanvasVectorToolOperations vectorOperations;
+  final double Function() vectorSelectionTolerance;
+  final bool Function()? vectorSelectionAdditive;
   final CanvasToolActions toolActions;
   final void Function({bool restartTimer}) markDirty;
   final VoidCallback onSelectionCleared;
@@ -64,6 +69,10 @@ class CanvasToolEventCoordinator {
   List<Offset> _toolPoints = const [];
   List<double> _vectorPoints = const [];
   CanvasRulerState _ruler = const CanvasRulerState();
+  bool _vectorTransformWasSelected = false;
+  Future<bool>? _vectorSelectionFuture;
+  int _vectorGestureGeneration = 0;
+  CanvasVectorHandleTarget? _vectorPathHandleTarget;
 
   EngineApi get engine => host.engine();
   List<Offset> get previewPoints => _toolPoints;
@@ -83,10 +92,16 @@ class CanvasToolEventCoordinator {
 
   /// Clears transient pointer-path state when the tool or engine changes.
   void resetTransientState() {
+    _vectorGestureGeneration++;
+    host.vectorOperations.cancelPendingVectorSelection();
+    host.vectorOperations.cancelVectorTransformPreview();
+    _vectorSelectionFuture = null;
+    _vectorPathHandleTarget = null;
     _toolStart = null;
     _targetLayerId = null;
     _toolPoints = const [];
     _vectorPoints = const [];
+    _vectorTransformWasSelected = false;
   }
 
   /// Routes selection commands to the selection workflows owned here.
@@ -148,6 +163,55 @@ class CanvasToolEventCoordinator {
     final isVectorPen = activeTool == IllustrationTool.vectorPen;
     final isVectorTransform = activeTool == IllustrationTool.vectorTransform;
     final isVectorEraser = activeTool == IllustrationTool.vectorEraser;
+
+    if (isVectorTransform && isDown) {
+      final gestureGeneration = ++_vectorGestureGeneration;
+      host.vectorOperations.cancelPendingVectorSelection();
+      host.vectorOperations.cancelVectorTransformPreview();
+      final handleTarget = host.vectorOperations.hitTestSelectedPathHandle(
+        position,
+        host.vectorSelectionTolerance(),
+      );
+      if (handleTarget != null) {
+        _vectorPathHandleTarget = handleTarget;
+        _toolStart = position;
+        _targetLayerId = null;
+        _toolPoints = [position];
+        if (host.mounted()) host.updateState(() {});
+        return;
+      }
+      _vectorTransformWasSelected = false;
+      _vectorPathHandleTarget = null;
+      final selectionFuture = host.vectorOperations.selectVectorObjectAt(
+        position,
+        host.vectorSelectionTolerance(),
+        additive:
+            host.vectorSelectionAdditive?.call() ??
+            HardwareKeyboard.instance.isShiftPressed,
+      );
+      _vectorSelectionFuture = selectionFuture;
+      _toolStart = position;
+      _targetLayerId = null;
+      _toolPoints = [position];
+      unawaited(
+        selectionFuture.then((selected) {
+          if (gestureGeneration != _vectorGestureGeneration ||
+              _toolStart == null) {
+            return;
+          }
+          _vectorTransformWasSelected = selected;
+          final points = _toolPoints;
+          if (selected && points.isNotEmpty) {
+            final delta = points.last - position;
+            if (delta.distance >= 0.5) {
+              unawaited(host.vectorOperations.previewVectorTransform(delta));
+            }
+          }
+        }),
+      );
+      if (host.mounted()) host.updateState(() {});
+      return;
+    }
 
     if (activeTool == IllustrationTool.layerOpacitySelect && isDown) {
       final layerId = host.toolActions.requireSelectedRasterLayer(
@@ -238,6 +302,22 @@ class CanvasToolEventCoordinator {
             host.pointerPressure(event),
             0.0,
           ].take(8192 * 4).toList(growable: false);
+        } else if (isVectorTransform) {
+          final handleTarget = _vectorPathHandleTarget;
+          if (handleTarget != null) {
+            unawaited(
+              host.vectorOperations.previewPathHandleDrag(
+                handleTarget,
+                position - startPosition,
+              ),
+            );
+          } else if (_vectorTransformWasSelected) {
+            unawaited(
+              host.vectorOperations.previewVectorTransform(
+                position - startPosition,
+              ),
+            );
+          }
         }
       }
       if (host.mounted()) host.updateState(() {});
@@ -250,6 +330,7 @@ class CanvasToolEventCoordinator {
     final targetLayerId = _targetLayerId;
     _toolStart = null;
     _targetLayerId = null;
+    var shouldMarkDirty = true;
     if (activeTool == IllustrationTool.rectangleSelect) {
       final rect = Rect.fromPoints(start, end);
       await engine.selectRectangle(
@@ -333,17 +414,43 @@ class CanvasToolEventCoordinator {
       }
     } else if (isVectorPen) {
       await host.vectorOperations.addStroke(_vectorPoints);
+      shouldMarkDirty = false;
     } else if (activeTool == IllustrationTool.vectorTransform) {
-      await host.vectorOperations.transformFirstStroke(end - start);
+      final handleTarget = _vectorPathHandleTarget;
+      _vectorPathHandleTarget = null;
+      if (handleTarget != null) {
+        if ((end - start).distance >= 0.5) {
+          await host.vectorOperations.commitPathHandleDrag();
+        } else {
+          host.vectorOperations.cancelVectorTransformPreview();
+        }
+        shouldMarkDirty = false;
+      } else {
+        final selectionFuture = _vectorSelectionFuture;
+        _vectorSelectionFuture = null;
+        if (selectionFuture != null) {
+          _vectorTransformWasSelected = await selectionFuture;
+        }
+        final delta = end - start;
+        shouldMarkDirty = _vectorTransformWasSelected && delta.distance >= 0.5;
+        if (shouldMarkDirty) {
+          await host.vectorOperations.transformFirstStroke(delta);
+        } else {
+          host.vectorOperations.cancelVectorTransformPreview();
+        }
+        shouldMarkDirty = false;
+      }
     } else if (activeTool == IllustrationTool.vectorEraser) {
       final radius = math.max(4.0, (end - start).distance);
       await host.vectorOperations.eraseFirstStroke(center: end, radius: radius);
+      shouldMarkDirty = false;
     } else if (isRuler) {
       _setRuler(start: start, end: end, tool: activeTool);
     }
     _toolPoints = const [];
     _vectorPoints = const [];
-    host.markDirty(restartTimer: false);
+    _vectorTransformWasSelected = false;
+    if (shouldMarkDirty) host.markDirty(restartTimer: false);
     if (host.mounted()) host.updateState(() {});
   }
 

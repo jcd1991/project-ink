@@ -26,6 +26,57 @@ void main() {
     expect(width, closeTo(11.6, 0.001));
   });
 
+  test('replace pressure preview matches committed brush diameter mapping', () {
+    final preview = LiveStrokePreview(
+      color: Colors.black,
+      width: 10,
+      pressureSize: 1,
+      pressureSizeReplace: true,
+      pressureCurvePoints: const <double>[
+        0,
+        0.12,
+        0.003,
+        0.13,
+        0.006,
+        0.15,
+        0.01,
+        0.2,
+        0.015,
+        0.24,
+        0.02,
+        0.27,
+        0.04,
+        0.32,
+        0.08,
+        0.36,
+        0.12,
+        0.4,
+        0.2,
+        0.56,
+        0.3,
+        0.75,
+        0.42,
+        0.9,
+        0.55,
+        0.96,
+        1,
+        1,
+      ],
+      documentWidth: 100,
+      documentHeight: 100,
+      eraser: false,
+      points: <LiveStrokePreviewPoint>[],
+      chunks: <LiveStrokePreviewChunk>[],
+    );
+
+    final width = liveStrokePreviewWidthAt(
+      preview,
+      const LiveStrokePreviewPoint(Offset.zero, 0.106),
+    );
+
+    expect(width, closeTo(3.86, 0.02));
+  });
+
   test('live preview applies the pressure curve to brush opacity', () {
     final preview = LiveStrokePreview(
       color: Colors.black,

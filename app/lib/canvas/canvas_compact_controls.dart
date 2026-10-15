@@ -17,6 +17,7 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
     required this.onEyedropper,
     required this.onTools,
     required this.onBrushes,
+    this.onBrushEditorSection,
     required this.onSelectBrush,
     required this.onLayers,
     required this.activeColor,
@@ -37,6 +38,7 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
   final VoidCallback onEyedropper;
   final VoidCallback onTools;
   final VoidCallback onBrushes;
+  final ValueChanged<BrushEditorSection>? onBrushEditorSection;
   final VoidCallback onSelectBrush;
   final VoidCallback onLayers;
   final Color activeColor;
@@ -92,6 +94,56 @@ class CanvasSimpleEdgeControls extends StatelessWidget {
               onPressed: brushToolActive ? onBrushes : onSelectBrush,
               hitSize: 48,
             ),
+            if (brush != null && onBrushEditorSection != null)
+              PopupMenuButton<BrushEditorSection>(
+                tooltip: 'Brush settings for ${brush.name}',
+                onSelected: onBrushEditorSection,
+                itemBuilder:
+                    (context) => [
+                      PopupMenuItem(
+                        value: BrushEditorSection.stroke,
+                        child: SizedBox(
+                          width: 238,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('Stroke settings · ${brush.name}'),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Smoothing ${(brush.stabilization * 100).round()}% · '
+                                'Pulled string ${brush.pulledString ? 'on' : 'off'}',
+                                style: Theme.of(context).textTheme.labelSmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: BrushEditorSection.pressure,
+                        child: SizedBox(
+                          width: 238,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('Pressure settings · ${brush.name}'),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Size and opacity response for this brush',
+                                style: Theme.of(context).textTheme.labelSmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                child: const SizedBox(
+                  width: 56,
+                  height: 48,
+                  child: Icon(Icons.tune),
+                ),
+              ),
             InkCommandButton(
               icon: Icons.cleaning_services,
               label: eraserActive ? 'Eraser brush presets' : 'Eraser',

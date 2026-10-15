@@ -7,6 +7,7 @@ import '../app/editor_action.dart';
 List<PlatformMenuItem> buildCanvasMacOSApplicationMenus({
   required bool documentActionsEnabled,
   required bool documentActionRunning,
+  bool adjustmentEditActive = false,
   required ValueChanged<EditorActionId> onActionSelected,
   required VoidCallback onQuit,
 }) => [
@@ -36,6 +37,7 @@ List<PlatformMenuItem> buildCanvasMacOSApplicationMenus({
                       action: action,
                       documentActionsEnabled: documentActionsEnabled,
                       documentActionRunning: documentActionRunning,
+                      adjustmentEditActive: adjustmentEditActive,
                     )
                     ? null
                     : () => onActionSelected(action),

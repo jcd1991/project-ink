@@ -20,6 +20,7 @@ class CanvasQuickControls extends StatelessWidget {
     required this.onBrushSizeChangeEnd,
     required this.onBrushOpacityChangeEnd,
     required this.onBrushes,
+    required this.onBrushEditorSection,
     required this.onBrushColor,
     required this.onToggleEraser,
     required this.onTransparentColor,
@@ -42,6 +43,7 @@ class CanvasQuickControls extends StatelessWidget {
   final ValueChanged<double> onBrushSizeChangeEnd;
   final ValueChanged<double> onBrushOpacityChangeEnd;
   final VoidCallback onBrushes;
+  final ValueChanged<BrushEditorSection> onBrushEditorSection;
   final VoidCallback onBrushColor;
   final VoidCallback onToggleEraser;
   final VoidCallback onTransparentColor;
@@ -97,6 +99,52 @@ class CanvasQuickControls extends StatelessWidget {
                   ),
                 ),
               ),
+            ),
+            PopupMenuButton<BrushEditorSection>(
+              tooltip: 'Brush settings for ${brush?.name ?? 'selected brush'}',
+              onSelected: onBrushEditorSection,
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: BrushEditorSection.stroke,
+                  child: SizedBox(
+                    width: 238,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Stroke settings · ${brush?.name ?? 'Brush'}'),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Smoothing ${((brush?.stabilization ?? 0) * 100).round()}% · '
+                          'Pulled string ${brush?.pulledString == true ? 'on' : 'off'}',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: BrushEditorSection.pressure,
+                  child: SizedBox(
+                    width: 238,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Pressure settings · ${brush?.name ?? 'Brush'}'),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Size and opacity response for this brush',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              icon: const Icon(Icons.tune, size: 18),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 36),
             ),
             const SizedBox(width: 4),
             InkStatusChip(label: activeLayerName, icon: Icons.layers),

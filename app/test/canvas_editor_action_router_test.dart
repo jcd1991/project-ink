@@ -50,11 +50,27 @@ void main() {
     _router(calls, isMounted: false).dispatch(EditorActionId.toggleEraser);
     expect(calls, isEmpty);
   });
+
+  test('adjustment draft blocks conflicting editor actions', () {
+    final calls = <String>[];
+    _router(calls, adjustmentEditActive: true).dispatch(EditorActionId.undo);
+    expect(calls, isEmpty);
+    expect(
+      isEditorActionDisabled(
+        action: EditorActionId.saveProject,
+        documentActionsEnabled: true,
+        documentActionRunning: false,
+        adjustmentEditActive: true,
+      ),
+      isTrue,
+    );
+  });
 }
 
 CanvasEditorActionRouter _router(
   List<String> calls, {
   bool isMounted = true,
+  bool adjustmentEditActive = false,
   bool Function(EditorActionId action)? dispatchDocumentAction,
   bool Function(EditorActionId action)? dispatchHistoryAction,
   bool Function(EditorActionId action)? dispatchToolAction,
@@ -63,6 +79,7 @@ CanvasEditorActionRouter _router(
 }) => CanvasEditorActionRouter(
   CanvasEditorActionRouterHost(
     isMounted: () => isMounted,
+    isAdjustmentEditActive: () => adjustmentEditActive,
     dispatchDocumentAction: (action) {
       calls.add('document');
       return dispatchDocumentAction?.call(action) ?? false;

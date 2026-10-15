@@ -27,9 +27,11 @@ values again during brush evaluation because packets can arrive from an
 untrusted FFI caller.
 
 `canvas_x` and `canvas_y` are logical Flutter screen coordinates in logical
-pixels, before the active Flutter viewport transform. Android adapters convert
-`MotionEvent` physical pixels by the display density; UIKit adapters already
-receive coordinates in points, which map to Flutter logical pixels.
+pixels, before the active Flutter viewport transform. UIKit adapters receive
+coordinates in points, which map to Flutter logical pixels. The Android
+`MotionEvent` encoder converts physical pixels by display density, but the
+current Android canvas route uses Flutter hit-tested `PointerEvent`s and does
+not publish native packet-v1 samples.
 
 The Rust decoder rejects truncated, trailing, unknown-version, or over-limit
 packets, and rejects samples with an unknown lifecycle phase. It does not
