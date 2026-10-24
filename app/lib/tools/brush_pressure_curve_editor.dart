@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'brush_library.dart';
@@ -33,6 +35,40 @@ class BrushPressureCurveEditor extends StatelessWidget {
       BrushCurvePointView(x: 1, y: 1),
     ],
   };
+
+  int? _widestInsertIndex() {
+    if (points.length >= 16 || points.length < 2) return null;
+    var widestIndex = 0;
+    var widestGap = 0.0;
+    for (var index = 0; index < points.length - 1; index++) {
+      final gap = points[index + 1].x - points[index].x;
+      final midpoint = points[index].x + gap / 2;
+      if (gap > widestGap &&
+          midpoint > points[index].x &&
+          midpoint < points[index + 1].x) {
+        widestGap = gap;
+        widestIndex = index;
+      }
+    }
+    return widestGap > 0 ? widestIndex : null;
+  }
+
+  void _addPoint() {
+    final index = _widestInsertIndex();
+    if (index == null) return;
+    final left = points[index];
+    final right = points[index + 1];
+    final x = left.x + (right.x - left.x) / 2;
+    final y = left.y + (right.y - left.y) / 2;
+    final updated =
+        points.toList()..insert(index + 1, BrushCurvePointView(x: x, y: y));
+    onChanged(List.unmodifiable(updated));
+  }
+
+  void _updatePoint(int index, BrushCurvePointView point) {
+    final updated = points.toList()..[index] = point;
+    onChanged(List.unmodifiable(updated));
+  }
 
   @override
   Widget build(BuildContext context) => Column(
@@ -105,8 +141,19 @@ class BrushPressureCurveEditor extends StatelessWidget {
                               break;
                             }
                           }
-                          final low = current[index - 1].x + .000001;
-                          final high = current[index + 1].x - .000001;
+                          final previousX = current[index - 1].x;
+                          final nextX = current[index + 1].x;
+                          var low =
+                              previousX +
+                              math.min(
+                                .000001,
+                                (current[index].x - previousX) / 2,
+                              );
+                          var high =
+                              nextX -
+                              math.min(.000001, (nextX - current[index].x) / 2);
+                          if (low <= previousX) low = current[index].x;
+                          if (high >= nextX) high = current[index].x;
                           current[index] = BrushCurvePointView(
                             x: x.clamp(low, high),
                             y: y,
@@ -124,6 +171,12 @@ class BrushPressureCurveEditor extends StatelessWidget {
       Wrap(
         spacing: 8,
         children: [
+          TextButton.icon(
+            onPressed:
+                enabled && _widestInsertIndex() != null ? _addPoint : null,
+            icon: const Icon(Icons.add),
+            label: const Text('Add point'),
+          ),
           for (final entry in _presets.entries)
             TextButton(
               onPressed:
@@ -139,15 +192,111 @@ class BrushPressureCurveEditor extends StatelessWidget {
                     : null,
             child: const Text('Reset'),
           ),
+        ],
+      ),
+      for (var index = 0; index < points.length; index++)
+        _CurvePointFields(
+          key: ValueKey(
+            'pressure-point-row-$index-${points[index].x}-${points[index].y}',
+          ),
+          index: index,
+          point: points[index],
+          previous: index == 0 ? null : points[index - 1],
+          next: index == points.length - 1 ? null : points[index + 1],
+          enabled: enabled,
+          onChanged: (point) => _updatePoint(index, point),
+          onRemove:
+              enabled && points.length > 2
+                  ? () {
+                    final updated = points.toList()..removeAt(index);
+                    onChanged(List.unmodifiable(updated));
+                  }
+                  : null,
+        ),
+    ],
+  );
+}
+
+class _CurvePointFields extends StatelessWidget {
+  const _CurvePointFields({
+    required this.index,
+    required this.point,
+    required this.previous,
+    required this.next,
+    required this.enabled,
+    required this.onChanged,
+    required this.onRemove,
+    super.key,
+  });
+
+  final int index;
+  final BrushCurvePointView point;
+  final BrushCurvePointView? previous;
+  final BrushCurvePointView? next;
+  final bool enabled;
+  final ValueChanged<BrushCurvePointView> onChanged;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Row(
+        children: [
+          Expanded(child: Text('Point ${index + 1}')),
           IconButton(
-            tooltip: 'Remove pressure point',
-            onPressed:
-                enabled && points.length > 2
-                    ? () => onChanged(
-                      List.unmodifiable(points.take(points.length - 1)),
-                    )
-                    : null,
+            tooltip: 'Remove pressure point ${index + 1}',
+            onPressed: onRemove,
             icon: const Icon(Icons.remove_circle_outline),
+          ),
+        ],
+      ),
+      Row(
+        children: [
+          Expanded(
+            child: TextFormField(
+              key: ValueKey('pressure-point-$index-x-${point.x}'),
+              enabled: enabled,
+              initialValue: point.x.toStringAsPrecision(7),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(labelText: 'Input (0–1)'),
+              onFieldSubmitted: (text) {
+                final value = double.tryParse(text);
+                if (value == null ||
+                    !value.isFinite ||
+                    value < 0 ||
+                    value > 1 ||
+                    (previous != null && value <= previous!.x) ||
+                    (next != null && value >= next!.x)) {
+                  return;
+                }
+                onChanged(point.copyWith(x: value));
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextFormField(
+              key: ValueKey('pressure-point-$index-y-${point.y}'),
+              enabled: enabled,
+              initialValue: point.y.toStringAsPrecision(7),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(labelText: 'Output (0–1)'),
+              onFieldSubmitted: (text) {
+                final value = double.tryParse(text);
+                if (value == null ||
+                    !value.isFinite ||
+                    value < 0 ||
+                    value > 1) {
+                  return;
+                }
+                onChanged(point.copyWith(y: value));
+              },
+            ),
           ),
         ],
       ),

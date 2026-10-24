@@ -13,6 +13,12 @@ External-format conversion policy is specified in
 Format-3 pulled-string compatibility is specified below. Format-2 presets and
 evaluator semantics remain unchanged.
 
+`CPU_BRUSH_V4` synchronizes pressure with the smoothed sample position. V2 and
+V3 strokes retain their historical pressure sampling during replay. Brush edits
+that pass through the current draft editor store V4 semantics so subsequent
+strokes use the aligned sensor path; existing strokes keep their captured
+semantics.
+
 ## Product goals
 
 The Phase 2 brush system must:
@@ -33,6 +39,34 @@ The Phase 2 brush system must:
 
 Exact rendering parity with another application's brush engine is not a goal.
 The importer reports which properties were mapped, approximated, or omitted.
+
+Brush tuning improvements may use public references such as Photocraft's
+response-curve editor and dynamic-parameter model as design input. Ink keeps its
+own evaluator, serialized preset format, and precision: normalized curve points
+are validated as finite values in `[0, 1]` with strictly increasing X, and must
+not be rounded to two decimal places. Upstream code, presets, and bitmap assets
+are separate reuse decisions; record source revision and required attribution
+for any code or resource actually adapted.
+
+The starter library includes four explicitly labeled, editable-by-duplication
+experimental references: Inking Pen, Tilt Pencil, Flow Marker, and Calligraphic
+Raster. They copy Ink's own procedural presets and exercise existing pressure,
+tilt, flow, and elliptical-tip controls. They are tuning references, not
+promoted defaults or claims of Apple Pencil/S Pen acceptance.
+
+The editor exposes independent pressure responses for diameter (Size),
+opacity, and flow using the existing `ParameterBinding` evaluator. Ordinary
+brush draft commits preserve each response curve. The legacy shared-curve
+settings command retains its historical behavior of applying one curve to all
+pressure bindings. A response with multiple pressure bindings for the same
+parameter is projected read-only until the editor can represent each binding
+without flattening it. Disabling a response sets its amount to zero and keeps
+its curve; enabling a response with no prior amount starts at amount `1.0`.
+
+Photocraft review reference: `storytold/photocraft` main tree
+`b07b7fab559ce2f7c3ba7ef80b7fb50c3aad170e`. Its response editor and dynamic
+parameter concepts informed the controls; no upstream code or brush resources
+are copied by this change.
 
 ## Phase boundary
 

@@ -2466,6 +2466,44 @@ pub fn builtin_library() -> Vec<BrushPresetV2> {
             style: WatercolorEdgeStyle::Standard,
             timing: PostEffectTiming::StrokeEnd,
         });
+
+    // Experimental tuning references are clearly labeled, isolated copies.
+    // They provide a safe place to compare responses without changing the
+    // established built-ins or importing upstream preset data.
+    let experimental_sources = [
+        (0usize, "Experimental Inking Pen", 9u128),
+        (1usize, "Experimental Tilt Pencil", 10u128),
+        (4usize, "Experimental Flow Marker", 11u128),
+        (14usize, "Experimental Calligraphic Raster", 12u128),
+    ];
+    for (source_index, name, offset) in experimental_sources {
+        let mut experimental = presets[source_index].clone();
+        experimental.id = BrushId::from_u128(STARTER_BRUSH_ID_BASE + offset);
+        experimental.revision = 1;
+        experimental.metadata.name = name.into();
+        experimental.metadata.tags.push("experimental".into());
+        experimental.metadata.tags.push("tuning-reference".into());
+        if name == "Experimental Tilt Pencil" {
+            experimental.dynamics.push(ParameterBinding {
+                target: ParameterId::GrainDepth,
+                base: 0.0,
+                sensor: SensorId::Tilt,
+                curve: ResponseCurve::identity(),
+                amount: 0.35,
+                combine: CombineOp::Add,
+            });
+        } else if name == "Experimental Flow Marker" {
+            experimental
+                .dynamics
+                .push(pressure_binding(ParameterId::Flow, 0.45));
+        } else if name == "Experimental Calligraphic Raster"
+            && let TipBehavior::Stamp(tip) = &mut experimental.tip
+        {
+            tip.roundness = 0.28;
+            tip.angle_degrees = 35.0;
+        }
+        presets.push(experimental);
+    }
     presets
 }
 
@@ -2618,7 +2656,22 @@ mod tests {
     #[test]
     fn builtin_library_contains_deterministic_phase_two_brushes() {
         let library = builtin_library();
-        assert_eq!(library.len(), 20);
+        assert_eq!(library.len(), 24);
+        assert_eq!(
+            library
+                .iter()
+                .filter(|preset| preset.metadata.tags.iter().any(|tag| tag == "experimental"))
+                .count(),
+            4
+        );
+        for name in [
+            "Experimental Inking Pen",
+            "Experimental Tilt Pencil",
+            "Experimental Flow Marker",
+            "Experimental Calligraphic Raster",
+        ] {
+            assert!(library.iter().any(|preset| preset.metadata.name == name));
+        }
         let ids = library
             .iter()
             .map(|brush| brush.id)

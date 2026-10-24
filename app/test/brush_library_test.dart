@@ -59,14 +59,16 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: BrushPressureCurveEditor(
-            points: points,
-            resetPoints: points,
-            onChanged: (value) {
-              points
-                ..clear()
-                ..addAll(value);
-            },
+          body: SingleChildScrollView(
+            child: BrushPressureCurveEditor(
+              points: points,
+              resetPoints: points,
+              onChanged: (value) {
+                points
+                  ..clear()
+                  ..addAll(value);
+              },
+            ),
           ),
         ),
       ),
