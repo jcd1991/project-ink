@@ -1,12 +1,14 @@
 <p align="center">
-  <img src="assets/branding/project-ink-logo.png" alt="Project Ink inkwell mark" width="176">
+  <img src="assets/branding/project-ink-logo.png" alt="Project Ink inkwell mark" width="160">
 </p>
 
 <h1 align="center">Project Ink</h1>
 
 <p align="center">
-  <strong>An opinionated, easy-to-use, mobile-friendly illustration app.</strong><br>
-  Built on Rust. Open source. Made for drawing wherever you are.
+  <strong>Make art. Keep it yours.</strong><br>
+  An open-source, mobile-friendly illustration and comic studio for touch,<br>
+  stylus, and desktop.<br>
+  Built with Rust. Shaped with Flutter. Local-first by design.
 </p>
 
 <p align="center">
@@ -17,46 +19,48 @@
 </p>
 
 <p align="center">
-  <a href="#what-makes-project-ink-different">Why Ink</a> ·
-  <a href="#where-the-project-is">Project status</a> ·
-  <a href="#run-it-locally">Build</a> ·
+  <a href="#try-it">Build from source</a> ·
+  <a href="#where-ink-is-now">Alpha status</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-Project Ink is a local-first illustration and comic studio for touchscreens,
-pen displays, and desktop. Flutter shapes the workspace; a Rust engine owns
-the artwork and project data. The goal is a capable drawing app that feels
-approachable on mobile and stays under the artist’s control.
+Project Ink is a local-first drawing studio for people who want a real canvas
+on the device in their hand—and room to grow into a bigger workspace. Sketch,
+paint, work in layers, build comic pages, and save portable projects without
+needing an account or a cloud connection.
 
-## What makes Project Ink different
+## From first stroke to finished page
 
-- **Mobile-friendly by design.** The interface adapts across phones, tablets,
-  and desktop, with touch, stylus, and keyboard workflows.
-- **Rust at the center.** Documents, pixels, layers, history, persistence, and
-  export have one authoritative Rust owner.
-- **Local first.** Work offline without an account, ads, or a required cloud
-  service. Native `.inkproj` files keep projects portable, with local recovery
-  support.
-- **One creative workspace.** Illustration tools and comic-oriented page and
-  panel workflows live in the same app.
+- **Draw your way.** Work with pressure-aware brushes, smoothing, stabilization,
+  touch, stylus, and keyboard workflows.
+- **Build with layers.** Organize artwork with layers, groups, masks, selection,
+  transform, fill, and vector tools.
+- **Make comics, too.** Create multi-page projects with panels and lettering in
+  the same workspace.
+- **Keep control of your work.** Projects use the native `.inkproj` format, with
+  local recovery support and no required account, ads, or online service.
 
-## Where the project is
+Rust owns document state, pixels, layers, history, persistence, and export.
+Flutter shapes the responsive interface and handles presentation and input.
 
-Project Ink is experimental and changing quickly. iOS/iPadOS, Android, macOS,
-Windows, and Linux are development targets; that list is not a claim of stable
-or release-supported builds. Platform downloads and support claims depend on
-separate install, input, file, recovery, and export acceptance.
+## Where Ink is now
 
-For the current candidate and release gates, see the
+Project Ink is **experimental** and changing quickly. iOS/iPadOS, Android,
+macOS, Windows, and Linux are development targets—not promises of stable,
+release-supported downloads. Platform support is earned separately through
+install, input, file, recovery, and export checks.
+
+For current candidates and release gates, see the
 [alpha checklist](specifications/alpha-release-checklist.md),
 [candidate verification notes](specifications/alpha-candidate-verification.md),
-and [release readiness](specifications/release-readiness.md).
-The [first-release scope](specifications/first-release-scope.md) describes the
-intended artist workflows and current non-goals.
+and [release readiness](specifications/release-readiness.md). The
+[first-release scope](specifications/first-release-scope.md) describes the
+intended workflows and non-goals.
 
-## Run it locally
+## Try it
 
-Use the pinned Flutter 3.47.5 toolchain and a Rust toolchain:
+You’ll need the pinned Flutter 3.47.5 toolchain and a Rust toolchain. To run the
+macOS app locally:
 
 ```sh
 cd app
@@ -64,14 +68,15 @@ flutter pub get
 flutter run -d macos
 ```
 
-For other targets, platform setup, Rust bridge details, and validation
-commands, start with the [app development guide](app/README.md). The project
-keeps its public formats and platform workflows documented under
-[`specifications/`](specifications/).
+For platform setup, Rust bridge details, and validation commands, start with
+the [app development guide](app/README.md). More architecture and file-format
+notes live in [`specifications/`](specifications/).
 
-## Open source
+## Open source, open canvas
 
 Project Ink is licensed under the [Mozilla Public License 2.0](LICENSE).
-Contributions are welcome; please read [CONTRIBUTING.md](CONTRIBUTING.md).
-Report security issues using [SECURITY.md](SECURITY.md). Some bundled assets may
-have separate terms, so check their accompanying notices before reusing them.
+Contributions are welcome—start with [CONTRIBUTING.md](CONTRIBUTING.md). Found
+a security issue? Follow [SECURITY.md](SECURITY.md). Some bundled assets have
+separate terms; check their accompanying notices before reuse.
+
+<p align="center"><em>Your next sketch could help shape what comes next.</em></p>
