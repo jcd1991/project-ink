@@ -38,6 +38,8 @@ class CanvasPointerEventRouterHost {
     required this.recordInputArrival,
     required this.nextPointerSequence,
     required this.prepareDrawingPosition,
+    required this.isInsideViewport,
+    required this.isInsideDocument,
     required this.updatePreview,
     required this.pointerPressure,
     required this.schedulePreviewFrameDiagnostic,
@@ -69,6 +71,8 @@ class CanvasPointerEventRouterHost {
   final VoidCallback recordInputArrival;
   final int Function() nextPointerSequence;
   final Offset Function(PointerEvent event) prepareDrawingPosition;
+  final bool Function(Offset position) isInsideViewport;
+  final bool Function(Offset position) isInsideDocument;
   final CanvasPreviewInputUpdate updatePreview;
   final double Function(PointerEvent event) pointerPressure;
   final VoidCallback schedulePreviewFrameDiagnostic;
@@ -93,15 +97,18 @@ class CanvasPointerEventRouter {
 
   final CanvasPointerEventRouterHost host;
   final Set<int> _trackedPointers = <int>{};
+  final Set<int> _viewportEndedPointers = <int>{};
 
   int get trackedPointerCount => _trackedPointers.length;
 
   void forgetPointers(Iterable<int> pointers) {
     _trackedPointers.removeAll(pointers);
+    _viewportEndedPointers.removeAll(pointers);
   }
 
   void clearPointers() {
     _trackedPointers.clear();
+    _viewportEndedPointers.clear();
   }
 
   void handle(PointerEvent event) {
@@ -195,7 +202,8 @@ class CanvasPointerEventRouter {
     }
     final sourceSequence = host.nextPointerSequence();
     final preparedPosition = host.prepareDrawingPosition(event);
-    final previewIndex = host.updatePreview(
+    final previewIndex = _updateDrawingPreview(
+      event,
       preparedPosition,
       isDown: event is PointerDownEvent,
       isUp: event is PointerUpEvent || event is PointerCancelEvent,
@@ -222,7 +230,8 @@ class CanvasPointerEventRouter {
         host.previewPerformanceTimingEnabled() ? host.nowMicros() : null;
     final sourceSequence = host.nextPointerSequence();
     final preparedPosition = host.prepareDrawingPosition(event);
-    final previewIndex = host.updatePreview(
+    final previewIndex = _updateDrawingPreview(
+      event,
       preparedPosition,
       isDown: event is PointerDownEvent,
       isUp: event is PointerUpEvent || event is PointerCancelEvent,
@@ -241,6 +250,34 @@ class CanvasPointerEventRouter {
     }
     host.enqueueStrokeWork(
       () => host.handleDrawingEvent(event, sourceSequence, preparedPosition),
+    );
+  }
+
+  int _updateDrawingPreview(
+    PointerEvent event,
+    Offset position, {
+    required bool isDown,
+    required bool isUp,
+    required double pressure,
+    required int sourceSequence,
+  }) {
+    if (isDown) _viewportEndedPointers.remove(event.pointer);
+    final outsideViewport = !host.isInsideViewport(event.localPosition);
+    // The engine ends a captured stroke when the window cuts through the
+    // document. Do not build a different preview path, or reconnect it on
+    // re-entry while the original mouse button is still held.
+    if (!isDown && outsideViewport && host.isInsideDocument(position)) {
+      _viewportEndedPointers.add(event.pointer);
+    }
+    final ended = _viewportEndedPointers.contains(event.pointer);
+    if (isUp) _viewportEndedPointers.remove(event.pointer);
+    if (ended) return -1;
+    return host.updatePreview(
+      position,
+      isDown: isDown,
+      isUp: isUp,
+      pressure: pressure,
+      sourceSequence: sourceSequence,
     );
   }
 

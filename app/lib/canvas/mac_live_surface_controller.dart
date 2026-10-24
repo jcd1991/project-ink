@@ -200,6 +200,15 @@ class MacLiveSurfaceController implements LivePreviewController {
             previous.highestCommittedSequence) {
       _pendingAcknowledgements[acknowledgement.stroke] = acknowledgement;
     }
+    // The caller has already published the matching CPU pixels. Retire local
+    // coverage now, before the coalesced GPU cleanup can wait on its timer or
+    // the native queue, so a fully covered texture cannot double-paint them.
+    _pendingDabs.removeWhere(
+      (key, _) =>
+          key.strokeId == acknowledgement.stroke &&
+          key.sequence <= acknowledgement.highestCommittedSequence,
+    );
+    if (_pendingDabs.isEmpty) gpuFrameReady.value = false;
 
     // The CPU worker can publish one acknowledgement for every input packet.
     // Enqueuing a texture rebuild for each one makes the live surface replay
@@ -534,7 +543,7 @@ class MacLiveSurfaceController implements LivePreviewController {
         );
       }
     }
-    gpuFrameReady.value = true;
+    gpuFrameReady.value = _pendingDabs.isNotEmpty;
     onDiagnosticEvent?.call('canvas.gpu_frame_available', {
       'textureId': texture,
       'pendingDabs': _pendingDabs.length,

@@ -71,6 +71,8 @@ CanvasPointerEventRouterHost _host({void Function()? onRecordInputArrival}) =>
       recordInputArrival: onRecordInputArrival ?? () {},
       nextPointerSequence: () => 0,
       prepareDrawingPosition: (event) => event.localPosition,
+      isInsideViewport: (_) => true,
+      isInsideDocument: (_) => true,
       updatePreview:
           (
             position, {

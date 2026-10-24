@@ -115,3 +115,31 @@ and published. Adapter, packet, queue-overflow, or device failures keep the
 Flutter CPU preview active. The Windows/Linux pixel-buffer core preserves the
 last published frame when a redraw exceeds its work budget. Physical-device
 latency and stylus acceptance remain Phase 5 gates.
+
+The pinned Flutter 3.47.5 macOS Metal embedder does not forward the optional
+`onTextureUnregistered` callback. The registry releases its own texture owner
+after `unregisterTexture` returns instead of keeping a retirement dictionary
+that permanently blocks subsequent surface creation. Flutter's external-texture
+wrapper retains the object during pixel-buffer callbacks, and each
+`copyPixelBuffer` transfers an independent retained CoreVideo reference to
+Flutter. Rust detaches/disposes its surface before native unregistration.
+See the upstream [macOS registrar](https://api.flutter.dev/macos-embedder/_flutter_texture_registrar_8mm_source.html)
+and [external-texture wrapper](https://api.flutter.dev/macos-embedder/_flutter_external_texture_8mm_source.html).
+The debug lifecycle `released` phase describes registry ownership, not receipt
+of a raster callback; `requiresUnregisterCallback` is false on macOS.
+Once the published CPU frame covers all retained macOS dabs, the texture is
+hidden immediately, before the coalesced GPU acknowledgement completes. An
+empty cleanup frame must not mark that texture visible again.
+
+Flutter mouse/touch/stylus capture ends at the visible viewport boundary when
+the document extends beyond the window. The last accepted input is committed
+as one undo transaction, and preview input stops at the same boundary. Re-entry
+with the same press does not resume that transaction or interpolate a chord
+across the skipped input; a new press starts the next stroke. Page-edge exit
+and re-entry within the viewport retain the existing separate-path behavior.
+The local trace records `input.viewport_stroke_end` with the source sequence
+and pointer kind to distinguish this boundary from page clipping and cancellation.
+
+CPU reference comparison scope, pixel tolerances, adapter skip reporting, and
+the required-adapter CI mode are specified in
+[engine design guardrails](engine-design-guardrails.md#cpu-reference-and-gpu-preview).

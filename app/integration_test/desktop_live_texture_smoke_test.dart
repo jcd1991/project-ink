@@ -153,8 +153,10 @@ void main() {
     expect(
       lifecycleState?['phase'],
       'released',
-      reason: 'Flutter must release the backing buffer on its raster callback.',
+      reason:
+          'The registry must release ownership without waiting for an absent macOS callback.',
     );
+    expect(lifecycleState?['requiresUnregisterCallback'], isFalse);
     debugPrint('[live-texture-smoke] verifying stale texture rejection');
     await expectLater(
       _channel.invokeMethod<void>('frameAvailable', <String, Object>{

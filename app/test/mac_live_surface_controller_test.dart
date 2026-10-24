@@ -73,7 +73,7 @@ void main() {
         'frameAvailable',
       ]);
 
-      await controller.acknowledge(
+      final cleanup = controller.acknowledge(
         StrokeAcknowledgement(
           stroke: BigInt.from(0x1234),
           highestCommittedSequence: 9,
@@ -84,8 +84,14 @@ void main() {
           maxTileY: 0,
         ),
       );
+      expect(
+        controller.gpuFrameReady.value,
+        isFalse,
+        reason: 'CPU-covered pixels must hide before asynchronous GPU cleanup',
+      );
+      await cleanup;
       expect(engine.acknowledgements, [(BigInt.from(0x1234), 9)]);
-      expect(controller.gpuFrameReady.value, isTrue);
+      expect(controller.gpuFrameReady.value, isFalse);
       expect(
         textureSubmissionMicros,
         hasLength(1),

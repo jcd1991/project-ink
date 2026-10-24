@@ -9,10 +9,6 @@ import Metal
 final class InkLiveTextureRegistry {
   private let registry: FlutterTextureRegistry
   private var textures: [Int64: InkLiveTexture] = [:]
-  // Flutter can ask for a frame on its raster thread while the platform
-  // thread is unregistering the texture. Keep the backing pixel buffer alive
-  // until Flutter confirms unregistration on the raster thread.
-  private var retiringTextures: [Int64: InkLiveTexture] = [:]
 
   init(registry: FlutterTextureRegistry) {
     self.registry = registry
@@ -34,9 +30,9 @@ final class InkLiveTextureRegistry {
         guard byteCount <= 256 * 1024 * 1024 else {
           throw TextureRegistryError.invalidSurface("Surface exceeds the 256 MiB limit.")
         }
-        guard textures.isEmpty, retiringTextures.isEmpty else {
+        guard textures.isEmpty else {
           throw TextureRegistryError.invalidSurface(
-            "A live surface or pending Flutter texture retirement already occupies this window."
+            "A live surface already occupies this window."
           )
         }
         let texture = try InkLiveTexture(
@@ -47,12 +43,6 @@ final class InkLiveTextureRegistry {
         let textureId = registry.register(texture)
         guard textureId >= 0 else {
           throw TextureRegistryError.registrationFailed
-        }
-        texture.onUnregistered = { [weak self] in
-          DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.retiringTextures.removeValue(forKey: textureId)
-          }
         }
         textures[textureId] = texture
         result(["textureId": textureId])
@@ -84,32 +74,36 @@ final class InkLiveTextureRegistry {
 #if DEBUG
       case "debugTextureLifecycleState":
         let textureId = try nonnegativeInt64(arguments, key: "textureId")
-        let texture = textures[textureId] ?? retiringTextures[textureId]
+        let texture = textures[textureId]
         result([
-          "phase": textures[textureId] != nil ? "active" :
-            retiringTextures[textureId] != nil ? "retiring" : "released",
+          "phase": texture != nil ? "active" : "released",
           "copyPixelBufferCount": texture?.copyPixelBufferCount ?? 0,
           "hasUnregisterSelector": texture?.responds(
             to: NSSelectorFromString("onTextureUnregistered:")
           ) ?? true,
-          "receivedUnregisterCallback": texture?.receivedUnregisterCallback ?? true,
+          "receivedUnregisterCallback": texture?.receivedUnregisterCallback ?? false,
+          "requiresUnregisterCallback": false,
         ])
 #endif
 
       case "dispose":
         let textureId = try nonnegativeInt64(arguments, key: "textureId")
-        guard let texture = textures.removeValue(forKey: textureId) else {
+        guard let texture = textures[textureId] else {
           result(nil)
           return
         }
-        retiringTextures[textureId] = texture
         registry.unregisterTexture(textureId)
-        // Flutter retires textures asynchronously on the raster thread. Keep
-        // the backing buffer in retiringTextures until its callback arrives,
-        // but do not hold the method-channel reply open while waiting for a
-        // future frame. If retirement stalls, create() remains blocked and
-        // the Dart controller falls back to CPU preview without leaking more
-        // than one surface.
+        // Flutter 3.47.5's macOS registrar removes its strong external-texture
+        // wrapper on unregister; its Metal embedder does not forward the
+        // optional onTextureUnregistered callback. Waiting for that callback
+        // here retains a buffer forever and prevents every later resize.
+        // In-flight wrapper calls retain the texture, and copyPixelBuffer
+        // transfers a separate +1 buffer reference to Flutter. Rust has
+        // already detached/disposed its surface before this channel call.
+        // Keep our owner through unregister, then release it normally.
+        withExtendedLifetime(texture) {
+          _ = textures.removeValue(forKey: textureId)
+        }
         result(nil)
 
       default:
@@ -164,7 +158,6 @@ private final class InkLiveTexture: NSObject, FlutterTexture {
   private var recordedCopyPixelBufferCount = 0
   private var didReceiveUnregisterCallback = false
 #endif
-  var onUnregistered: (() -> Void)?
 
 #if DEBUG
   var copyPixelBufferCount: Int {
@@ -256,7 +249,6 @@ private final class InkLiveTexture: NSObject, FlutterTexture {
     didReceiveUnregisterCallback = true
     copyCountLock.unlock()
 #endif
-    onUnregistered?()
   }
 }
 

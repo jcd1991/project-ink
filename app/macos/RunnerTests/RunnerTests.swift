@@ -1,9 +1,42 @@
 import Cocoa
+import CoreVideo
 import FlutterMacOS
+import Metal
 import XCTest
 @testable import project_ink
 
 class RunnerTests: XCTestCase {
+
+  func testLiveTextureReplacementWithoutUnregisterCallback() throws {
+    guard let device = MTLCreateSystemDefaultDevice() else {
+      throw XCTSkip("A Metal device is required for the native texture lifecycle.")
+    }
+    let devicePointer = Unmanaged.passUnretained(device as AnyObject).toOpaque()
+    let deviceHandle = Int64(bitPattern: UInt64(UInt(bitPattern: devicePointer)))
+    let flutter = TextureRegistryWithoutRetirementCallback()
+    let owner = InkLiveTextureRegistry(registry: flutter)
+
+    for width in [64, 96, 128] {
+      var created: Any?
+      owner.handle(FlutterMethodCall(methodName: "create", arguments: [
+        "deviceHandle": deviceHandle, "width": width, "height": 64,
+      ])) { created = $0 }
+      let response = try XCTUnwrap(created as? [String: Int64])
+      let textureID = try XCTUnwrap(response["textureId"])
+      // Model a raster consumer keeping its +1 buffer reference across native
+      // unregistration. The fake deliberately never invokes the optional
+      // callback, matching Flutter 3.47.5's macOS Metal embedder.
+      let buffer = try XCTUnwrap(flutter.textures[textureID]?.copyPixelBuffer()?.takeRetainedValue())
+      var disposalError: FlutterError?
+      owner.handle(FlutterMethodCall(methodName: "dispose", arguments: [
+        "textureId": textureID,
+      ])) { disposalError = $0 as? FlutterError }
+      XCTAssertNil(disposalError)
+      XCTAssertTrue(flutter.textures.isEmpty)
+      XCTAssertEqual(CVPixelBufferGetWidth(buffer), width)
+      XCTAssertEqual(CVPixelBufferGetHeight(buffer), 64)
+    }
+  }
 
   func testPointerPacketBoundsRetainConfirmedSamples() {
     let samples: [InkPointerSampleV1] = (0..<300).map { index in
@@ -73,4 +106,22 @@ class RunnerTests: XCTestCase {
     XCTAssertNil(status.onCancel(withArguments: nil))
   }
 
+}
+
+private final class TextureRegistryWithoutRetirementCallback: NSObject, FlutterTextureRegistry {
+  var textures: [Int64: FlutterTexture] = [:]
+  private var nextID: Int64 = 1
+
+  func register(_ texture: FlutterTexture) -> Int64 {
+    let id = nextID
+    nextID += 1
+    textures[id] = texture
+    return id
+  }
+
+  func textureFrameAvailable(_ textureId: Int64) {}
+
+  func unregisterTexture(_ textureId: Int64) {
+    textures.removeValue(forKey: textureId)
+  }
 }

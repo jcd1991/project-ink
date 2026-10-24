@@ -1171,6 +1171,67 @@ void main() {
     },
   );
 
+  testWidgets(
+    'window exit ends the accepted curve without a preview or re-entry chord',
+    (tester) async {
+      final engine = _RecordingPointerEngine();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CanvasScreen(
+            engine: engine,
+            targetPlatform: TargetPlatform.macOS,
+          ),
+        ),
+      );
+      await tester.pump();
+      final bounds = tester.getRect(find.bySemanticsLabel('Drawing canvas'));
+      final center = bounds.center;
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.down(center);
+      await gesture.moveTo(center + const Offset(20, -30));
+      await gesture.moveTo(center + const Offset(40, 10));
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(engine.pushCount, 3);
+
+      await gesture.moveTo(Offset(bounds.right + 8, center.dy));
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(
+        engine.endCount,
+        1,
+        reason: 'finish before a potentially lost release',
+      );
+      expect(engine.pushCount, 3);
+
+      await gesture.moveTo(center + const Offset(-40, 20));
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(
+        engine.pushCount,
+        3,
+        reason: 'never bridge the unobserved off-window path',
+      );
+      final preview =
+          tester
+                  .widget<CustomPaint>(
+                    find.descendant(
+                      of: find.byKey(
+                        const ValueKey('live-stroke-preview-boundary'),
+                      ),
+                      matching: find.byType(CustomPaint),
+                    ),
+                  )
+                  .painter!
+              as LiveStrokePreviewPainter;
+      expect(preview.preview!.points, hasLength(3));
+      expect(preview.preview!.points.last.position, engine.positions.last);
+
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(engine.endCount, 1);
+      expect(engine.cancelCount, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('native stylus resumes a separate segment after re-entry', (
     tester,
   ) async {

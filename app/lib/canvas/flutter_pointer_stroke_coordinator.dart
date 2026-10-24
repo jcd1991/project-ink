@@ -130,6 +130,29 @@ class FlutterPointerStrokeCoordinator {
         host.isInsideDocument(position)) {
       host.setCaptureEndedAtBoundary(true);
       host.markPreviewStoppedAtPageEdge();
+      host.cancelStylusHold();
+      // No off-window sample was sent to Rust. Resuming this transaction on
+      // re-entry would interpolate directly from the last visible sample,
+      // drawing a straight chord across the missing captured input.
+      if (isCancelled) {
+        await engine.cancelStroke();
+        unawaited(host.livePreviewSurface()?.cancelAllStrokes());
+      } else {
+        await engine.endStroke();
+        host.markDirty();
+      }
+      host.diagnostics.record('input.viewport_stroke_end', {
+        'sourceSequence': sourceSequence,
+        'pointerKind': event.kind.name,
+        'cancelled': isCancelled,
+      });
+      host.onStrokeFinished(
+        cancelled: isCancelled,
+        boundaryEnded: true,
+        reason: 'pointer_viewport_exit',
+        pointerKind: event.kind,
+      );
+      return;
     }
     if (host.captureEndedAtBoundary() && !isDown) {
       if (!isUp) return;

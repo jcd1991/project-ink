@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -47,6 +48,34 @@ void main() {
     expect(host.disposedReads, readsAfterDispose);
     synchronization.previewSynchronization.dispose();
   });
+
+  test(
+    'replacement during snapshot preserves the new document cache',
+    () async {
+      final engine = _DelayedSnapshotEngine();
+      final host = _SessionHost(engine);
+      final synchronization = _createSynchronization(host);
+      final refresh = synchronization.refreshTiles(initial: true);
+      await engine.started.future;
+      host.generation++;
+      synchronization.resetForEngineReplacement();
+      synchronization.tileBytes.put(1, -1, 0, 0, Uint8List.fromList([99]));
+      engine.pending.complete(
+        CompositeTileSnapshot(
+          revision: 7,
+          tiles: [
+            CompositeTilePixels(x: 0, y: 0, bytes: Uint8List(256 * 256 * 4)),
+          ],
+        ),
+      );
+      await refresh;
+      expect(synchronization.tileBytes.get(-1, 0, 0), orderedEquals([99]));
+      expect(synchronization.tileBytes.revision, 1);
+      expect(synchronization.renderRevision, 0);
+      synchronization.dispose();
+      synchronization.previewSynchronization.dispose();
+    },
+  );
 
   test('engine replacement resets and retires tile cache state', () {
     final synchronization = _createSynchronization(_TileHost());
@@ -116,4 +145,48 @@ class _TileHost implements CanvasTileSynchronizationHost {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _DelayedSnapshotEngine extends InMemoryEngineApi {
+  final started = Completer<void>();
+  final pending = Completer<CompositeTileSnapshot>();
+
+  @override
+  Future<TileUpdateBatch> drainTileUpdates() async => const TileUpdateBatch(
+    revision: 7,
+    fullRedraw: true,
+    tiles: [TileUpdate(revision: 7, layer: 1, x: 0, y: 0)],
+  );
+
+  @override
+  Future<CompositeTileSnapshot> readCompositeTilesSnapshot({
+    required List<StrokeTileCoordinate> coordinates,
+  }) {
+    started.complete();
+    return pending.future;
+  }
+}
+
+class _SessionHost extends _TileHost {
+  _SessionHost(this.engine);
+  final EngineApi engine;
+  int generation = 0;
+  @override
+  bool get strokeActive => false;
+  @override
+  CanvasTileSynchronizationSession captureSession() =>
+      CanvasTileSynchronizationSession(engine: engine, generation: generation);
+  @override
+  bool isSessionCurrent(CanvasTileSynchronizationSession session) =>
+      !isDisposed &&
+      identical(session.engine, engine) &&
+      session.generation == generation;
+  @override
+  CanvasTileSynchronizationSnapshot captureSnapshot() =>
+      CanvasTileSynchronizationSnapshot(
+        lastPacketMicros: null,
+        visibleRasterLayerIds: [1],
+        strokeWorkQueueDepth: 0,
+        pendingNativePacketCount: 0,
+      );
 }

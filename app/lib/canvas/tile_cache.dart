@@ -4,6 +4,10 @@ import 'dart:typed_data';
 
 const int compositeTileLayerId = -1;
 
+/// Identity within one document session's BGRA8 document-space tile cache.
+/// Whole-document revision covers layer/mask/order and adjustment parameters.
+/// Viewport transforms do not affect these bytes. Engine replacement retires
+/// the owning caches and validates async work against its captured generation.
 class TileCacheKey {
   const TileCacheKey(this.revision, this.layer, this.x, this.y);
   final int revision;

@@ -331,6 +331,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                 hasDown: event is PointerDownEvent,
               ),
           updatePreview: _updateStrokePreview,
+          isInsideViewport: _isInsideCanvasViewport,
+          isInsideDocument: _positionIsInsideDocument,
           pointerPressure: CanvasPointerPressurePolicy.normalize,
           schedulePreviewFrameDiagnostic: _scheduleLivePreviewFrameDiagnostic,
           enqueueStrokeWork: _enqueueStrokeWork,

@@ -135,6 +135,7 @@ class CanvasTileSynchronization {
     _refreshInitialRequested = false;
     _initialTilesLoaded = false;
     clearPendingLiveAcknowledgements();
+    _pendingCpuStrokeAcks.clear();
     tileBytes.clear();
     tileImages.dispose();
     tileImages = TileImageCache();
@@ -172,6 +173,7 @@ class CanvasTileSynchronization {
       // returning it and leaving the degraded live preview on screen forever.
       final tileDrainClock = Stopwatch()..start();
       final batch = await engine.drainTileUpdates();
+      if (!host.isSessionCurrent(session)) return;
       tileDrainClock.stop();
       drainTileUpdatesUs = tileDrainClock.elapsedMicroseconds;
       if (batch.rendererBusy) {
@@ -343,6 +345,7 @@ class CanvasTileSynchronization {
           });
         },
       );
+      if (!host.isSessionCurrent(session)) return;
       snapshotPartCount = snapshot.partCount;
       compositeSnapshotReadUs = snapshot.elapsedMicroseconds;
       snapshotRevision = snapshot.revision;
@@ -425,6 +428,7 @@ class CanvasTileSynchronization {
         );
         final tileImageClock = Stopwatch()..start();
         await tileImages.put(key, bytes);
+        if (!host.isSessionCurrent(session)) return;
         tileImageClock.stop();
         tileImageDecodeUs += tileImageClock.elapsedMicroseconds;
         decodedTileCount++;
