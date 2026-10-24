@@ -152,9 +152,17 @@ class PlatformDocumentPicker
     if (!_supportsNativeDirectorySelection) return null;
     try {
       final image = await _selector.openFile(
-        acceptedTypeGroups: const [
-          XTypeGroup(label: 'Flattened Photoshop image', extensions: ['psd']),
-        ],
+        // NSOpenPanel leaves its confirmation button disabled for valid PSDs
+        // when filtered by their extension/UTI. Let macOS return the selected
+        // path; Rust performs the bounded PSD signature and structure checks
+        // before creating a candidate document. Keep extension filtering on
+        // other desktop platforms.
+        acceptedTypeGroups:
+            _targetPlatform == TargetPlatform.macOS
+                ? null
+                : const [
+                  XTypeGroup(label: 'Photoshop image', extensions: ['psd']),
+                ],
         confirmButtonText: 'Import PSD',
       );
       return image?.path;

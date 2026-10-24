@@ -97,6 +97,7 @@ void main() {
     expect(selector.openFileCalls, 0);
     expect(await picker.openPsd(), '/tmp/reference.psd');
     expect(selector.openFileCalls, 1);
+    expect(selector.lastAcceptedTypeGroups, isNull);
   });
 
   test('brush picker restricts import and export to local paths', () async {
