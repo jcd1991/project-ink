@@ -24,24 +24,69 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-Project Ink is a local-first drawing studio for people who want a real canvas
-on the device in their hand—and room to grow into a bigger workspace. Sketch,
-paint, work in layers, build comic pages, and save portable projects without
-needing an account or a cloud connection.
+Project Ink is an illustration and comic studio built around the act of
+drawing: responsive brushes, editable paths, a useful layer stack, and pages
+that can grow into a comic. It runs locally, keeps work in a portable project,
+and puts the canvas at the center of the experience.
 
-## From first stroke to finished page
+## Made for illustration
 
-- **Draw your way.** Work with pressure-aware brushes, smoothing, stabilization,
-  touch, stylus, and keyboard workflows.
-- **Build with layers.** Organize artwork with layers, groups, masks, selection,
-  transform, fill, and vector tools.
-- **Make comics, too.** Create multi-page projects with panels and lettering in
-  the same workspace.
-- **Keep control of your work.** Projects use the native `.inkproj` format, with
-  local recovery support and no required account, ads, or online service.
+- **Sketch, ink, and paint.** Use raster brush families with pressure-aware
+  size, opacity, and flow, editable response curves, and stroke stabilization.
+- **Shape and refine paths.** Draw editable Bézier paths, adjust anchors and
+  handles, transform selections, and use guides, symmetry, or repeat tools to
+  build a composition.
+- **Keep artwork organized.** Work across paint and vector layers, groups,
+  masks, clipping, and layer state controls. Undo and redo stay part of the
+  drawing workflow.
+- **Move from illustration to comics.** Build multi-page projects with panels
+  and editable dialogue in the same studio. Comic workflows are experimental;
+  see the current [alpha status](#where-ink-is-now) and export notes before
+  relying on them.
+- **Keep projects close.** Save portable `.inkproj` files and use local
+  recovery. There is no required account, advertising, cloud sync, or network
+  service.
 
-Rust owns document state, pixels, layers, history, persistence, and export.
-Flutter shapes the responsive interface and handles presentation and input.
+The interface adapts from touch and stylus layouts to desktop workspaces, while
+Rust remains authoritative for document state, pixels, layers, history,
+persistence, and export. Flutter owns presentation, accessibility, and input.
+
+Project Ink was underway before ArtCraft, PhotoCraft, and VectorCraft. As the
+backend evolved, I chose to reuse selected crates from those projects where
+they fit, because the Rust backend and application stack are similar. Ink keeps
+its own illustration-first direction and document workflows.
+
+## The visual direction
+
+Ink is for making and refining illustrations and pages. Its workspace gives
+brushes, paths, layers, and the canvas the leading role. Editing photographs
+and preparing production-print files are outside the current scope. The app is
+experimental, so the screenshots and feature notes should show real, current
+workflows and name their limits clearly.
+
+## Artwork in the editor
+
+An anime background study, imported as a flattened raster canvas and shown in
+Ink’s desktop workspace:
+
+<p align="center">
+  <img src="assets/readme/screenshots/anime-background-in-ink.png" alt="Anime illustration with a watercolor sky open on Project Ink's canvas, with brush, color, and comic workspace panels visible" width="100%">
+</p>
+
+The *Little Nemo* color study is shown below in Ink’s layer workflow. The
+visible color-study layer sits above the untouched public-domain scan, which is
+preserved as a hidden raster layer. The color pass was created outside Ink and
+imported as an editable layer; this screenshot documents layer organization,
+not in-app coloring.
+
+<p align="center">
+  <img src="assets/readme/screenshots/little-nemo-layers-in-ink.png" alt="Little Nemo color study open in Project Ink, with the color-study raster layer visible and the original scan preserved on a hidden layer" width="100%">
+</p>
+
+The artwork files and their sources are listed in the
+[artwork references and credits](assets/readme/ARTWORK-CREDITS.md). They remain
+local to this repository, so the README does not depend on remote image hosts
+or test golden paths.
 
 ## Where Ink is now
 
@@ -70,7 +115,9 @@ flutter run -d macos
 
 For platform setup, Rust bridge details, and validation commands, start with
 the [app development guide](app/README.md). More architecture and file-format
-notes live in [`specifications/`](specifications/).
+notes live in [`specifications/`](specifications/). Engine ownership, CPU/GPU
+reference checks, cache lifecycle, and sparse-history measurements are
+described in the [engine guardrails](specifications/engine-design-guardrails.md).
 
 ## Open source, open canvas
 
