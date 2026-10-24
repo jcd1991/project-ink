@@ -78,6 +78,27 @@ class CanvasBrushProjection {
             pressureCurvePoints: _curvePointsFromFlat(
               brush.pressureCurvePoints,
             ),
+            pressureResponses: brush.pressureResponses
+                .map(
+                  (response) => BrushPressureResponseView(
+                    target: switch (response.target) {
+                      BrushPressureTargetView.size =>
+                        BrushPressureTargetView.size,
+                      BrushPressureTargetView.opacity =>
+                        BrushPressureTargetView.opacity,
+                      BrushPressureTargetView.flow =>
+                        BrushPressureTargetView.flow,
+                    },
+                    curvePoints: List<double>.unmodifiable(
+                      response.curvePoints,
+                    ),
+                    amount: response.amount,
+                    enabled: response.enabled,
+                    replace: response.replace,
+                    editable: response.editable,
+                  ),
+                )
+                .toList(growable: false),
             pressureCurve: _curveMidpointFromFlat(brush.pressureCurvePoints),
             tipResourceHash: brush.tipResourceHash,
             grainResourceHash: brush.grainResourceHash,

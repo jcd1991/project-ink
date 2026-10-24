@@ -123,6 +123,15 @@ pub(super) struct BrushDraftSettings {
     pub(super) stabilizer_distance_px: f32,
     pub(super) catch_up_on_end: bool,
     pub(super) pressure_curve_points: Vec<f32>,
+    pub(super) pressure_responses: Vec<BrushPressureDraftResponse>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct BrushPressureDraftResponse {
+    pub(super) target: super::BrushPressureTarget,
+    pub(super) amount: f32,
+    pub(super) enabled: bool,
+    pub(super) curve_points: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]

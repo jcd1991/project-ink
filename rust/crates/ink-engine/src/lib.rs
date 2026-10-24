@@ -13,10 +13,10 @@
 )]
 
 use ink_brush::{
-    BrushDab, BrushPaint, BrushPreset, BrushPresetV2, CombineOp, CompiledBrush, CompiledBrushState,
-    CurvePoint, Dab, GrainStamp, PaintBehavior, ParameterBinding, ParameterId, PostEffect,
-    ResponseCurve, SensorId, TipBehavior, ToolBehavior, WatercolorEdgeStyle, builtin_library,
-    resample_from,
+    BrushDab, BrushPaint, BrushPreset, BrushPresetV2, CPU_BRUSH_V4, CombineOp, CompiledBrush,
+    CompiledBrushState, CurvePoint, Dab, EngineSemantics, GrainStamp, PaintBehavior,
+    ParameterBinding, ParameterId, PostEffect, ResponseCurve, SensorId, TipBehavior, ToolBehavior,
+    WatercolorEdgeStyle, builtin_library, resample_from,
 };
 use ink_command::{
     EditorCommand, History, Transaction, VectorPatchEdit, decode_journal, try_encode_command,
@@ -97,8 +97,29 @@ pub struct BrushSummaryProjection {
     pub wetness: f32,
     pub color_rgba: u32,
     pub pressure_curve_points: Vec<f32>,
+    pub pressure_responses: Vec<BrushPressureResponseProjection>,
     pub tip_resource_hash: Option<Vec<u8>>,
     pub grain_resource_hash: Option<Vec<u8>>,
+}
+
+/// One pressure-driven parameter exposed by the brush editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrushPressureTarget {
+    Size,
+    Opacity,
+    Flow,
+}
+
+/// A lossless projection of matching pressure bindings. Multiple bindings are
+/// marked read-only so the editor never flattens imported dynamics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrushPressureResponseProjection {
+    pub target: BrushPressureTarget,
+    pub curve_points: Vec<f32>,
+    pub amount: f32,
+    pub enabled: bool,
+    pub replace: bool,
+    pub editable: bool,
 }
 
 /// One normalized input point used by the disposable brush-editor preview.
@@ -310,8 +331,8 @@ impl From<ExportError> for EngineError {
 
 mod state;
 use state::{
-    ActiveStroke, BrushDraftSettings, BrushEditUndo, BrushResource, EngineState, LayerState,
-    ResourceLru, StrokeInputMetrics,
+    ActiveStroke, BrushDraftSettings, BrushEditUndo, BrushPressureDraftResponse, BrushResource,
+    EngineState, LayerState, ResourceLru, StrokeInputMetrics,
 };
 
 mod persistence;
@@ -3630,9 +3651,51 @@ fn brush_summary_projection(preset: &BrushPresetV2) -> BrushSummaryProjection {
         wetness,
         color_rgba,
         pressure_curve_points: curve,
+        pressure_responses: pressure_response_projections(preset),
         tip_resource_hash: tip_hash,
         grain_resource_hash: grain_hash,
     }
+}
+
+fn pressure_response_projections(preset: &BrushPresetV2) -> Vec<BrushPressureResponseProjection> {
+    [
+        (ParameterId::Diameter, BrushPressureTarget::Size),
+        (ParameterId::Opacity, BrushPressureTarget::Opacity),
+        (ParameterId::Flow, BrushPressureTarget::Flow),
+    ]
+    .into_iter()
+    .map(|(parameter, target)| {
+        let matches: Vec<_> = preset
+            .dynamics
+            .iter()
+            .filter(|binding| binding.sensor == SensorId::Pressure && binding.target == parameter)
+            .collect();
+        if let Some(binding) = matches.first() {
+            BrushPressureResponseProjection {
+                target,
+                curve_points: binding
+                    .curve
+                    .points
+                    .iter()
+                    .flat_map(|p| [p.x, p.y])
+                    .collect(),
+                amount: binding.amount,
+                enabled: binding.amount > 0.0,
+                replace: binding.combine == CombineOp::Replace,
+                editable: matches.len() == 1,
+            }
+        } else {
+            BrushPressureResponseProjection {
+                target,
+                curve_points: vec![0.0, 0.0, 1.0, 1.0],
+                amount: 0.0,
+                enabled: false,
+                replace: false,
+                editable: true,
+            }
+        }
+    })
+    .collect()
 }
 
 fn brush_pressure_projection(preset: &BrushPresetV2) -> (Vec<f32>, f32, f32, bool) {

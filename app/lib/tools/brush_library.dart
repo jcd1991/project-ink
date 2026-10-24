@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../bridge/engine_api/engine_api_models.dart';
 
 /// One normalized pressure-response control point.
 class BrushCurvePointView {
@@ -80,6 +81,7 @@ class BrushPresetView {
       BrushCurvePointView(x: 0.5, y: 0.5),
       BrushCurvePointView(x: 1, y: 1),
     ],
+    this.pressureResponses = const <BrushPressureResponseView>[],
     this.tipResourceHash,
     this.grainResourceHash,
     this.hardness = 0.75,
@@ -122,6 +124,7 @@ class BrushPresetView {
   final double pressureOpacity;
   final double pressureCurve;
   final List<BrushCurvePointView> pressureCurvePoints;
+  final List<BrushPressureResponseView> pressureResponses;
   final List<int>? tipResourceHash;
   final List<int>? grainResourceHash;
   final double hardness;
@@ -150,6 +153,19 @@ class BrushPresetView {
     pressureOpacity,
     pressureCurve,
     pressureCurvePoints.map((point) => <double>[point.x, point.y]).toList(),
+    pressureResponses
+        .map(
+          (response) => [
+            response.target.name,
+            response.curvePoints,
+            response.amount,
+            response.enabled,
+            response.replace,
+            response.editable,
+            response.initialCurvePoints,
+          ],
+        )
+        .toList(),
     tipResourceHash,
     grainResourceHash,
     hardness,
@@ -177,6 +193,7 @@ class BrushPresetView {
     double? pressureOpacity,
     double? pressureCurve,
     List<BrushCurvePointView>? pressureCurvePoints,
+    List<BrushPressureResponseView>? pressureResponses,
     List<int>? tipResourceHash,
     List<int>? grainResourceHash,
     double? hardness,
@@ -206,6 +223,9 @@ class BrushPresetView {
     pressureCurve: pressureCurve ?? this.pressureCurve,
     pressureCurvePoints: List<BrushCurvePointView>.unmodifiable(
       pressureCurvePoints ?? this.pressureCurvePoints,
+    ),
+    pressureResponses: List<BrushPressureResponseView>.unmodifiable(
+      pressureResponses ?? this.pressureResponses,
     ),
     tipResourceHash: tipResourceHash ?? this.tipResourceHash,
     grainResourceHash: grainResourceHash ?? this.grainResourceHash,

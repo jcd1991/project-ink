@@ -4178,8 +4178,28 @@ pub struct BrushSummary {
     pub wetness: f32,
     pub color_rgba: u32,
     pub pressure_curve_points: Vec<f32>,
+    pub pressure_responses: Vec<BrushPressureResponse>,
     pub tip_resource_hash: Option<Vec<u8>>,
     pub grain_resource_hash: Option<Vec<u8>>,
+}
+
+/// One editable pressure response in a brush summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrushPressureResponse {
+    pub target: BrushPressureTarget,
+    pub curve_points: Vec<f32>,
+    pub amount: f32,
+    pub enabled: bool,
+    pub replace: bool,
+    pub editable: bool,
+}
+
+/// Parameter controlled by one brush pressure response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrushPressureTarget {
+    Size,
+    Opacity,
+    Flow,
 }
 
 /// Bounded, display-only inspection data for the Flutter import confirmation.
@@ -5393,6 +5413,52 @@ pub fn update_brush_settings(
     )
 }
 
+/// Update one pressure response while preserving other brush dynamics.
+pub fn update_brush_pressure_response(
+    handle: &mut DocumentHandle,
+    brush_id: u128,
+    target: BrushPressureTarget,
+    amount: f32,
+    enabled: bool,
+    curve_points: Vec<f32>,
+) -> Result<u64, EngineError> {
+    let engine_target = match target {
+        BrushPressureTarget::Size => ink_engine::BrushPressureTarget::Size,
+        BrushPressureTarget::Opacity => ink_engine::BrushPressureTarget::Opacity,
+        BrushPressureTarget::Flow => ink_engine::BrushPressureTarget::Flow,
+    };
+    document_mut(handle)?.update_brush_pressure_response(
+        BrushId::from_u128(brush_id),
+        engine_target,
+        amount,
+        enabled,
+        &curve_points,
+    )
+}
+
+/// Edit one response in an open draft; the brush changes only on Commit.
+pub fn update_brush_pressure_response_draft(
+    handle: &mut DocumentHandle,
+    draft_id: u64,
+    target: BrushPressureTarget,
+    amount: f32,
+    enabled: bool,
+    curve_points: Vec<f32>,
+) -> Result<(), EngineError> {
+    let engine_target = match target {
+        BrushPressureTarget::Size => ink_engine::BrushPressureTarget::Size,
+        BrushPressureTarget::Opacity => ink_engine::BrushPressureTarget::Opacity,
+        BrushPressureTarget::Flow => ink_engine::BrushPressureTarget::Flow,
+    };
+    document_mut(handle)?.update_brush_pressure_response_draft(
+        draft_id,
+        engine_target,
+        amount,
+        enabled,
+        &curve_points,
+    )
+}
+
 /// Update the bounded RGBA color of a Rust-owned brush copy.
 pub fn update_brush_color(
     handle: &mut DocumentHandle,
@@ -6316,6 +6382,7 @@ pub fn builtin_brushes() -> Vec<BrushSummary> {
             wetness: 0.0,
             color_rgba: 0x1818_1cff,
             pressure_curve_points: Vec::new(),
+            pressure_responses: Vec::new(),
             tip_resource_hash: None,
             grain_resource_hash: None,
         })
@@ -6350,6 +6417,22 @@ pub fn brushes(handle: &DocumentHandle) -> Result<Vec<BrushSummary>, EngineError
             wetness: summary.wetness,
             color_rgba: summary.color_rgba,
             pressure_curve_points: summary.pressure_curve_points,
+            pressure_responses: summary
+                .pressure_responses
+                .into_iter()
+                .map(|response| BrushPressureResponse {
+                    target: match response.target {
+                        ink_engine::BrushPressureTarget::Size => BrushPressureTarget::Size,
+                        ink_engine::BrushPressureTarget::Opacity => BrushPressureTarget::Opacity,
+                        ink_engine::BrushPressureTarget::Flow => BrushPressureTarget::Flow,
+                    },
+                    curve_points: response.curve_points,
+                    amount: response.amount,
+                    enabled: response.enabled,
+                    replace: response.replace,
+                    editable: response.editable,
+                })
+                .collect(),
             tip_resource_hash: summary.tip_resource_hash,
             grain_resource_hash: summary.grain_resource_hash,
         })

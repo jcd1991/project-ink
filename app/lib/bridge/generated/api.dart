@@ -4,12 +4,11 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import 'frb_generated.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `blend_mode_name`, `bound_studio_history_stack`, `bounded_text`, `comic_project_mut`, `comic_project`, `comic_template`, `comic_view`, `decode_live_dab_packet`, `document_mut`, `document_state`, `document`, `encode_live_dab_packet`, `group_mode_name`, `inspection_view`, `layer_kind_name`, `make_page_document_from_snapshot`, `make_page_document`, `materialize_and_set_panel_mask`, `materialize_studio_panel_layers`, `new_document_handle`, `page_document_snapshot`, `panel_mask_points`, `payload_bytes`, `purge_expired_brush_imports`, `read_bounded_psd_source`, `refresh_applied_panel_frames`, `report_view`, `restore_page_document`, `retire_vector_candidate`, `stage_vector_candidate`, `stage_vector_path_edit`, `staged_brush_import`, `studio_active_document_mut`, `studio_active_document`, `studio_capture_state`, `studio_from_project`, `studio_mutate`, `studio_panel_binding`, `studio_project_mut`, `studio_project`, `studio_push_history`, `studio_restore_state`, `studio_snapshot_payload_bytes`, `vector_candidate_view`, `vector_path_center`, `with_document_save_snapshot`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentHandleState`, `DocumentMutRef`, `DocumentRef`, `StagedBrushImport`, `StagedVectorCandidate`, `StudioProjectHistoryEntry`, `StudioProjectHistoryState`, `VectorPathEdit`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `deref_mut`, `deref`, `deref`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Inspect an external brush before conversion or installation.
 Future<BrushImportInspectionView> inspectBrushImport({required String path}) =>
@@ -1840,6 +1839,40 @@ Future<BigInt> updateBrushSettings({
   catchUpOnEnd: catchUpOnEnd,
 );
 
+/// Update one pressure response while preserving other brush dynamics.
+Future<BigInt> updateBrushPressureResponse({
+  required DocumentHandle handle,
+  required BigInt brushId,
+  required BrushPressureTarget target,
+  required double amount,
+  required bool enabled,
+  required List<double> curvePoints,
+}) => RustLib.instance.api.crateApiUpdateBrushPressureResponse(
+  handle: handle,
+  brushId: brushId,
+  target: target,
+  amount: amount,
+  enabled: enabled,
+  curvePoints: curvePoints,
+);
+
+/// Edit one response in an open draft; the brush changes only on Commit.
+Future<void> updateBrushPressureResponseDraft({
+  required DocumentHandle handle,
+  required BigInt draftId,
+  required BrushPressureTarget target,
+  required double amount,
+  required bool enabled,
+  required List<double> curvePoints,
+}) => RustLib.instance.api.crateApiUpdateBrushPressureResponseDraft(
+  handle: handle,
+  draftId: draftId,
+  target: target,
+  amount: amount,
+  enabled: enabled,
+  curvePoints: curvePoints,
+);
+
 /// Update the bounded RGBA color of a Rust-owned brush copy.
 Future<BigInt> updateBrushColor({
   required DocumentHandle handle,
@@ -3104,6 +3137,49 @@ class BrushImportStageView {
           expiresInSeconds == other.expiresInSeconds;
 }
 
+/// One editable pressure response in a brush summary.
+class BrushPressureResponse {
+  final BrushPressureTarget target;
+  final Float32List curvePoints;
+  final double amount;
+  final bool enabled;
+  final bool replace;
+  final bool editable;
+
+  const BrushPressureResponse({
+    required this.target,
+    required this.curvePoints,
+    required this.amount,
+    required this.enabled,
+    required this.replace,
+    required this.editable,
+  });
+
+  @override
+  int get hashCode =>
+      target.hashCode ^
+      curvePoints.hashCode ^
+      amount.hashCode ^
+      enabled.hashCode ^
+      replace.hashCode ^
+      editable.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BrushPressureResponse &&
+          runtimeType == other.runtimeType &&
+          target == other.target &&
+          curvePoints == other.curvePoints &&
+          amount == other.amount &&
+          enabled == other.enabled &&
+          replace == other.replace &&
+          editable == other.editable;
+}
+
+/// Parameter controlled by one brush pressure response.
+enum BrushPressureTarget { size, opacity, flow }
+
 /// Normalized scratchpad sample sent to the bounded Rust preview renderer.
 class BrushPreviewPoint {
   final double x;
@@ -3153,6 +3229,7 @@ class BrushSummary {
   final double wetness;
   final int colorRgba;
   final Float32List pressureCurvePoints;
+  final List<BrushPressureResponse> pressureResponses;
   final Uint8List? tipResourceHash;
   final Uint8List? grainResourceHash;
 
@@ -3179,6 +3256,7 @@ class BrushSummary {
     required this.wetness,
     required this.colorRgba,
     required this.pressureCurvePoints,
+    required this.pressureResponses,
     this.tipResourceHash,
     this.grainResourceHash,
   });
@@ -3207,6 +3285,7 @@ class BrushSummary {
       wetness.hashCode ^
       colorRgba.hashCode ^
       pressureCurvePoints.hashCode ^
+      pressureResponses.hashCode ^
       tipResourceHash.hashCode ^
       grainResourceHash.hashCode;
 
@@ -3237,6 +3316,7 @@ class BrushSummary {
           wetness == other.wetness &&
           colorRgba == other.colorRgba &&
           pressureCurvePoints == other.pressureCurvePoints &&
+          pressureResponses == other.pressureResponses &&
           tipResourceHash == other.tipResourceHash &&
           grainResourceHash == other.grainResourceHash;
 }

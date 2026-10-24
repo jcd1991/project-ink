@@ -5964,7 +5964,11 @@ fn brush_editor_settings_are_rust_owned_and_captured_per_stroke() {
         .expect("sample");
     doc.dispatch(EditorCommand::EndStroke { stroke })
         .expect("end edited brush");
-    assert!(doc.time_lapse().strokes.iter().any(|item| item.brush == 6));
+    assert!(
+        doc.time_lapse().strokes.iter().any(|item| item.brush == 6),
+        "time-lapse strokes: {:?}",
+        doc.time_lapse().strokes
+    );
     let projected = doc
         .brush_summaries()
         .into_iter()
@@ -6029,6 +6033,298 @@ fn brush_editor_settings_are_rust_owned_and_captured_per_stroke() {
             0.0,
             0.0,
             &[],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn separate_pressure_curves_survive_unrelated_brush_draft_edits() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc =
+        Document::new(DocumentId::from_u128(0x5052_4553_5355_5245), spec).expect("document");
+    let brush = BrushId::from_u128(6);
+    let size = vec![0.0, 0.0, 0.006, 0.02, 1.0, 1.0];
+    let opacity = vec![0.0, 0.0, 0.3, 0.6, 1.0, 1.0];
+    let flow = vec![0.0, 0.0, 0.6, 0.3, 1.0, 1.0];
+    for (target, curve) in [
+        (BrushPressureTarget::Size, size.as_slice()),
+        (BrushPressureTarget::Opacity, opacity.as_slice()),
+        (BrushPressureTarget::Flow, flow.as_slice()),
+    ] {
+        doc.update_brush_pressure_response(brush, target, 0.7, true, curve)
+            .expect("response update");
+    }
+    let curves_before_draft = doc.snapshot().brushes.clone();
+    let draft = doc.begin_brush_draft(brush).expect("draft");
+    doc.update_brush_draft(
+        draft,
+        18.0,
+        0.8,
+        0.1,
+        0.2,
+        0.7,
+        0.4,
+        0.5,
+        0.75,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        false,
+        0.0,
+        false,
+        &[0.0, 0.0, 0.5, 0.5, 1.0, 1.0],
+    )
+    .expect("unrelated draft");
+    doc.commit_brush_draft(draft).expect("commit draft");
+    let preset: BrushPresetV2 = serde_json::from_slice(&doc.snapshot().brushes[0]).expect("preset");
+    for (target, expected) in [
+        (ParameterId::Diameter, size.as_slice()),
+        (ParameterId::Opacity, opacity.as_slice()),
+        (ParameterId::Flow, flow.as_slice()),
+    ] {
+        let binding = preset
+            .dynamics
+            .iter()
+            .find(|binding| binding.sensor == SensorId::Pressure && binding.target == target)
+            .expect("pressure binding");
+        let actual: Vec<_> = binding
+            .curve
+            .points
+            .iter()
+            .flat_map(|point| [point.x, point.y])
+            .collect();
+        assert_eq!(actual, expected);
+    }
+    let reopened = Document::from_snapshot(doc.snapshot()).expect("reopen pressure curves");
+    let reopened_preset: BrushPresetV2 =
+        serde_json::from_slice(&reopened.snapshot().brushes[0]).expect("reopened preset");
+    assert!(
+        reopened_preset.dynamics.iter().any(|binding| {
+            binding.target == ParameterId::Flow && binding.curve.points.len() == 3
+        })
+    );
+    doc.dispatch(EditorCommand::Undo)
+        .expect("undo draft commit");
+    assert_eq!(doc.snapshot().brushes, curves_before_draft);
+    let projected = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush)
+        .expect("brush projection");
+    assert_eq!(projected.pressure_responses.len(), 3);
+    assert!(
+        projected
+            .pressure_responses
+            .iter()
+            .all(|response| response.enabled)
+    );
+    assert!(
+        doc.update_brush_pressure_response(brush, BrushPressureTarget::Size, 2.0, true, &size)
+            .is_err()
+    );
+    assert!(
+        doc.update_brush_pressure_response(
+            brush,
+            BrushPressureTarget::Size,
+            0.5,
+            true,
+            &[0.0, 0.0, 0.0, 1.0]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn pressure_response_edits_add_absent_bindings_and_preserve_replace_modes() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc =
+        Document::new(DocumentId::from_u128(0x5052_4553_534d_4f44), spec).expect("document");
+    let initial_summary = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.name == "Technical Pen")
+        .expect("technical pen");
+    let technical_pen = initial_summary.id;
+    let size_before = initial_summary
+        .pressure_responses
+        .into_iter()
+        .find(|response| response.target == BrushPressureTarget::Size)
+        .expect("size response");
+    assert!(size_before.replace, "{size_before:?}");
+
+    let flow_curve = [0.0, 0.0, 0.3, 0.6, 1.0, 1.0];
+    doc.update_brush_pressure_response(
+        technical_pen,
+        BrushPressureTarget::Flow,
+        0.4,
+        true,
+        &flow_curve,
+    )
+    .expect("add flow binding");
+    let projection = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == technical_pen)
+        .expect("updated technical pen");
+    let size_after = projection
+        .pressure_responses
+        .iter()
+        .find(|response| response.target == BrushPressureTarget::Size)
+        .expect("size response remains projected");
+    let flow_after = projection
+        .pressure_responses
+        .iter()
+        .find(|response| response.target == BrushPressureTarget::Flow)
+        .expect("new flow response");
+    assert!(size_after.replace);
+    assert!(flow_after.enabled);
+    assert!((flow_after.amount - 0.4).abs() < f32::EPSILON);
+    assert_eq!(flow_after.curve_points, flow_curve);
+
+    doc.update_brush_pressure_response(
+        technical_pen,
+        BrushPressureTarget::Flow,
+        0.4,
+        false,
+        &flow_curve,
+    )
+    .expect("disable flow binding");
+    let disabled_flow = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == technical_pen)
+        .expect("disabled technical pen")
+        .pressure_responses
+        .into_iter()
+        .find(|response| response.target == BrushPressureTarget::Flow)
+        .expect("disabled flow response");
+    assert!(!disabled_flow.enabled);
+    assert!((disabled_flow.curve_points[2] - 0.3).abs() < f32::EPSILON);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn multiple_pressure_bindings_remain_read_only_during_unrelated_draft_edits() {
+    let spec = DocumentSpec {
+        width_px: 64,
+        height_px: 64,
+        dpi: 144.0,
+        color_space: ColorSpace::Srgb,
+        background: Rgba8::default(),
+    };
+    let mut doc =
+        Document::new(DocumentId::from_u128(0x4d55_4c54_4950_5245), spec).expect("document");
+    let brush_id = doc
+        .duplicate_brush(BrushId::from_u128(1))
+        .expect("duplicate technical pen");
+    let mut snapshot = doc.snapshot();
+    let brush_index = snapshot
+        .brushes
+        .iter()
+        .position(|bytes| {
+            serde_json::from_slice::<BrushPresetV2>(bytes).is_ok_and(|preset| preset.id == brush_id)
+        })
+        .expect("technical pen preset");
+    let mut preset: BrushPresetV2 =
+        serde_json::from_slice(&snapshot.brushes[brush_index]).expect("preset");
+    assert_eq!(preset.id, brush_id);
+    let mut duplicate = preset
+        .dynamics
+        .iter()
+        .find(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        })
+        .expect("size response")
+        .clone();
+    duplicate.amount = 0.75;
+    preset.dynamics.push(duplicate);
+    snapshot.brushes[brush_index] = serde_json::to_vec(&preset).expect("serialize preset");
+    let mut doc = Document::from_snapshot(snapshot).expect("document with imported dynamics");
+
+    let size_projection = doc
+        .brush_summaries()
+        .into_iter()
+        .find(|summary| summary.id == brush_id)
+        .expect("brush projection")
+        .pressure_responses
+        .into_iter()
+        .find(|response| response.target == BrushPressureTarget::Size)
+        .expect("size projection");
+    assert!(!size_projection.editable);
+
+    let original_amounts: Vec<_> = preset
+        .dynamics
+        .iter()
+        .filter(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        })
+        .map(|binding| binding.amount)
+        .collect();
+    let draft = doc.begin_brush_draft(brush_id).expect("draft");
+    doc.update_brush_draft(
+        draft,
+        24.0,
+        0.8,
+        0.1,
+        0.2,
+        0.2,
+        0.4,
+        0.5,
+        0.75,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        false,
+        0.0,
+        false,
+        &[0.0, 0.0, 1.0, 1.0],
+    )
+    .expect("unrelated brush edit");
+    doc.commit_brush_draft(draft)
+        .expect("commit unrelated edit");
+    let committed: BrushPresetV2 = doc
+        .snapshot()
+        .brushes
+        .iter()
+        .find_map(|bytes| {
+            let candidate = serde_json::from_slice::<BrushPresetV2>(bytes).ok()?;
+            (candidate.id == brush_id).then_some(candidate)
+        })
+        .expect("committed preset");
+    let committed_amounts: Vec<_> = committed
+        .dynamics
+        .iter()
+        .filter(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        })
+        .map(|binding| binding.amount)
+        .collect();
+    assert_eq!(committed_amounts, original_amounts);
+    assert!(
+        doc.update_brush_pressure_response(
+            brush_id,
+            BrushPressureTarget::Size,
+            0.5,
+            true,
+            &[0.0, 0.0, 1.0, 1.0],
         )
         .is_err()
     );

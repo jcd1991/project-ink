@@ -61,6 +61,13 @@ abstract interface class EngineApi {
     required double stabilizerDistancePx,
     required bool catchUpOnEnd,
   });
+  Future<void> updateBrushPressureResponse({
+    required int draftId,
+    required BrushPressureTargetView target,
+    required double amount,
+    required bool enabled,
+    required List<BrushCurvePointView> curvePoints,
+  });
   Future<int> beginBrushDraft(int brushId);
   Future<void> updateBrushDraft({
     required int draftId,

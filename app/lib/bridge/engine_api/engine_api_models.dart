@@ -58,6 +58,7 @@ class BrushSummaryView {
     this.wetness = 0,
     this.colorRgba = 0x202124ff,
     this.pressureCurvePoints = const <double>[0, 0, 1, 1],
+    this.pressureResponses = const <BrushPressureResponseView>[],
     this.tipResourceHash,
     this.grainResourceHash,
   });
@@ -85,8 +86,44 @@ class BrushSummaryView {
 
   /// Flattened normalized `(x, y)` pairs from the Rust preset.
   final List<double> pressureCurvePoints;
+  final List<BrushPressureResponseView> pressureResponses;
   final Uint8List? tipResourceHash;
   final Uint8List? grainResourceHash;
+}
+
+enum BrushPressureTargetView { size, opacity, flow }
+
+class BrushPressureResponseView {
+  const BrushPressureResponseView({
+    required this.target,
+    required this.curvePoints,
+    required this.amount,
+    required this.enabled,
+    required this.replace,
+    required this.editable,
+    List<double>? initialCurvePoints,
+  }) : initialCurvePoints = initialCurvePoints ?? curvePoints;
+  final BrushPressureTargetView target;
+  final List<double> curvePoints;
+  final double amount;
+  final bool enabled;
+  final bool replace;
+  final bool editable;
+  final List<double> initialCurvePoints;
+
+  BrushPressureResponseView copyWith({
+    List<double>? curvePoints,
+    double? amount,
+    bool? enabled,
+  }) => BrushPressureResponseView(
+    target: target,
+    curvePoints: List<double>.unmodifiable(curvePoints ?? this.curvePoints),
+    amount: amount ?? this.amount,
+    enabled: enabled ?? this.enabled,
+    replace: replace,
+    editable: editable,
+    initialCurvePoints: initialCurvePoints,
+  );
 }
 
 class BrushImportInspectionView {

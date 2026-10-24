@@ -4,13 +4,10 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api.dart';
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
-
 import 'frb_generated.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_io.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
@@ -22,43 +19,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_ComicProjectHandlePtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandlePtr;
+  get rust_arc_decrement_strong_count_ComicProjectHandlePtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandlePtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_CompositeTilesSnapshotHandlePtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandlePtr;
+  get rust_arc_decrement_strong_count_CompositeTilesSnapshotHandlePtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandlePtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_DocumentHandlePtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandlePtr;
+  get rust_arc_decrement_strong_count_DocumentHandlePtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandlePtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_DocumentSpecPtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpecPtr;
+  get rust_arc_decrement_strong_count_DocumentSpecPtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpecPtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_EditorCommandPtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommandPtr;
+  get rust_arc_decrement_strong_count_EditorCommandPtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommandPtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_EngineErrorPtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineErrorPtr;
+  get rust_arc_decrement_strong_count_EngineErrorPtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineErrorPtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_EngineEventPtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEventPtr;
+  get rust_arc_decrement_strong_count_EngineEventPtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEventPtr;
 
-  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_LayerPtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayerPtr;
-
-  CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_LiveSurfaceHandlePtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandlePtr;
+  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_LayerPtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayerPtr;
 
   CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_StudioProjectHandlePtr => wire
-      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandlePtr;
+  get rust_arc_decrement_strong_count_LiveSurfaceHandlePtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandlePtr;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_StudioProjectHandlePtr =>
+      wire._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandlePtr;
 
   @protected
   ComicProjectHandle
@@ -264,6 +261,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BrushImportStageView dco_decode_brush_import_stage_view(dynamic raw);
 
   @protected
+  BrushPressureResponse dco_decode_brush_pressure_response(dynamic raw);
+
+  @protected
+  BrushPressureTarget dco_decode_brush_pressure_target(dynamic raw);
+
+  @protected
   BrushPreviewPoint dco_decode_brush_preview_point(dynamic raw);
 
   @protected
@@ -351,6 +354,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<bool> dco_decode_list_bool(dynamic raw);
+
+  @protected
+  List<BrushPressureResponse> dco_decode_list_brush_pressure_response(
+    dynamic raw,
+  );
 
   @protected
   List<BrushPreviewPoint> dco_decode_list_brush_preview_point(dynamic raw);
@@ -697,6 +705,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BrushPressureResponse sse_decode_brush_pressure_response(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BrushPressureTarget sse_decode_brush_pressure_target(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BrushPreviewPoint sse_decode_brush_preview_point(
     SseDeserializer deserializer,
   );
@@ -804,6 +822,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<bool> sse_decode_list_bool(SseDeserializer deserializer);
+
+  @protected
+  List<BrushPressureResponse> sse_decode_list_brush_pressure_response(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<BrushPreviewPoint> sse_decode_list_brush_preview_point(
@@ -1210,6 +1233,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_brush_pressure_response(
+    BrushPressureResponse self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_brush_pressure_target(
+    BrushPressureTarget self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_brush_preview_point(
     BrushPreviewPoint self,
     SseSerializer serializer,
@@ -1336,6 +1371,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_bool(List<bool> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_brush_pressure_response(
+    List<BrushPressureResponse> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_brush_preview_point(

@@ -1,11 +1,12 @@
 use super::{
-    BrushDraftSettings, BrushEditUndo, BrushId, BrushPresetV2, BrushPreviewPoint, BrushResource,
-    BrushSummaryProjection, CombineOp, Document, EngineError, EngineEvent, LayerId, LayerKind,
-    MAX_DOCUMENT_RESOURCE_BYTES, PaintBehavior, ParameterBinding, ParameterId, ResponseCurve,
-    Rgba8, SensorId, TipBehavior, VectorObjectSummaryTuple, VectorStroke, VectorStrokeSummaryTuple,
-    advance_revision, brush_summary_projection, builtin_library, decode_editor_curve, hex_hash,
-    lock_recover, next_available_brush_id, render_brush_dabs, resource_hashes_for_preset,
-    resource_total_bytes, validate_brush_draft_settings,
+    BrushDraftSettings, BrushEditUndo, BrushId, BrushPresetV2, BrushPressureDraftResponse,
+    BrushPreviewPoint, BrushResource, BrushSummaryProjection, CPU_BRUSH_V4, CombineOp, Document,
+    EngineError, EngineEvent, EngineSemantics, LayerId, LayerKind, MAX_DOCUMENT_RESOURCE_BYTES,
+    PaintBehavior, ParameterBinding, ParameterId, ResponseCurve, Rgba8, SensorId, TipBehavior,
+    VectorObjectSummaryTuple, VectorStroke, VectorStrokeSummaryTuple, advance_revision,
+    brush_summary_projection, builtin_library, decode_editor_curve, hex_hash, lock_recover,
+    next_available_brush_id, render_brush_dabs, resource_hashes_for_preset, resource_total_bytes,
+    validate_brush_draft_settings,
 };
 use ink_input::{DeviceKind, Phase, PointerSample, flags};
 use std::collections::{BTreeMap, HashSet};
@@ -157,6 +158,90 @@ fn bezier_bounds_and_anchor_count(path: &ink_model::BezierPath) -> ([f32; 4], us
 }
 
 impl Document {
+    /// Update one unambiguous pressure binding without rewriting other
+    /// dynamics or changing the binding's base/combine semantics.
+    pub fn update_brush_pressure_response(
+        &mut self,
+        brush_id: BrushId,
+        target: super::BrushPressureTarget,
+        amount: f32,
+        enabled: bool,
+        curve_points: &[f32],
+    ) -> Result<u64, EngineError> {
+        if !amount.is_finite() || !(0.0..=1.0).contains(&amount) {
+            return Err(EngineError::InvalidCommand(
+                "pressure response amount must be finite and normalized".into(),
+            ));
+        }
+        let curve = ResponseCurve {
+            points: decode_editor_curve(curve_points, 0.5)?,
+        };
+        self.flush_input()?;
+        let mut state = lock_recover(&self.state);
+        if state.active_stroke.is_some() {
+            return Err(EngineError::InvalidCommand(
+                "finish or cancel the active stroke before editing a brush".into(),
+            ));
+        }
+        let parameter = match target {
+            super::BrushPressureTarget::Size => ParameterId::Diameter,
+            super::BrushPressureTarget::Opacity => ParameterId::Opacity,
+            super::BrushPressureTarget::Flow => ParameterId::Flow,
+        };
+        let previous_override = state.brush_overrides.get(&brush_id).cloned();
+        let mut preset = previous_override
+            .clone()
+            .or_else(|| {
+                builtin_library()
+                    .into_iter()
+                    .find(|item| item.id == brush_id)
+            })
+            .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
+        let matches: Vec<_> = preset
+            .dynamics
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| {
+                binding.sensor == SensorId::Pressure && binding.target == parameter
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if matches.len() > 1 {
+            return Err(EngineError::InvalidCommand(
+                "pressure response has multiple bindings and cannot be edited in the simple editor"
+                    .into(),
+            ));
+        }
+        if let Some(index) = matches.first() {
+            let binding = &mut preset.dynamics[*index];
+            binding.curve = curve;
+            binding.amount = if enabled { amount } else { 0.0 };
+        } else {
+            preset.dynamics.push(ParameterBinding {
+                target: parameter,
+                base: 1.0,
+                sensor: SensorId::Pressure,
+                curve,
+                amount: if enabled { amount } else { 0.0 },
+                combine: CombineOp::Multiply,
+            });
+        }
+        preset
+            .validate()
+            .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+        state.brush_overrides.insert(brush_id, preset);
+        let current_override = state.brush_overrides.get(&brush_id).cloned();
+        state.brush_undo = Some(BrushEditUndo {
+            brush_id,
+            previous_override,
+            current_override,
+        });
+        state.brush_redo = None;
+        let revision = advance_revision(&mut state)?;
+        state.events.push(EngineEvent::DocumentChanged { revision });
+        Ok(revision)
+    }
+
     /// Render one bounded preview stroke without changing document pixels,
     /// history, or revision.
     pub fn render_brush_preview_rgba8(
@@ -189,7 +274,7 @@ impl Document {
         if let Some(settings) = draft
             && validate_brush_draft_settings(&settings).is_ok()
         {
-            apply_brush_draft_to_preset(&mut preset, &settings)?;
+            apply_brush_draft_to_preset(&mut preset, &settings, false)?;
         }
         let count = points.len();
         let samples = points
@@ -296,6 +381,7 @@ impl Document {
                     stabilizer_distance_px: 0.0,
                     catch_up_on_end: false,
                     pressure_curve_points: Vec::new(),
+                    pressure_responses: Vec::new(),
                 },
             ),
         );
@@ -345,6 +431,7 @@ impl Document {
             stabilizer_distance_px,
             catch_up_on_end,
             pressure_curve_points: pressure_curve_points.to_vec(),
+            pressure_responses: Vec::new(),
         };
         validate_brush_draft_settings(&settings)?;
         self.flush_input()?;
@@ -354,7 +441,80 @@ impl Document {
                 "brush draft is not active".into(),
             ));
         };
+        let mut settings = settings;
+        settings
+            .pressure_responses
+            .clone_from(&draft.pressure_responses);
         *draft = settings;
+        Ok(())
+    }
+
+    /// Update one response inside an open brush draft; Commit publishes it.
+    pub fn update_brush_pressure_response_draft(
+        &mut self,
+        draft_id: u64,
+        target: super::BrushPressureTarget,
+        amount: f32,
+        enabled: bool,
+        curve_points: &[f32],
+    ) -> Result<(), EngineError> {
+        if !amount.is_finite() || !(0.0..=1.0).contains(&amount) {
+            return Err(EngineError::InvalidCommand(
+                "pressure response amount must be finite and normalized".into(),
+            ));
+        }
+        decode_editor_curve(curve_points, 0.5)?;
+        self.flush_input()?;
+        let mut state = lock_recover(&self.state);
+        let Some((brush_id, _)) = state.brush_drafts.get(&draft_id) else {
+            return Err(EngineError::InvalidCommand(
+                "brush draft is not active".into(),
+            ));
+        };
+        let brush_id = *brush_id;
+        let parameter = pressure_parameter(target);
+        let preset = state
+            .brush_overrides
+            .get(&brush_id)
+            .cloned()
+            .or_else(|| {
+                builtin_library()
+                    .into_iter()
+                    .find(|preset| preset.id == brush_id)
+            })
+            .ok_or_else(|| EngineError::InvalidCommand("unknown Phase 2 brush".into()))?;
+        if preset
+            .dynamics
+            .iter()
+            .filter(|binding| binding.sensor == SensorId::Pressure && binding.target == parameter)
+            .count()
+            > 1
+        {
+            return Err(EngineError::InvalidCommand(
+                "pressure response has multiple bindings and cannot be edited in the simple editor"
+                    .into(),
+            ));
+        }
+        let (_, draft) = state
+            .brush_drafts
+            .get_mut(&draft_id)
+            .expect("draft checked above");
+        if let Some(existing) = draft
+            .pressure_responses
+            .iter_mut()
+            .find(|response| response.target == target)
+        {
+            existing.amount = amount;
+            existing.enabled = enabled;
+            existing.curve_points = curve_points.to_vec();
+        } else {
+            draft.pressure_responses.push(BrushPressureDraftResponse {
+                target,
+                amount,
+                enabled,
+                curve_points: curve_points.to_vec(),
+            });
+        }
         Ok(())
     }
 
@@ -395,6 +555,8 @@ impl Document {
                 settings.stabilizer_distance_px,
                 settings.catch_up_on_end,
             )),
+            false,
+            &settings.pressure_responses,
         );
         match result {
             Ok(revision) => Ok(revision),
@@ -459,6 +621,8 @@ impl Document {
             wetness,
             pressure_curve_points,
             None,
+            true,
+            &[],
         )
     }
 
@@ -504,6 +668,8 @@ impl Document {
             wetness,
             pressure_curve_points,
             Some((pulled_string, stabilizer_distance_px, catch_up_on_end)),
+            true,
+            &[],
         )
     }
 
@@ -527,6 +693,8 @@ impl Document {
         wetness: f32,
         pressure_curve_points: &[f32],
         stabilizer: Option<(bool, f32, bool)>,
+        update_shared_curve: bool,
+        pressure_responses: &[BrushPressureDraftResponse],
     ) -> Result<u64, EngineError> {
         self.flush_input()?;
         if !diameter_px.is_finite()
@@ -601,8 +769,10 @@ impl Document {
             stabilizer_distance_px,
             catch_up_on_end,
             pressure_curve_points: pressure_curve_points.to_vec(),
+            pressure_responses: Vec::new(),
         };
-        apply_brush_draft_to_preset(&mut preset, &settings)?;
+        apply_brush_draft_to_preset(&mut preset, &settings, update_shared_curve)?;
+        apply_pressure_response_drafts(&mut preset, pressure_responses)?;
         state.brush_overrides.insert(brush_id, preset);
         let current_override = state.brush_overrides.get(&brush_id).cloned();
         state.brush_undo = Some(BrushEditUndo {
@@ -1658,6 +1828,7 @@ impl Document {
 fn apply_brush_draft_to_preset(
     preset: &mut BrushPresetV2,
     settings: &BrushDraftSettings,
+    update_shared_curve: bool,
 ) -> Result<(), EngineError> {
     validate_brush_draft_settings(settings)?;
     preset.stroke.spacing = settings.spacing;
@@ -1669,23 +1840,46 @@ fn apply_brush_draft_to_preset(
             settings.catch_up_on_end,
         )
         .map_err(|error| EngineError::InvalidCommand(error.to_string()))?;
+    preset.engine_semantics = EngineSemantics(CPU_BRUSH_V4);
     let pressure_curve = ResponseCurve {
         points: decode_editor_curve(&settings.pressure_curve_points, settings.pressure_curve)?,
     };
+    let size_binding_count = preset
+        .dynamics
+        .iter()
+        .filter(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        })
+        .count();
+    let opacity_binding_count = preset
+        .dynamics
+        .iter()
+        .filter(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
+        })
+        .count();
     for binding in &mut preset.dynamics {
         if binding.sensor == SensorId::Pressure {
-            if binding.target == ParameterId::Diameter {
+            if binding.target == ParameterId::Diameter
+                && (update_shared_curve || size_binding_count == 1)
+            {
                 binding.amount = settings.pressure_size;
             }
-            if binding.target == ParameterId::Opacity {
+            if binding.target == ParameterId::Opacity
+                && (update_shared_curve || opacity_binding_count == 1)
+            {
                 binding.amount = settings.pressure_opacity;
             }
-            binding.curve = pressure_curve.clone();
+            if update_shared_curve {
+                binding.curve = pressure_curve.clone();
+            }
         }
     }
-    if !preset.dynamics.iter().any(|binding| {
-        binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
-    }) {
+    if update_shared_curve
+        && !preset.dynamics.iter().any(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Diameter
+        })
+    {
         preset.dynamics.push(ParameterBinding {
             target: ParameterId::Diameter,
             base: 1.0,
@@ -1695,9 +1889,11 @@ fn apply_brush_draft_to_preset(
             combine: CombineOp::Multiply,
         });
     }
-    if !preset.dynamics.iter().any(|binding| {
-        binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
-    }) {
+    if update_shared_curve
+        && !preset.dynamics.iter().any(|binding| {
+            binding.sensor == SensorId::Pressure && binding.target == ParameterId::Opacity
+        })
+    {
         preset.dynamics.push(ParameterBinding {
             target: ParameterId::Opacity,
             base: 1.0,
@@ -1716,6 +1912,61 @@ fn apply_brush_draft_to_preset(
     preset
         .validate()
         .map_err(|error| EngineError::InvalidCommand(error.to_string()))
+}
+
+fn pressure_parameter(target: super::BrushPressureTarget) -> ParameterId {
+    match target {
+        super::BrushPressureTarget::Size => ParameterId::Diameter,
+        super::BrushPressureTarget::Opacity => ParameterId::Opacity,
+        super::BrushPressureTarget::Flow => ParameterId::Flow,
+    }
+}
+
+fn apply_pressure_response_drafts(
+    preset: &mut BrushPresetV2,
+    drafts: &[BrushPressureDraftResponse],
+) -> Result<(), EngineError> {
+    for draft in drafts {
+        if !draft.amount.is_finite() || !(0.0..=1.0).contains(&draft.amount) {
+            return Err(EngineError::InvalidCommand(
+                "pressure response amount must be finite and normalized".into(),
+            ));
+        }
+        let parameter = pressure_parameter(draft.target);
+        let indices: Vec<_> = preset
+            .dynamics
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| {
+                binding.sensor == SensorId::Pressure && binding.target == parameter
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if indices.len() > 1 {
+            return Err(EngineError::InvalidCommand(
+                "pressure response has multiple bindings and cannot be edited in the simple editor"
+                    .into(),
+            ));
+        }
+        let curve = ResponseCurve {
+            points: decode_editor_curve(&draft.curve_points, 0.5)?,
+        };
+        if let Some(index) = indices.first() {
+            let binding = &mut preset.dynamics[*index];
+            binding.curve = curve;
+            binding.amount = if draft.enabled { draft.amount } else { 0.0 };
+        } else {
+            preset.dynamics.push(ParameterBinding {
+                target: parameter,
+                base: 1.0,
+                sensor: SensorId::Pressure,
+                curve,
+                amount: if draft.enabled { draft.amount } else { 0.0 },
+                combine: CombineOp::Multiply,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn apply_brush_tip_settings(tip: &mut TipBehavior, settings: &BrushDraftSettings) {

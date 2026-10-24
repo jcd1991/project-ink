@@ -4,14 +4,11 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api.dart';
-
 import 'dart:async';
 import 'dart:convert';
-
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 /// Main entrypoint of the Rust API
@@ -67,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 2000994657;
+  int get rustContentHash => 1029269421;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -1634,6 +1631,24 @@ abstract class RustLibApi extends BaseApi {
     required double stabilizerDistancePx,
     required bool catchUpOnEnd,
     required List<double> pressureCurvePoints,
+  });
+
+  Future<BigInt> crateApiUpdateBrushPressureResponse({
+    required DocumentHandle handle,
+    required BigInt brushId,
+    required BrushPressureTarget target,
+    required double amount,
+    required bool enabled,
+    required List<double> curvePoints,
+  });
+
+  Future<void> crateApiUpdateBrushPressureResponseDraft({
+    required DocumentHandle handle,
+    required BigInt draftId,
+    required BrushPressureTarget target,
+    required double amount,
+    required bool enabled,
+    required List<double> curvePoints,
   });
 
   Future<BigInt> crateApiUpdateBrushSettings({
@@ -12626,6 +12641,114 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<BigInt> crateApiUpdateBrushPressureResponse({
+    required DocumentHandle handle,
+    required BigInt brushId,
+    required BrushPressureTarget target,
+    required double amount,
+    required bool enabled,
+    required List<double> curvePoints,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle(
+            handle,
+            serializer,
+          );
+          sse_encode_U128(brushId, serializer);
+          sse_encode_brush_pressure_target(target, serializer);
+          sse_encode_f_32(amount, serializer);
+          sse_encode_bool(enabled, serializer);
+          sse_encode_list_prim_f_32_loose(curvePoints, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 248,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError,
+        ),
+        constMeta: kCrateApiUpdateBrushPressureResponseConstMeta,
+        argValues: [handle, brushId, target, amount, enabled, curvePoints],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUpdateBrushPressureResponseConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_brush_pressure_response",
+        argNames: [
+          "handle",
+          "brushId",
+          "target",
+          "amount",
+          "enabled",
+          "curvePoints",
+        ],
+      );
+
+  @override
+  Future<void> crateApiUpdateBrushPressureResponseDraft({
+    required DocumentHandle handle,
+    required BigInt draftId,
+    required BrushPressureTarget target,
+    required double amount,
+    required bool enabled,
+    required List<double> curvePoints,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle(
+            handle,
+            serializer,
+          );
+          sse_encode_u_64(draftId, serializer);
+          sse_encode_brush_pressure_target(target, serializer);
+          sse_encode_f_32(amount, serializer);
+          sse_encode_bool(enabled, serializer);
+          sse_encode_list_prim_f_32_loose(curvePoints, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 249,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError,
+        ),
+        constMeta: kCrateApiUpdateBrushPressureResponseDraftConstMeta,
+        argValues: [handle, draftId, target, amount, enabled, curvePoints],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUpdateBrushPressureResponseDraftConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_brush_pressure_response_draft",
+        argNames: [
+          "handle",
+          "draftId",
+          "target",
+          "amount",
+          "enabled",
+          "curvePoints",
+        ],
+      );
+
+  @override
   Future<BigInt> crateApiUpdateBrushSettings({
     required DocumentHandle handle,
     required BigInt brushId,
@@ -12676,7 +12799,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 248,
+            funcId: 250,
             port: port_,
           );
         },
@@ -12757,7 +12880,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 249,
+            funcId: 251,
             port: port_,
           );
         },
@@ -12798,7 +12921,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 250,
+            funcId: 252,
             port: port_,
           );
         },
@@ -12845,7 +12968,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 251,
+            funcId: 253,
             port: port_,
           );
         },
@@ -12901,7 +13024,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 252,
+            funcId: 254,
             port: port_,
           );
         },
@@ -12958,7 +13081,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 253,
+            funcId: 255,
             port: port_,
           );
         },
@@ -13000,7 +13123,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 254,
+            funcId: 256,
             port: port_,
           );
         },
@@ -13039,7 +13162,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 255,
+            funcId: 257,
             port: port_,
           );
         },
@@ -13062,84 +13185,82 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_ComicProjectHandle => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandle;
+  get rust_arc_increment_strong_count_ComicProjectHandle =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandle;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_ComicProjectHandle => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandle;
+  get rust_arc_decrement_strong_count_ComicProjectHandle =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerComicProjectHandle;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_CompositeTilesSnapshotHandle => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle;
+  get rust_arc_increment_strong_count_CompositeTilesSnapshotHandle =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_CompositeTilesSnapshotHandle => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle;
+  get rust_arc_decrement_strong_count_CompositeTilesSnapshotHandle =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCompositeTilesSnapshotHandle;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_DocumentHandle => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle;
+  get rust_arc_increment_strong_count_DocumentHandle =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_DocumentHandle => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle;
+  get rust_arc_decrement_strong_count_DocumentHandle =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentHandle;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_DocumentSpec => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpec;
+  get rust_arc_increment_strong_count_DocumentSpec =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpec;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_DocumentSpec => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpec;
+  get rust_arc_decrement_strong_count_DocumentSpec =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerDocumentSpec;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_EditorCommand => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommand;
+  get rust_arc_increment_strong_count_EditorCommand =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommand;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_EditorCommand => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommand;
+  get rust_arc_decrement_strong_count_EditorCommand =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEditorCommand;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_EngineError => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError;
+  get rust_arc_increment_strong_count_EngineError =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_EngineError => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError;
+  get rust_arc_decrement_strong_count_EngineError =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineError;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_EngineEvent => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEvent;
+  get rust_arc_increment_strong_count_EngineEvent =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEvent;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_EngineEvent => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEvent;
+  get rust_arc_decrement_strong_count_EngineEvent =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerEngineEvent;
+
+  RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_Layer =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayer;
+
+  RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_Layer =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayer;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_Layer => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayer;
+  get rust_arc_increment_strong_count_LiveSurfaceHandle =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandle;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_Layer => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLayer;
+  get rust_arc_decrement_strong_count_LiveSurfaceHandle =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandle;
 
   RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_LiveSurfaceHandle => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandle;
+  get rust_arc_increment_strong_count_StudioProjectHandle =>
+      wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandle;
 
   RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_LiveSurfaceHandle => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSurfaceHandle;
-
-  RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_StudioProjectHandle => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandle;
-
-  RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_StudioProjectHandle => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandle;
+  get rust_arc_decrement_strong_count_StudioProjectHandle =>
+      wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerStudioProjectHandle;
 
   @protected
   ComicProjectHandle
@@ -13500,6 +13621,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BrushPressureResponse dco_decode_brush_pressure_response(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return BrushPressureResponse(
+      target: dco_decode_brush_pressure_target(arr[0]),
+      curvePoints: dco_decode_list_prim_f_32_strict(arr[1]),
+      amount: dco_decode_f_32(arr[2]),
+      enabled: dco_decode_bool(arr[3]),
+      replace: dco_decode_bool(arr[4]),
+      editable: dco_decode_bool(arr[5]),
+    );
+  }
+
+  @protected
+  BrushPressureTarget dco_decode_brush_pressure_target(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return BrushPressureTarget.values[raw as int];
+  }
+
+  @protected
   BrushPreviewPoint dco_decode_brush_preview_point(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -13516,8 +13659,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BrushSummary dco_decode_brush_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 24)
-      throw Exception('unexpected arr length: expect 24 but see ${arr.length}');
+    if (arr.length != 25)
+      throw Exception('unexpected arr length: expect 25 but see ${arr.length}');
     return BrushSummary(
       id: dco_decode_U128(arr[0]),
       isBuiltin: dco_decode_bool(arr[1]),
@@ -13541,8 +13684,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       wetness: dco_decode_f_32(arr[19]),
       colorRgba: dco_decode_u_32(arr[20]),
       pressureCurvePoints: dco_decode_list_prim_f_32_strict(arr[21]),
-      tipResourceHash: dco_decode_opt_list_prim_u_8_strict(arr[22]),
-      grainResourceHash: dco_decode_opt_list_prim_u_8_strict(arr[23]),
+      pressureResponses: dco_decode_list_brush_pressure_response(arr[22]),
+      tipResourceHash: dco_decode_opt_list_prim_u_8_strict(arr[23]),
+      grainResourceHash: dco_decode_opt_list_prim_u_8_strict(arr[24]),
     );
   }
 
@@ -13911,6 +14055,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<bool> dco_decode_list_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_bool).toList();
+  }
+
+  @protected
+  List<BrushPressureResponse> dco_decode_list_brush_pressure_response(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_brush_pressure_response)
+        .toList();
   }
 
   @protected
@@ -14710,6 +14864,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BrushPressureResponse sse_decode_brush_pressure_response(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_target = sse_decode_brush_pressure_target(deserializer);
+    var var_curvePoints = sse_decode_list_prim_f_32_strict(deserializer);
+    var var_amount = sse_decode_f_32(deserializer);
+    var var_enabled = sse_decode_bool(deserializer);
+    var var_replace = sse_decode_bool(deserializer);
+    var var_editable = sse_decode_bool(deserializer);
+    return BrushPressureResponse(
+      target: var_target,
+      curvePoints: var_curvePoints,
+      amount: var_amount,
+      enabled: var_enabled,
+      replace: var_replace,
+      editable: var_editable,
+    );
+  }
+
+  @protected
+  BrushPressureTarget sse_decode_brush_pressure_target(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return BrushPressureTarget.values[inner];
+  }
+
+  @protected
   BrushPreviewPoint sse_decode_brush_preview_point(
     SseDeserializer deserializer,
   ) {
@@ -14747,6 +14931,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_pressureCurvePoints = sse_decode_list_prim_f_32_strict(
       deserializer,
     );
+    var var_pressureResponses = sse_decode_list_brush_pressure_response(
+      deserializer,
+    );
     var var_tipResourceHash = sse_decode_opt_list_prim_u_8_strict(deserializer);
     var var_grainResourceHash = sse_decode_opt_list_prim_u_8_strict(
       deserializer,
@@ -14774,6 +14961,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       wetness: var_wetness,
       colorRgba: var_colorRgba,
       pressureCurvePoints: var_pressureCurvePoints,
+      pressureResponses: var_pressureResponses,
       tipResourceHash: var_tipResourceHash,
       grainResourceHash: var_grainResourceHash,
     );
@@ -15289,6 +15477,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <bool>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_bool(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<BrushPressureResponse> sse_decode_list_brush_pressure_response(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <BrushPressureResponse>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_brush_pressure_response(deserializer));
     }
     return ans_;
   }
@@ -16264,6 +16466,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_brush_pressure_response(
+    BrushPressureResponse self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_brush_pressure_target(self.target, serializer);
+    sse_encode_list_prim_f_32_strict(self.curvePoints, serializer);
+    sse_encode_f_32(self.amount, serializer);
+    sse_encode_bool(self.enabled, serializer);
+    sse_encode_bool(self.replace, serializer);
+    sse_encode_bool(self.editable, serializer);
+  }
+
+  @protected
+  void sse_encode_brush_pressure_target(
+    BrushPressureTarget self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_brush_preview_point(
     BrushPreviewPoint self,
     SseSerializer serializer,
@@ -16299,6 +16524,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_32(self.wetness, serializer);
     sse_encode_u_32(self.colorRgba, serializer);
     sse_encode_list_prim_f_32_strict(self.pressureCurvePoints, serializer);
+    sse_encode_list_brush_pressure_response(self.pressureResponses, serializer);
     sse_encode_opt_list_prim_u_8_strict(self.tipResourceHash, serializer);
     sse_encode_opt_list_prim_u_8_strict(self.grainResourceHash, serializer);
   }
@@ -16647,6 +16873,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_bool(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_brush_pressure_response(
+    List<BrushPressureResponse> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_brush_pressure_response(item, serializer);
     }
   }
 
@@ -17124,10 +17362,11 @@ class ComicProjectHandleImpl extends RustOpaque implements ComicProjectHandle {
         RustLib.instance.api.rust_arc_increment_strong_count_ComicProjectHandle,
     rustArcDecrementStrongCount:
         RustLib.instance.api.rust_arc_decrement_strong_count_ComicProjectHandle,
-    rustArcDecrementStrongCountPtr: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_ComicProjectHandlePtr,
+    rustArcDecrementStrongCountPtr:
+        RustLib
+            .instance
+            .api
+            .rust_arc_decrement_strong_count_ComicProjectHandlePtr,
   );
 }
 
@@ -17145,18 +17384,21 @@ class CompositeTilesSnapshotHandleImpl extends RustOpaque
   ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
 
   static final _kStaticData = RustArcStaticData(
-    rustArcIncrementStrongCount: RustLib
-        .instance
-        .api
-        .rust_arc_increment_strong_count_CompositeTilesSnapshotHandle,
-    rustArcDecrementStrongCount: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_CompositeTilesSnapshotHandle,
-    rustArcDecrementStrongCountPtr: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_CompositeTilesSnapshotHandlePtr,
+    rustArcIncrementStrongCount:
+        RustLib
+            .instance
+            .api
+            .rust_arc_increment_strong_count_CompositeTilesSnapshotHandle,
+    rustArcDecrementStrongCount:
+        RustLib
+            .instance
+            .api
+            .rust_arc_decrement_strong_count_CompositeTilesSnapshotHandle,
+    rustArcDecrementStrongCountPtr:
+        RustLib
+            .instance
+            .api
+            .rust_arc_decrement_strong_count_CompositeTilesSnapshotHandlePtr,
   );
 }
 
@@ -17297,10 +17539,11 @@ class LiveSurfaceHandleImpl extends RustOpaque implements LiveSurfaceHandle {
         RustLib.instance.api.rust_arc_increment_strong_count_LiveSurfaceHandle,
     rustArcDecrementStrongCount:
         RustLib.instance.api.rust_arc_decrement_strong_count_LiveSurfaceHandle,
-    rustArcDecrementStrongCountPtr: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_LiveSurfaceHandlePtr,
+    rustArcDecrementStrongCountPtr:
+        RustLib
+            .instance
+            .api
+            .rust_arc_decrement_strong_count_LiveSurfaceHandlePtr,
   );
 }
 
@@ -17318,17 +17561,20 @@ class StudioProjectHandleImpl extends RustOpaque
   ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
 
   static final _kStaticData = RustArcStaticData(
-    rustArcIncrementStrongCount: RustLib
-        .instance
-        .api
-        .rust_arc_increment_strong_count_StudioProjectHandle,
-    rustArcDecrementStrongCount: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_StudioProjectHandle,
-    rustArcDecrementStrongCountPtr: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_StudioProjectHandlePtr,
+    rustArcIncrementStrongCount:
+        RustLib
+            .instance
+            .api
+            .rust_arc_increment_strong_count_StudioProjectHandle,
+    rustArcDecrementStrongCount:
+        RustLib
+            .instance
+            .api
+            .rust_arc_decrement_strong_count_StudioProjectHandle,
+    rustArcDecrementStrongCountPtr:
+        RustLib
+            .instance
+            .api
+            .rust_arc_decrement_strong_count_StudioProjectHandlePtr,
   );
 }

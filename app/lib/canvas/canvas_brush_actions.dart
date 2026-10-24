@@ -153,6 +153,60 @@ class CanvasBrushActions {
     applyBrushDraft(preset);
   }
 
+  Future<void> updatePressureResponse({
+    required int brushId,
+    required BrushPressureTargetView target,
+    required double amount,
+    required bool enabled,
+    required List<BrushCurvePointView> curvePoints,
+  }) {
+    final previous = _editQueues[brushId] ?? Future<void>.value();
+    final operation = previous.then<void>((_) async {
+      var draftId = _draftIds[brushId];
+      if (draftId == null) {
+        final preset = library.presets.firstWhere((item) => item.id == brushId);
+        await host.finishDanglingStrokeBeforeBrushEdit();
+        draftId = await engine.beginBrushDraft(brushId);
+        _draftIds[brushId] = draftId;
+        await engine.updateBrushDraft(
+          draftId: draftId,
+          diameter: preset.size,
+          opacity: preset.opacity,
+          spacing: preset.spacing,
+          smoothing: preset.stabilization,
+          pressureSize: preset.pressureSize,
+          pressureOpacity: preset.pressureOpacity,
+          pressureCurve: preset.pressureCurve,
+          pressureCurvePoints: preset.pressureCurvePoints,
+          hardness: preset.hardness,
+          textureScale: preset.textureScale,
+          scatter: preset.scatter,
+          rotationJitter: preset.rotationJitter,
+          smudge: preset.smudge,
+          wetness: preset.wetness,
+          pulledString: preset.pulledString,
+          stabilizerDistancePx: preset.stabilizerDistancePx,
+          catchUpOnEnd: preset.catchUpOnEnd,
+        );
+      }
+      await engine.updateBrushPressureResponse(
+        draftId: draftId,
+        target: target,
+        amount: amount,
+        enabled: enabled,
+        curvePoints: curvePoints,
+      );
+      if (host.mounted()) host.setState(() {});
+    });
+    _editQueues[brushId] = operation.catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      debugPrint('Project Ink pressure response rejected: $error\\n$stack');
+    });
+    return operation;
+  }
+
   Future<Uint8List> renderBrushPreview(
     int brushId,
     int width,

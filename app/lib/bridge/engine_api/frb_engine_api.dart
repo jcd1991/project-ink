@@ -780,6 +780,29 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
   }
 
   @override
+  Future<void> updateBrushPressureResponse({
+    required int draftId,
+    required BrushPressureTargetView target,
+    required double amount,
+    required bool enabled,
+    required List<BrushCurvePointView> curvePoints,
+  }) async {
+    _requireOpen();
+    await rust.updateBrushPressureResponseDraft(
+      handle: _handle,
+      draftId: BigInt.from(draftId),
+      target: switch (target) {
+        BrushPressureTargetView.size => rust.BrushPressureTarget.size,
+        BrushPressureTargetView.opacity => rust.BrushPressureTarget.opacity,
+        BrushPressureTargetView.flow => rust.BrushPressureTarget.flow,
+      },
+      amount: amount,
+      enabled: enabled,
+      curvePoints: curvePoints.expand((point) => [point.x, point.y]).toList(),
+    );
+  }
+
+  @override
   Future<int> beginBrushDraft(int brushId) async {
     _requireOpen();
     return (await rust.beginBrushDraft(
@@ -2056,6 +2079,27 @@ class FrbEngineApi implements EngineApi, LiveRenderEngineApi {
             pressureCurvePoints: List<double>.unmodifiable(
               summary.pressureCurvePoints,
             ),
+            pressureResponses: summary.pressureResponses
+                .map(
+                  (response) => BrushPressureResponseView(
+                    target: switch (response.target) {
+                      rust.BrushPressureTarget.size =>
+                        BrushPressureTargetView.size,
+                      rust.BrushPressureTarget.opacity =>
+                        BrushPressureTargetView.opacity,
+                      rust.BrushPressureTarget.flow =>
+                        BrushPressureTargetView.flow,
+                    },
+                    curvePoints: List<double>.unmodifiable(
+                      response.curvePoints,
+                    ),
+                    amount: response.amount,
+                    enabled: response.enabled,
+                    replace: response.replace,
+                    editable: response.editable,
+                  ),
+                )
+                .toList(growable: false),
             tipResourceHash:
                 summary.tipResourceHash == null
                     ? null

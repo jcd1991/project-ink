@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 2000994657;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1029269421;
 
 // Section: executor
 
@@ -13839,6 +13839,132 @@ fn wire__crate__api__update_brush_draft_impl(
         },
     )
 }
+fn wire__crate__api__update_brush_pressure_response_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_brush_pressure_response",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_handle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DocumentHandle>,
+            >>::sse_decode(&mut deserializer);
+            let api_brush_id = <u128>::sse_decode(&mut deserializer);
+            let api_target = <crate::api::BrushPressureTarget>::sse_decode(&mut deserializer);
+            let api_amount = <f32>::sse_decode(&mut deserializer);
+            let api_enabled = <bool>::sse_decode(&mut deserializer);
+            let api_curve_points = <Vec<f32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, EngineError>((move || {
+                    let mut api_handle_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_handle,
+                                0,
+                                true,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_handle_guard = Some(api_handle.lockable_decode_sync_ref_mut()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let mut api_handle_guard = api_handle_guard.unwrap();
+                    let output_ok = crate::api::update_brush_pressure_response(
+                        &mut *api_handle_guard,
+                        api_brush_id,
+                        api_target,
+                        api_amount,
+                        api_enabled,
+                        api_curve_points,
+                    )?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__update_brush_pressure_response_draft_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "update_brush_pressure_response_draft",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_handle = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<DocumentHandle>,
+            >>::sse_decode(&mut deserializer);
+            let api_draft_id = <u64>::sse_decode(&mut deserializer);
+            let api_target = <crate::api::BrushPressureTarget>::sse_decode(&mut deserializer);
+            let api_amount = <f32>::sse_decode(&mut deserializer);
+            let api_enabled = <bool>::sse_decode(&mut deserializer);
+            let api_curve_points = <Vec<f32>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, EngineError>((move || {
+                    let mut api_handle_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_handle,
+                                0,
+                                true,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_handle_guard = Some(api_handle.lockable_decode_sync_ref_mut()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let mut api_handle_guard = api_handle_guard.unwrap();
+                    let output_ok = crate::api::update_brush_pressure_response_draft(
+                        &mut *api_handle_guard,
+                        api_draft_id,
+                        api_target,
+                        api_amount,
+                        api_enabled,
+                        api_curve_points,
+                    )?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__update_brush_settings_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -14660,6 +14786,39 @@ impl SseDecode for crate::api::BrushImportStageView {
     }
 }
 
+impl SseDecode for crate::api::BrushPressureResponse {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_target = <crate::api::BrushPressureTarget>::sse_decode(deserializer);
+        let mut var_curvePoints = <Vec<f32>>::sse_decode(deserializer);
+        let mut var_amount = <f32>::sse_decode(deserializer);
+        let mut var_enabled = <bool>::sse_decode(deserializer);
+        let mut var_replace = <bool>::sse_decode(deserializer);
+        let mut var_editable = <bool>::sse_decode(deserializer);
+        return crate::api::BrushPressureResponse {
+            target: var_target,
+            curve_points: var_curvePoints,
+            amount: var_amount,
+            enabled: var_enabled,
+            replace: var_replace,
+            editable: var_editable,
+        };
+    }
+}
+
+impl SseDecode for crate::api::BrushPressureTarget {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::BrushPressureTarget::Size,
+            1 => crate::api::BrushPressureTarget::Opacity,
+            2 => crate::api::BrushPressureTarget::Flow,
+            _ => unreachable!("Invalid variant for BrushPressureTarget: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::BrushPreviewPoint {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -14699,6 +14858,8 @@ impl SseDecode for crate::api::BrushSummary {
         let mut var_wetness = <f32>::sse_decode(deserializer);
         let mut var_colorRgba = <u32>::sse_decode(deserializer);
         let mut var_pressureCurvePoints = <Vec<f32>>::sse_decode(deserializer);
+        let mut var_pressureResponses =
+            <Vec<crate::api::BrushPressureResponse>>::sse_decode(deserializer);
         let mut var_tipResourceHash = <Option<Vec<u8>>>::sse_decode(deserializer);
         let mut var_grainResourceHash = <Option<Vec<u8>>>::sse_decode(deserializer);
         return crate::api::BrushSummary {
@@ -14724,6 +14885,7 @@ impl SseDecode for crate::api::BrushSummary {
             wetness: var_wetness,
             color_rgba: var_colorRgba,
             pressure_curve_points: var_pressureCurvePoints,
+            pressure_responses: var_pressureResponses,
             tip_resource_hash: var_tipResourceHash,
             grain_resource_hash: var_grainResourceHash,
         };
@@ -15232,6 +15394,20 @@ impl SseDecode for Vec<bool> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<bool>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::BrushPressureResponse> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::BrushPressureResponse>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -16098,16 +16274,25 @@ fn pde_ffi_dispatcher_primary_impl(
         245 => wire__crate__api__ungroup_layer_impl(port, ptr, rust_vec_len, data_len),
         246 => wire__crate__api__update_brush_color_impl(port, ptr, rust_vec_len, data_len),
         247 => wire__crate__api__update_brush_draft_impl(port, ptr, rust_vec_len, data_len),
-        248 => wire__crate__api__update_brush_settings_impl(port, ptr, rust_vec_len, data_len),
-        249 => {
+        248 => {
+            wire__crate__api__update_brush_pressure_response_impl(port, ptr, rust_vec_len, data_len)
+        }
+        249 => wire__crate__api__update_brush_pressure_response_draft_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        250 => wire__crate__api__update_brush_settings_impl(port, ptr, rust_vec_len, data_len),
+        251 => {
             wire__crate__api__update_layer_adjustment_edit_impl(port, ptr, rust_vec_len, data_len)
         }
-        250 => wire__crate__api__update_layer_opacity_edit_impl(port, ptr, rust_vec_len, data_len),
-        251 => wire__crate__api__update_layer_presentation_impl(port, ptr, rust_vec_len, data_len),
-        252 => wire__crate__api__update_layer_properties_impl(port, ptr, rust_vec_len, data_len),
-        253 => wire__crate__api__vector_object_detail_impl(port, ptr, rust_vec_len, data_len),
-        254 => wire__crate__api__vector_object_summaries_impl(port, ptr, rust_vec_len, data_len),
-        255 => wire__crate__api__vector_stroke_summaries_impl(port, ptr, rust_vec_len, data_len),
+        252 => wire__crate__api__update_layer_opacity_edit_impl(port, ptr, rust_vec_len, data_len),
+        253 => wire__crate__api__update_layer_presentation_impl(port, ptr, rust_vec_len, data_len),
+        254 => wire__crate__api__update_layer_properties_impl(port, ptr, rust_vec_len, data_len),
+        255 => wire__crate__api__vector_object_detail_impl(port, ptr, rust_vec_len, data_len),
+        256 => wire__crate__api__vector_object_summaries_impl(port, ptr, rust_vec_len, data_len),
+        257 => wire__crate__api__vector_stroke_summaries_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -16364,6 +16549,53 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::BrushImportStageView>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BrushPressureResponse {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.target.into_into_dart().into_dart(),
+            self.curve_points.into_into_dart().into_dart(),
+            self.amount.into_into_dart().into_dart(),
+            self.enabled.into_into_dart().into_dart(),
+            self.replace.into_into_dart().into_dart(),
+            self.editable.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::BrushPressureResponse
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BrushPressureResponse>
+    for crate::api::BrushPressureResponse
+{
+    fn into_into_dart(self) -> crate::api::BrushPressureResponse {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::BrushPressureTarget {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Size => 0.into_dart(),
+            Self::Opacity => 1.into_dart(),
+            Self::Flow => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::BrushPressureTarget
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::BrushPressureTarget>
+    for crate::api::BrushPressureTarget
+{
+    fn into_into_dart(self) -> crate::api::BrushPressureTarget {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::BrushPreviewPoint {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -16408,6 +16640,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::BrushSummary {
             self.wetness.into_into_dart().into_dart(),
             self.color_rgba.into_into_dart().into_dart(),
             self.pressure_curve_points.into_into_dart().into_dart(),
+            self.pressure_responses.into_into_dart().into_dart(),
             self.tip_resource_hash.into_into_dart().into_dart(),
             self.grain_resource_hash.into_into_dart().into_dart(),
         ]
@@ -17259,6 +17492,35 @@ impl SseEncode for crate::api::BrushImportStageView {
     }
 }
 
+impl SseEncode for crate::api::BrushPressureResponse {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::BrushPressureTarget>::sse_encode(self.target, serializer);
+        <Vec<f32>>::sse_encode(self.curve_points, serializer);
+        <f32>::sse_encode(self.amount, serializer);
+        <bool>::sse_encode(self.enabled, serializer);
+        <bool>::sse_encode(self.replace, serializer);
+        <bool>::sse_encode(self.editable, serializer);
+    }
+}
+
+impl SseEncode for crate::api::BrushPressureTarget {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::BrushPressureTarget::Size => 0,
+                crate::api::BrushPressureTarget::Opacity => 1,
+                crate::api::BrushPressureTarget::Flow => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::BrushPreviewPoint {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -17293,6 +17555,7 @@ impl SseEncode for crate::api::BrushSummary {
         <f32>::sse_encode(self.wetness, serializer);
         <u32>::sse_encode(self.color_rgba, serializer);
         <Vec<f32>>::sse_encode(self.pressure_curve_points, serializer);
+        <Vec<crate::api::BrushPressureResponse>>::sse_encode(self.pressure_responses, serializer);
         <Option<Vec<u8>>>::sse_encode(self.tip_resource_hash, serializer);
         <Option<Vec<u8>>>::sse_encode(self.grain_resource_hash, serializer);
     }
@@ -17623,6 +17886,16 @@ impl SseEncode for Vec<bool> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <bool>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::BrushPressureResponse> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::BrushPressureResponse>::sse_encode(item, serializer);
         }
     }
 }

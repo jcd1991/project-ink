@@ -5,7 +5,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../design_system/ink_components.dart';
+import '../bridge/engine_api/engine_api_models.dart';
 import 'brush_library.dart';
+import 'brush_pressure_curve_editor.dart';
 
 typedef BrushPreviewRenderer =
     Future<Uint8List> Function(
@@ -84,11 +86,18 @@ class BrushLibraryPanel extends StatelessWidget {
       _minBrushSize *
       math.pow(_maxBrushSize / _minBrushSize, value.clamp(0, 1)).toDouble();
 
+  static double _pressurePointMinimumX(double previous, double current) =>
+      previous + math.min(0.001, (current - previous) / 2);
+
+  static double _pressurePointMaximumX(double current, double next) =>
+      next - math.min(0.001, (next - current) / 2);
+
   const BrushLibraryPanel({
     super.key,
     required this.library,
     this.onSelected,
     this.onChanged,
+    this.onPressureResponseChanged,
     this.onSizeChangeEnd,
     this.onImport,
     this.onExport,
@@ -106,6 +115,7 @@ class BrushLibraryPanel extends StatelessWidget {
   /// edit draft; only actual control changes should do that.
   final ValueChanged<BrushPresetView>? onSelected;
   final ValueChanged<BrushPresetView>? onChanged;
+  final ValueChanged<BrushPressureResponseView>? onPressureResponseChanged;
   final ValueChanged<double>? onSizeChangeEnd;
   final VoidCallback? onImport;
   final VoidCallback? onExport;
@@ -115,6 +125,70 @@ class BrushLibraryPanel extends StatelessWidget {
   final VoidCallback? onCommitEdit;
   final VoidCallback? onCancelEdit;
   final BrushPreviewRenderer? renderPreview;
+
+  void _emitResponse(
+    BrushPresetView preset,
+    BrushPressureResponseView response,
+  ) {
+    if (!response.editable) return;
+    final current =
+        library.selected?.id == preset.id ? library.selected! : preset;
+    final responses = current.pressureResponses
+        .map((item) => item.target == response.target ? response : item)
+        .toList(growable: false);
+    final points = _pointsForResponse(response, current.pressureCurvePoints);
+    final isSize = response.target == BrushPressureTargetView.size;
+    library.updateDraft(
+      current.copyWith(
+        pressureResponses: responses,
+        pressureCurvePoints: isSize ? points : current.pressureCurvePoints,
+        pressureCurve:
+            isSize && points.length > 2 ? points[1].y : current.pressureCurve,
+      ),
+    );
+    onPressureResponseChanged?.call(response);
+  }
+
+  void _emitSizeCurve(
+    BrushPresetView preset,
+    List<BrushCurvePointView> points,
+  ) {
+    final current =
+        library.selected?.id == preset.id ? library.selected! : preset;
+    final response =
+        current.pressureResponses
+            .where((item) => item.target == BrushPressureTargetView.size)
+            .firstOrNull;
+    if (response != null) {
+      _emitResponse(
+        preset,
+        response.copyWith(
+          curvePoints: points.expand((point) => [point.x, point.y]).toList(),
+        ),
+      );
+    }
+  }
+
+  static List<BrushCurvePointView> _pointsForResponse(
+    BrushPressureResponseView? response,
+    List<BrushCurvePointView> fallback, {
+    bool initial = false,
+  }) {
+    final flat = initial ? response?.initialCurvePoints : response?.curvePoints;
+    if (flat == null || flat.length < 4 || flat.length.isOdd) return fallback;
+    return List<BrushCurvePointView>.unmodifiable([
+      for (var i = 0; i < flat.length; i += 2)
+        BrushCurvePointView(x: flat[i], y: flat[i + 1]),
+    ]);
+  }
+
+  static BrushPressureResponseView? _responseFor(
+    BrushPresetView preset,
+    BrushPressureTargetView target,
+  ) =>
+      preset.pressureResponses
+          .where((response) => response.target == target)
+          .firstOrNull;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -628,11 +702,33 @@ class BrushLibraryPanel extends StatelessWidget {
                   max: 1,
                   divisions: 100,
                   valueLabel: '${(selected.pressureSize * 100).round()}%',
-                  onChanged: (value) {
-                    final updated = selected.copyWith(pressureSize: value);
-                    library.updateDraft(updated);
-                    onChanged?.call(updated);
-                  },
+                  onChanged:
+                      _responseFor(
+                                selected,
+                                BrushPressureTargetView.size,
+                              )?.editable ==
+                              false
+                          ? null
+                          : (value) {
+                            final updated = selected.copyWith(
+                              pressureSize: value,
+                            );
+                            final response = _responseFor(
+                              selected,
+                              BrushPressureTargetView.size,
+                            );
+                            library.updateDraft(updated);
+                            onChanged?.call(updated);
+                            if (response != null) {
+                              _emitResponse(
+                                updated,
+                                response.copyWith(
+                                  amount: value,
+                                  enabled: value > 0,
+                                ),
+                              );
+                            }
+                          },
                 ),
                 InkPropertySlider(
                   label: 'Pressure opacity',
@@ -641,31 +737,146 @@ class BrushLibraryPanel extends StatelessWidget {
                   max: 1,
                   divisions: 100,
                   valueLabel: '${(selected.pressureOpacity * 100).round()}%',
-                  onChanged: (value) {
-                    final updated = selected.copyWith(pressureOpacity: value);
-                    library.updateDraft(updated);
-                    onChanged?.call(updated);
-                  },
+                  onChanged:
+                      _responseFor(
+                                selected,
+                                BrushPressureTargetView.opacity,
+                              )?.editable ==
+                              false
+                          ? null
+                          : (value) {
+                            final updated = selected.copyWith(
+                              pressureOpacity: value,
+                            );
+                            final response = _responseFor(
+                              selected,
+                              BrushPressureTargetView.opacity,
+                            );
+                            library.updateDraft(updated);
+                            onChanged?.call(updated);
+                            if (response != null) {
+                              _emitResponse(
+                                updated,
+                                response.copyWith(
+                                  amount: value,
+                                  enabled: value > 0,
+                                ),
+                              );
+                            }
+                          },
                 ),
-                InkPropertySlider(
-                  label: 'Curve response',
-                  value: selected.pressureCurve,
-                  min: 0,
-                  max: 1,
-                  divisions: 100,
-                  valueLabel: '${(selected.pressureCurve * 100).round()}%',
-                  onChanged: (value) {
-                    final points = selected.pressureCurvePoints.toList();
-                    final index = points.length > 2 ? 1 : points.length - 1;
-                    points[index] = points[index].copyWith(y: value);
+                BrushPressureCurveEditor(
+                  points: _pointsForResponse(
+                    selected.pressureResponses
+                        .where(
+                          (item) => item.target == BrushPressureTargetView.size,
+                        )
+                        .firstOrNull,
+                    selected.pressureCurvePoints,
+                  ),
+                  resetPoints: _pointsForResponse(
+                    selected.pressureResponses
+                        .where(
+                          (item) => item.target == BrushPressureTargetView.size,
+                        )
+                        .firstOrNull,
+                    selected.pressureCurvePoints,
+                    initial: true,
+                  ),
+                  enabled:
+                      selected.pressureResponses
+                          .where(
+                            (item) =>
+                                item.target == BrushPressureTargetView.size,
+                          )
+                          .firstOrNull
+                          ?.editable ??
+                      true,
+                  onChanged: (points) {
+                    final midpoint = points.length > 2 ? points[1].y : .5;
                     final updated = selected.copyWith(
-                      pressureCurve: value,
                       pressureCurvePoints: points,
+                      pressureCurve: midpoint,
                     );
                     library.updateDraft(updated);
                     onChanged?.call(updated);
+                    _emitSizeCurve(updated, points);
                   },
                 ),
+                for (final target in <BrushPressureTargetView>[
+                  BrushPressureTargetView.opacity,
+                  BrushPressureTargetView.flow,
+                ])
+                  if (selected.pressureResponses
+                          .where((item) => item.target == target)
+                          .firstOrNull
+                      case final response?)
+                    ExpansionTile(
+                      title: Text('Pressure ${target.name}'),
+                      subtitle: Text(
+                        response.editable
+                            ? 'Independent response curve'
+                            : 'Multiple imported bindings; read only',
+                      ),
+                      children: [
+                        SwitchListTile(
+                          title: const Text('Enabled'),
+                          value: response.enabled,
+                          onChanged:
+                              response.editable
+                                  ? (value) => _emitResponse(
+                                    selected,
+                                    response.copyWith(
+                                      enabled: value,
+                                      amount:
+                                          value && response.amount == 0
+                                              ? 1
+                                              : response.amount,
+                                    ),
+                                  )
+                                  : null,
+                        ),
+                        InkPropertySlider(
+                          label: 'Response amount',
+                          value: response.amount,
+                          min: 0,
+                          max: 1,
+                          divisions: 100,
+                          valueLabel: response.amount.toStringAsPrecision(3),
+                          onChanged:
+                              response.editable
+                                  ? (value) => _emitResponse(
+                                    selected,
+                                    response.copyWith(
+                                      amount: value,
+                                      enabled: value > 0,
+                                    ),
+                                  )
+                                  : null,
+                        ),
+                        BrushPressureCurveEditor(
+                          points: _pointsForResponse(response, const [
+                            BrushCurvePointView(x: 0, y: 0),
+                            BrushCurvePointView(x: 1, y: 1),
+                          ]),
+                          resetPoints: _pointsForResponse(response, const [
+                            BrushCurvePointView(x: 0, y: 0),
+                            BrushCurvePointView(x: 1, y: 1),
+                          ], initial: true),
+                          enabled: response.editable,
+                          onChanged:
+                              (points) => _emitResponse(
+                                selected,
+                                response.copyWith(
+                                  curvePoints:
+                                      points
+                                          .expand((point) => [point.x, point.y])
+                                          .toList(),
+                                ),
+                              ),
+                        ),
+                      ],
+                    ),
                 Row(
                   children: [
                     Expanded(
@@ -696,6 +907,7 @@ class BrushLibraryPanel extends StatelessWidget {
                                 );
                                 library.updateDraft(updated);
                                 onChanged?.call(updated);
+                                _emitSizeCurve(updated, points);
                               },
                       icon: const Icon(Icons.add),
                     ),
@@ -730,21 +942,103 @@ class BrushLibraryPanel extends StatelessWidget {
                                 );
                                 library.updateDraft(updated);
                                 onChanged?.call(updated);
+                                _emitSizeCurve(updated, points);
                               },
                               icon: const Icon(Icons.remove_circle_outline),
                             ),
                         ],
                       ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              key: ValueKey(
+                                'pressure-point-$index-x-${point.x}',
+                              ),
+                              initialValue: point.x.toStringAsPrecision(7),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              decoration: const InputDecoration(
+                                labelText: 'Input (0–1)',
+                              ),
+                              onFieldSubmitted: (text) {
+                                final value = double.tryParse(text);
+                                if (value == null ||
+                                    !value.isFinite ||
+                                    value < 0 ||
+                                    value > 1 ||
+                                    (index > 0 && value <= previous) ||
+                                    (index <
+                                            selected
+                                                    .pressureCurvePoints
+                                                    .length -
+                                                1 &&
+                                        value >= next)) {
+                                  return;
+                                }
+                                final points =
+                                    selected.pressureCurvePoints.toList();
+                                points[index] = point.copyWith(x: value);
+                                final updated = selected.copyWith(
+                                  pressureCurvePoints: points,
+                                );
+                                library.updateDraft(updated);
+                                onChanged?.call(updated);
+                                _emitSizeCurve(updated, points);
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextFormField(
+                              key: ValueKey(
+                                'pressure-point-$index-y-${point.y}',
+                              ),
+                              initialValue: point.y.toStringAsPrecision(7),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              decoration: const InputDecoration(
+                                labelText: 'Output (0–1)',
+                              ),
+                              onFieldSubmitted: (text) {
+                                final value = double.tryParse(text);
+                                if (value == null ||
+                                    !value.isFinite ||
+                                    value < 0 ||
+                                    value > 1) {
+                                  return;
+                                }
+                                final points =
+                                    selected.pressureCurvePoints.toList();
+                                points[index] = point.copyWith(y: value);
+                                final updated = selected.copyWith(
+                                  pressureCurvePoints: points,
+                                );
+                                library.updateDraft(updated);
+                                onChanged?.call(updated);
+                                _emitSizeCurve(updated, points);
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
                       InkPropertySlider(
                         label: 'Input',
                         value: point.x,
-                        min: index == 0 ? 0 : previous + 0.001,
+                        min:
+                            index == 0
+                                ? 0
+                                : _pressurePointMinimumX(previous, point.x),
                         max:
                             index == selected.pressureCurvePoints.length - 1
                                 ? 1
-                                : next - 0.001,
-                        divisions: 1000,
-                        valueLabel: '${(point.x * 100).round()}%',
+                                : _pressurePointMaximumX(point.x, next),
+                        divisions: 10000,
+                        valueLabel: point.x.toStringAsPrecision(4),
                         onChanged:
                             index == 0 ||
                                     index ==
@@ -759,6 +1053,7 @@ class BrushLibraryPanel extends StatelessWidget {
                                   );
                                   library.updateDraft(updated);
                                   onChanged?.call(updated);
+                                  _emitSizeCurve(updated, points);
                                 },
                       ),
                       InkPropertySlider(
@@ -766,8 +1061,8 @@ class BrushLibraryPanel extends StatelessWidget {
                         value: point.y,
                         min: 0,
                         max: 1,
-                        divisions: 100,
-                        valueLabel: '${(point.y * 100).round()}%',
+                        divisions: 1000,
+                        valueLabel: point.y.toStringAsPrecision(4),
                         onChanged: (value) {
                           final points = selected.pressureCurvePoints.toList();
                           points[index] = point.copyWith(y: value);
@@ -778,6 +1073,7 @@ class BrushLibraryPanel extends StatelessWidget {
                           );
                           library.updateDraft(updated);
                           onChanged?.call(updated);
+                          _emitSizeCurve(updated, points);
                         },
                       ),
                     ],

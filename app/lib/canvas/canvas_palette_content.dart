@@ -70,6 +70,23 @@ class CanvasBrushPaletteContent extends StatelessWidget {
     renderPreview: actions.renderBrushPreview,
     onSelected: actions.activateBrush,
     onChanged: actions.updateBrushDraft,
+    onPressureResponseChanged: (response) {
+      final brushId = library.selected?.id;
+      if (brushId == null) return;
+      actions.updatePressureResponse(
+        brushId: brushId,
+        target: response.target,
+        amount: response.amount,
+        enabled: response.enabled,
+        curvePoints: [
+          for (var i = 0; i < response.curvePoints.length; i += 2)
+            BrushCurvePointView(
+              x: response.curvePoints[i],
+              y: response.curvePoints[i + 1],
+            ),
+        ],
+      );
+    },
     onSizeChangeEnd: actions.persistBrushSize,
     onImport: onImport,
     onExport: onExport,

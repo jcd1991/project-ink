@@ -4,23 +4,217 @@ import 'package:flutter/gestures.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:project_ink/design_system/ink_components.dart';
 import 'package:project_ink/bridge/engine_api/in_memory_engine_api.dart';
+import 'package:project_ink/bridge/engine_api/engine_api_models.dart';
 import 'package:project_ink/tools/brush_library.dart';
 import 'package:project_ink/tools/brush_library_panel.dart';
+import 'package:project_ink/tools/brush_pressure_curve_editor.dart';
 
 void main() {
-  test('all in-memory built-in brushes expose stylus pressure response', () async {
-    final summaries = await InMemoryEngineApi().builtinBrushes();
-
-    expect(summaries, hasLength(20));
-    for (final brush in summaries) {
-      expect(
-        brush.pressureSize > 0 || brush.pressureOpacity > 0,
-        isTrue,
-        reason: '${brush.name} should respond to stylus pressure',
-      );
-      expect(brush.pressureCurvePoints, isNotEmpty);
-    }
+  testWidgets('pressure curve editor exposes presets and preserves precision', (
+    tester,
+  ) async {
+    var points = const <BrushCurvePointView>[
+      BrushCurvePointView(x: 0, y: 0),
+      BrushCurvePointView(x: .006, y: .02),
+      BrushCurvePointView(x: 1, y: 1),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushPressureCurveEditor(
+            points: points,
+            resetPoints: const <BrushCurvePointView>[
+              BrushCurvePointView(x: 0, y: 0),
+              BrushCurvePointView(x: .006, y: .02),
+              BrushCurvePointView(x: 1, y: 1),
+            ],
+            onChanged: (value) => points = value,
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Soft'));
+    expect(points[1].x, .3);
+    expect(points[1].y, .6);
+    expect(points, hasLength(3));
+    await tester.tap(find.text('Reset'));
+    expect(points[1].x, .006);
+    expect(points[1].y, .02);
+    final graph = find.byKey(const ValueKey('pressure-curve-graph'));
+    final graphSize = tester.getSize(graph);
+    final graphOrigin = tester.getTopLeft(graph);
+    await tester.tapAt(
+      graphOrigin + Offset(graphSize.width * .5, graphSize.height * .5),
+    );
+    expect(points, hasLength(4));
   });
+
+  testWidgets('pressure curve editor keeps the sixteen point limit', (
+    tester,
+  ) async {
+    final points = <BrushCurvePointView>[
+      for (var index = 0; index < 16; index++)
+        BrushCurvePointView(x: index / 15, y: index / 15),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushPressureCurveEditor(
+            points: points,
+            resetPoints: points,
+            onChanged: (value) {
+              points
+                ..clear()
+                ..addAll(value);
+            },
+          ),
+        ),
+      ),
+    );
+    final graph = find.byKey(const ValueKey('pressure-curve-graph'));
+    final graphSize = tester.getSize(graph);
+    final graphOrigin = tester.getTopLeft(graph);
+    await tester.tapAt(
+      graphOrigin + Offset(graphSize.width * .5, graphSize.height * .5),
+    );
+    expect(points, hasLength(16));
+  });
+
+  testWidgets('pressure curve numeric editing retains full precision', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const sizeResponse = BrushPressureResponseView(
+      target: BrushPressureTargetView.size,
+      curvePoints: [0, 0, .003, .02, .006, .2, .01, .4, 1, 1],
+      amount: 1,
+      enabled: true,
+      replace: false,
+      editable: true,
+    );
+    final library = BrushLibraryModel([
+      const BrushPresetView(
+        id: 12,
+        name: 'Curve Test Brush',
+        family: BrushFamily.ink,
+        pressureCurvePoints: [
+          BrushCurvePointView(x: 0, y: 0),
+          BrushCurvePointView(x: .003, y: .02),
+          BrushCurvePointView(x: .006, y: .2),
+          BrushCurvePointView(x: .01, y: .4),
+          BrushCurvePointView(x: 1, y: 1),
+        ],
+        pressureResponses: [sizeResponse],
+      ),
+    ])..select(12);
+    library.toggleEditor();
+    library.selectEditorSection(BrushEditorSection.pressure);
+    BrushPressureResponseView? changedResponse;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BrushLibraryPanel(
+            library: library,
+            onPressureResponseChanged: (response) => changedResponse = response,
+          ),
+        ),
+      ),
+    );
+
+    final xField = find.byKey(const ValueKey('pressure-point-1-x-0.003'));
+    await tester.ensureVisible(xField);
+    expect(tester.widget<TextFormField>(xField).initialValue, '0.003000000');
+    await tester.dragUntilVisible(
+      find.text('Point 3'),
+      find.byType(Scrollable).first,
+      const Offset(0, -300),
+    );
+    final thirdPointX = find.byKey(const ValueKey('pressure-point-2-x-0.006'));
+    expect(
+      tester.widget<TextFormField>(thirdPointX).initialValue,
+      '0.006000000',
+    );
+    await tester.dragUntilVisible(
+      find.text('Point 4'),
+      find.byType(Scrollable).first,
+      const Offset(0, -300),
+    );
+    final fourthPointX = find.byKey(const ValueKey('pressure-point-3-x-0.01'));
+    expect(
+      tester.widget<TextFormField>(fourthPointX).initialValue,
+      '0.01000000',
+    );
+    await tester.enterText(xField, '0.004');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(library.selected!.pressureCurvePoints[1].x, .004);
+    expect(changedResponse!.curvePoints[2], .004);
+  });
+
+  testWidgets('valid sub-thousandth point gaps remain editable', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final library = BrushLibraryModel([
+      const BrushPresetView(
+        id: 14,
+        name: 'Close Curve Brush',
+        family: BrushFamily.ink,
+        pressureCurvePoints: [
+          BrushCurvePointView(x: 0, y: 0),
+          BrushCurvePointView(x: .003, y: .1),
+          BrushCurvePointView(x: .0035, y: .2),
+          BrushCurvePointView(x: 1, y: 1),
+        ],
+        pressureResponses: [
+          BrushPressureResponseView(
+            target: BrushPressureTargetView.size,
+            curvePoints: [0, 0, .003, .1, .0035, .2, 1, 1],
+            amount: 1,
+            enabled: true,
+            replace: false,
+            editable: true,
+          ),
+        ],
+      ),
+    ])..select(14);
+    library.toggleEditor();
+    library.selectEditorSection(BrushEditorSection.pressure);
+
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: BrushLibraryPanel(library: library))),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey('pressure-point-1-x-0.003')),
+      findsOneWidget,
+    );
+  });
+
+  test(
+    'all in-memory built-in brushes expose stylus pressure response',
+    () async {
+      final summaries = await InMemoryEngineApi().builtinBrushes();
+
+      expect(summaries, hasLength(24));
+      for (final brush in summaries) {
+        expect(
+          brush.pressureSize > 0 || brush.pressureOpacity > 0,
+          isTrue,
+          reason: '${brush.name} should respond to stylus pressure',
+        );
+        expect(brush.pressureCurvePoints, isNotEmpty);
+      }
+    },
+  );
 
   test('selection requested before projection is applied when it arrives', () {
     final library = BrushLibraryModel(const <BrushPresetView>[]);

@@ -33,6 +33,36 @@ const List<double> _starterPressureCurvePoints = <double>[
   1,
   1,
 ];
+const List<double> _technicalPenPressureCurvePoints = <double>[
+  0,
+  0.12,
+  .003,
+  .13,
+  .006,
+  .15,
+  .01,
+  .2,
+  .015,
+  .24,
+  .02,
+  .27,
+  .04,
+  .32,
+  .08,
+  .36,
+  .12,
+  .4,
+  .2,
+  .56,
+  .3,
+  .75,
+  .42,
+  .9,
+  .55,
+  .96,
+  1,
+  1,
+];
 
 class InMemoryEngineApi implements EngineApi {
   InMemoryEngineApi();
@@ -48,6 +78,8 @@ class InMemoryEngineApi implements EngineApi {
   final Map<int, int> _adjustmentEdits = <int, int>{};
   int _nextBrushDraft = 1;
   final Set<int> _brushDrafts = <int>{};
+  final Map<int, Map<BrushPressureTargetView, BrushPressureResponseView>>
+  _pressureResponseDrafts = {};
   Uint8List? _comicBytes;
   LayerPanelStateView _layerPanelState = const LayerPanelStateView(
     primaryLayerId: 1,
@@ -155,10 +187,41 @@ class InMemoryEngineApi implements EngineApi {
   }
 
   @override
+  Future<void> updateBrushPressureResponse({
+    required int draftId,
+    required BrushPressureTargetView target,
+    required double amount,
+    required bool enabled,
+    required List<BrushCurvePointView> curvePoints,
+  }) async {
+    if (!_brushDrafts.contains(draftId) ||
+        !amount.isFinite ||
+        amount < 0 ||
+        amount > 1) {
+      throw ArgumentError('invalid pressure response');
+    }
+    _validateCurvePoints(curvePoints);
+    _pressureResponseDrafts.putIfAbsent(
+      draftId,
+      () => {},
+    )[target] = BrushPressureResponseView(
+      target: target,
+      curvePoints: List<double>.unmodifiable(
+        curvePoints.expand((point) => [point.x, point.y]),
+      ),
+      amount: amount,
+      enabled: enabled,
+      replace: false,
+      editable: true,
+    );
+  }
+
+  @override
   Future<int> beginBrushDraft(int brushId) async {
     if (brushId < 0) throw ArgumentError('invalid brush draft brush');
     final id = _nextBrushDraft++;
     _brushDrafts.add(id);
+    _pressureResponseDrafts[id] = {};
     return id;
   }
 
@@ -213,6 +276,7 @@ class InMemoryEngineApi implements EngineApi {
     if (!_brushDrafts.remove(draftId)) {
       throw StateError('brush draft is not active');
     }
+    _pressureResponseDrafts.remove(draftId);
   }
 
   @override
@@ -361,6 +425,7 @@ class InMemoryEngineApi implements EngineApi {
     if (!_brushDrafts.remove(draftId)) {
       throw StateError('brush draft is not active');
     }
+    _pressureResponseDrafts.remove(draftId);
   }
 
   @override
@@ -1493,6 +1558,90 @@ class InMemoryEngineApi implements EngineApi {
       tags: ['eraser', 'soft'],
       pressureSize: 0.55,
       pressureOpacity: 0.3,
+      pressureCurvePoints: _starterPressureCurvePoints,
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 9,
+      name: 'Experimental Inking Pen',
+      isBuiltin: true,
+      tags: ['ink', 'experimental', 'tuning-reference'],
+      pressureSize: 1,
+      pressureSizeReplace: true,
+      pressureCurvePoints: _technicalPenPressureCurvePoints,
+      pressureResponses: [
+        BrushPressureResponseView(
+          target: BrushPressureTargetView.size,
+          curvePoints: _technicalPenPressureCurvePoints,
+          amount: 1,
+          enabled: true,
+          replace: true,
+          editable: true,
+        ),
+        BrushPressureResponseView(
+          target: BrushPressureTargetView.opacity,
+          curvePoints: [0, 0, 1, 1],
+          amount: 0,
+          enabled: false,
+          replace: false,
+          editable: true,
+        ),
+        BrushPressureResponseView(
+          target: BrushPressureTargetView.flow,
+          curvePoints: [0, 0, 1, 1],
+          amount: 0,
+          enabled: false,
+          replace: false,
+          editable: true,
+        ),
+      ],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 10,
+      name: 'Experimental Tilt Pencil',
+      isBuiltin: true,
+      tags: ['sketch', 'pencil', 'experimental', 'tuning-reference'],
+      pressureSize: .55,
+      pressureCurvePoints: _starterPressureCurvePoints,
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 11,
+      name: 'Experimental Flow Marker',
+      isBuiltin: true,
+      tags: ['paint', 'marker', 'experimental', 'tuning-reference'],
+      pressureSize: .55,
+      pressureResponses: [
+        BrushPressureResponseView(
+          target: BrushPressureTargetView.size,
+          curvePoints: [0, 0, 1, 1],
+          amount: .55,
+          enabled: true,
+          replace: false,
+          editable: true,
+        ),
+        BrushPressureResponseView(
+          target: BrushPressureTargetView.opacity,
+          curvePoints: [0, 0, 1, 1],
+          amount: 0,
+          enabled: false,
+          replace: false,
+          editable: true,
+        ),
+        BrushPressureResponseView(
+          target: BrushPressureTargetView.flow,
+          curvePoints: [0, 0, 1, 1],
+          amount: .45,
+          enabled: true,
+          replace: false,
+          editable: true,
+        ),
+      ],
+    ),
+    BrushSummaryView(
+      id: _additionalBuiltinBrushIdBase + 12,
+      name: 'Experimental Calligraphic Raster',
+      isBuiltin: true,
+      tags: ['ink', 'calligraphy', 'experimental', 'tuning-reference'],
+      pressureSize: .62,
       pressureCurvePoints: _starterPressureCurvePoints,
     ),
   ];
