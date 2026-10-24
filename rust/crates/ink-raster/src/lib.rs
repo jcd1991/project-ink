@@ -275,6 +275,26 @@ impl TileStore {
             })
     }
 
+    /// Count unique retained pixel-buffer bytes across current and history stores.
+    ///
+    /// Shared copy-on-write allocations are counted once. This excludes sparse
+    /// indices, allocator overhead, and process RSS; use it for history payload
+    /// measurements rather than the conservative document admission budget.
+    #[must_use]
+    pub fn retained_pixel_bytes(stores: &[Self]) -> usize {
+        let mut buffers = std::collections::HashSet::new();
+        stores
+            .iter()
+            .flat_map(|store| store.tiles.values())
+            .fold(0usize, |total, tile| {
+                if buffers.insert(Arc::as_ptr(&tile.bytes)) {
+                    total.saturating_add(tile.bytes.len())
+                } else {
+                    total
+                }
+            })
+    }
+
     /// Return allocated coordinates in stable order without copying pixels.
     #[must_use]
     pub fn allocated_coordinates(&self) -> Vec<TileCoord> {
@@ -686,6 +706,33 @@ mod tests {
         ));
         assert_eq!(original.take_dirty().len(), 2);
         assert_eq!(snapshot.take_dirty().len(), 2);
+    }
+
+    #[test]
+    fn retained_payload_counts_shared_buffers_once_and_releases_evicted_history() {
+        let mut current = TileStore::default();
+        current.set_pixel(
+            0,
+            0,
+            Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+        let previous = current.clone();
+        assert_eq!(
+            TileStore::retained_pixel_bytes(&[previous.clone(), current.clone()]),
+            256 * 256 * 4
+        );
+        current.erase_pixel(0, 0);
+        assert_eq!(
+            TileStore::retained_pixel_bytes(&[previous, current.clone()]),
+            2 * 256 * 256 * 4
+        );
+        assert_eq!(TileStore::retained_pixel_bytes(&[current]), 256 * 256 * 4);
+        assert_eq!(TileStore::retained_pixel_bytes(&[]), 0);
     }
 
     #[test]

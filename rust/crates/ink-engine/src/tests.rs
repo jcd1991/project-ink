@@ -1405,89 +1405,146 @@ fn group_adjustment_only_affects_accumulated_group_content() {
     std::fs::remove_dir_all(path).expect("cleanup");
 }
 
-#[test]
-fn gpu_live_preview_tracks_committed_cpu_technical_pen_geometry() {
-    let spec = DocumentSpec {
-        width_px: 256,
-        height_px: 256,
-        dpi: 144.0,
-        color_space: ColorSpace::Srgb,
-        background: Rgba8::default(),
-    };
-    let mut doc = Document::new(DocumentId::from_u128(905), spec).expect("valid doc");
-    let layer = doc.layers()[0].id;
-    let stroke = ink_model::StrokeId::from_u128(906);
-    doc.dispatch(EditorCommand::BeginStroke {
-        stroke,
-        layer,
-        brush: BrushPreset::starters()[0].id,
-    })
-    .expect("begin");
-    doc.push_pointer_packet(&ink_test_support::one_sample(32.0, 32.0, 1.0))
-        .expect("sample");
-    let mut up = ink_test_support::one_sample(32.0, 32.0, 1.0);
-    up[11] = Phase::Up as u8;
-    doc.push_pointer_packet(&up).expect("stationary tap ends");
-    let dabs = doc.drain_live_dabs(64).expect("drain live dabs");
-    assert_eq!(dabs.len(), 1);
-    let cpu = doc
-        .read_tile(layer, TileCoord { x: 0, y: 0 })
-        .expect("authoritative CPU tile");
+// Serialize adapter lifetimes for drivers that cannot safely create concurrent devices.
+static GPU_PARITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    let Ok(gpu) = GpuLiveSurface::new(LiveSurfaceConfig {
+fn parity_surface() -> Option<GpuLiveSurface> {
+    match GpuLiveSurface::new(LiveSurfaceConfig {
         physical_width: 256,
         physical_height: 256,
         scale_milli: 1000,
-    }) else {
-        // Headless CI without a graphics adapter still validates all
-        // protocol and CPU-authority tests; desktop graphics CI exercises
-        // this pixel comparison.
-        return;
-    };
-    gpu.render(&dabs).expect("render GPU preview");
-    let preview = gpu.readback().expect("offscreen GPU comparison");
+    }) {
+        Ok(surface) => {
+            eprintln!("GPU_PARITY_EXECUTED: offscreen GPU adapter initialized");
+            Some(surface)
+        }
+        Err(error) => {
+            assert!(
+                std::env::var_os("INK_REQUIRE_GPU_PARITY").is_none(),
+                "required GPU parity unavailable: {error:?}"
+            );
+            eprintln!("GPU_PARITY_SKIPPED: adapter unavailable: {error:?}");
+            None
+        }
+    }
+}
 
-    let bounds = |pixels: &[u8]| {
-        let mut left = 256_i32;
-        let mut top = 256_i32;
-        let mut right = -1_i32;
-        let mut bottom = -1_i32;
-        for y in 0..256_i32 {
-            for x in 0..256_i32 {
-                let alpha = pixels[((y * 256 + x) * 4 + 3) as usize];
-                if alpha > 0 {
-                    left = left.min(x);
-                    top = top.min(y);
-                    right = right.max(x);
-                    bottom = bottom.max(y);
+fn assert_live_support_matches_cpu(cpu: &[u8], gpu: &[u8]) {
+    assert_eq!(cpu.len(), 256 * 256 * 4);
+    assert_eq!(gpu.len(), cpu.len());
+    let covered = |pixels: &[u8], x: i32, y: i32| {
+        (0..256).contains(&x)
+            && (0..256).contains(&y)
+            && pixels[((y * 256 + x) * 4 + 3) as usize] > 16
+    };
+    for (source, reference, label) in [(cpu, gpu, "CPU"), (gpu, cpu, "GPU")] {
+        for y in 0..256 {
+            for x in 0..256 {
+                if covered(source, x, y) {
+                    assert!(
+                        (-1..=1).any(|dy| (-1..=1).any(|dx| covered(reference, x + dx, y + dy))),
+                        "{label} coverage at ({x}, {y}) has no reference within one pixel"
+                    );
                 }
             }
         }
-        (left, top, right, bottom)
-    };
-    let cpu_bounds = bounds(&cpu);
-    let gpu_bounds = bounds(&preview);
-    for (cpu_edge, gpu_edge) in [
-        (cpu_bounds.0, gpu_bounds.0),
-        (cpu_bounds.1, gpu_bounds.1),
-        (cpu_bounds.2, gpu_bounds.2),
-        (cpu_bounds.3, gpu_bounds.3),
-    ] {
-        assert!(
-            (cpu_edge - gpu_edge).abs() <= 1,
-            "basic-brush bounds differ by more than one pixel: CPU {cpu_bounds:?}, GPU {gpu_bounds:?}"
-        );
     }
+}
 
-    let center_offset = ((32 * 256 + 32) * 4) as usize;
-    assert_eq!(
-        &preview[center_offset..center_offset + 4],
-        &cpu[center_offset..center_offset + 4],
-        "opaque center color/alpha must agree with the committed CPU tile"
-    );
-    let outside_offset = ((48 * 256 + 48) * 4) as usize;
-    assert_eq!(preview[outside_offset + 3], 0);
-    assert_eq!(cpu[outside_offset + 3], 0);
+#[test]
+fn gpu_live_preview_tracks_committed_cpu_technical_pen_geometry() {
+    let _guard = GPU_PARITY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (x, y, pressure) in [
+        (32.0, 32.0, 1.0),
+        (32.25, 32.75, 0.25),
+        (0.0, 128.0, 0.6),
+        (255.0, 255.0, 1.0),
+    ] {
+        let spec = DocumentSpec {
+            width_px: 256,
+            height_px: 256,
+            dpi: 144.0,
+            color_space: ColorSpace::Srgb,
+            background: Rgba8::default(),
+        };
+        let mut doc = Document::new(DocumentId::from_u128(905), spec).expect("valid doc");
+        let layer = doc.layers()[0].id;
+        let stroke = ink_model::StrokeId::from_u128(906);
+        doc.dispatch(EditorCommand::BeginStroke {
+            stroke,
+            layer,
+            brush: BrushPreset::starters()[0].id,
+        })
+        .expect("begin");
+        doc.push_pointer_packet(&ink_test_support::one_sample(x, y, pressure))
+            .expect("sample");
+        let mut up = ink_test_support::one_sample(x, y, pressure);
+        up[11] = Phase::Up as u8;
+        doc.push_pointer_packet(&up).expect("stationary tap ends");
+        let dabs = doc.drain_live_dabs(64).expect("drain live dabs");
+        assert_eq!(dabs.len(), 1);
+        let cpu = doc
+            .read_tile(layer, TileCoord { x: 0, y: 0 })
+            .expect("authoritative CPU tile");
+
+        let Some(gpu) = parity_surface() else {
+            return;
+        };
+        gpu.render(&dabs).expect("render GPU preview");
+        let preview = gpu.readback().expect("offscreen GPU comparison");
+        assert_live_support_matches_cpu(&cpu, &preview);
+
+        let bounds = |pixels: &[u8]| {
+            let mut left = 256_i32;
+            let mut top = 256_i32;
+            let mut right = -1_i32;
+            let mut bottom = -1_i32;
+            for y in 0..256_i32 {
+                for x in 0..256_i32 {
+                    let alpha = pixels[((y * 256 + x) * 4 + 3) as usize];
+                    if alpha > 0 {
+                        left = left.min(x);
+                        top = top.min(y);
+                        right = right.max(x);
+                        bottom = bottom.max(y);
+                    }
+                }
+            }
+            (left, top, right, bottom)
+        };
+        let cpu_bounds = bounds(&cpu);
+        let gpu_bounds = bounds(&preview);
+        for (cpu_edge, gpu_edge) in [
+            (cpu_bounds.0, gpu_bounds.0),
+            (cpu_bounds.1, gpu_bounds.1),
+            (cpu_bounds.2, gpu_bounds.2),
+            (cpu_bounds.3, gpu_bounds.3),
+        ] {
+            assert!(
+                (cpu_edge - gpu_edge).abs() <= 1,
+                "basic-brush bounds differ by more than one pixel: CPU {cpu_bounds:?}, GPU {gpu_bounds:?}"
+            );
+        }
+
+        let center_offset = (y as usize * 256 + x as usize) * 4;
+        // At low pressure a subpixel dab has no fully covered CPU center;
+        // CPU coverage and shader smoothstep use different AA kernels.
+        let center_tolerance = if pressure < 0.5 { 16 } else { 0 };
+        for channel in 0..4 {
+            assert!(
+                preview[center_offset + channel].abs_diff(cpu[center_offset + channel])
+                    <= center_tolerance,
+                "center channel {channel}, pressure {pressure}: CPU {:?}, GPU {:?}",
+                &cpu[center_offset..center_offset + 4],
+                &preview[center_offset..center_offset + 4]
+            );
+        }
+        let outside_offset = ((48 * 256 + 48) * 4) as usize;
+        assert_eq!(preview[outside_offset + 3], 0);
+        assert_eq!(cpu[outside_offset + 3], 0);
+    }
 }
 
 #[test]
@@ -1495,14 +1552,10 @@ fn gpu_live_preview_tracks_committed_cpu_technical_pen_geometry() {
 fn gpu_live_preview_stays_spatially_aligned_on_long_basic_brush_spirals() {
     use std::f32::consts::TAU;
 
-    let Ok(gpu) = GpuLiveSurface::new(LiveSurfaceConfig {
-        physical_width: 256,
-        physical_height: 256,
-        scale_milli: 1000,
-    }) else {
-        // Headless CI without a graphics adapter still runs the protocol
-        // and CPU-authority tests; desktop graphics CI exercises this
-        // live-to-committed replacement comparison.
+    let _guard = GPU_PARITY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(gpu) = parity_surface() else {
         return;
     };
 
@@ -9658,7 +9711,7 @@ fn pulled_string_brush_draft_persists_reopens_and_undoes_as_one_edit() {
     let preset: ink_brush::BrushPresetV2 =
         serde_json::from_slice(&snapshot.brushes[0]).expect("serialized format-3 brush");
     assert_eq!(preset.format_version, 3);
-    assert_eq!(preset.engine_semantics.0, ink_brush::CPU_BRUSH_V3);
+    assert_eq!(preset.engine_semantics.0, ink_brush::CPU_BRUSH_V4);
     let reopened = Document::from_snapshot(snapshot).expect("reopen brush document");
     let persisted = reopened
         .brush_summaries()
@@ -9810,3 +9863,6 @@ fn draw_replay_test_pulled_string_stroke(document: &mut Document, layer: LayerId
         .dispatch(EditorCommand::EndStroke { stroke })
         .expect("commit pulled-string stroke");
 }
+
+#[path = "engine_contract_tests.rs"]
+mod engine_contract_tests;

@@ -96,3 +96,6 @@ is a repeatable engine regression signal; it does not claim physical
 stylus-to-display latency or process RSS. A run passes the engine memory gate
 when `max_memory_bytes` remains below the 900 MiB document ceiling and the
 final-window timing does not regress against the first window.
+
+For sparse copy-on-write detachment, retained pixel payload, and public-command
+undo/redo measurements, see [engine design guardrails](engine-design-guardrails.md#sparse-history-costs).

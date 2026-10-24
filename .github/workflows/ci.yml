@@ -19,9 +19,17 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
+      - name: Enforce engine ownership boundaries
+        run: |
+          python3 scripts/check_architecture.py
+          python3 -m unittest discover -s scripts -p test_check_architecture.py
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Measure sparse history and real undo transitions
+        run: |
+          cargo bench -p ink-raster --bench tile_store_history
+          cargo run -p ink-engine --release --example history_session_benchmark
       - name: Enforce Phase 1 CPU benchmark guardrails
         shell: bash
         run: |
@@ -75,6 +83,13 @@ jobs:
             arm64) test "$actual" = "arm64" ;;
           esac
       - run: cargo test -p ink-engine golden_tile_hash
+      - name: Require GPU reference comparisons on Metal
+        if: runner.os == 'macOS'
+        env:
+          INK_REQUIRE_GPU_PARITY: '1'
+        run: cargo test -p ink-engine gpu_live_preview_ -- --nocapture
+      - name: Run deterministic headless lifecycle scenarios
+        run: cargo test -p ink-engine headless_contract
 
   flutter:
     runs-on: ubuntu-22.04
