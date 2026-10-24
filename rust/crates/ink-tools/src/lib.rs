@@ -1046,6 +1046,12 @@ impl TimeLapseRecording {
                     && !stroke.catch_up_on_end
             }
             2001 => stroke.brush_revision > 0 && stroke.pulled_string,
+            2002 => {
+                stroke.brush_revision > 0
+                    && (stroke.pulled_string
+                        || (stroke.stabilizer_distance_px.to_bits() == 0.0_f32.to_bits()
+                            && !stroke.catch_up_on_end))
+            }
             _ => false,
         };
         if !stabilizer_valid || !brush_metadata_valid {

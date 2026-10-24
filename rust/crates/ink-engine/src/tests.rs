@@ -9697,7 +9697,7 @@ fn pulled_string_stroke_reopens_and_replays_with_captured_brush_semantics() {
     let recorded_stroke = time_lapse.strokes.last().expect("recorded stroke");
     assert_eq!(recorded_stroke.brush, brush_id.0);
     assert_eq!(recorded_stroke.brush_revision, 1);
-    assert_eq!(recorded_stroke.brush_semantics, ink_brush::CPU_BRUSH_V3);
+    assert_eq!(recorded_stroke.brush_semantics, ink_brush::CPU_BRUSH_V4);
     assert!(recorded_stroke.pulled_string);
     assert_eq!(
         recorded_stroke.stabilizer_distance_px.to_bits(),

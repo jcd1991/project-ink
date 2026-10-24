@@ -21,6 +21,8 @@ use std::fmt;
 pub const CPU_BRUSH_V2: u32 = 2_000;
 /// Pixel-affecting semantics for version-3 brushes using pulled-string paths.
 pub const CPU_BRUSH_V3: u32 = 2_001;
+/// Pixel semantics with pressure/pose synchronized to smoothed positions.
+pub const CPU_BRUSH_V4: u32 = 2_002;
 /// Maximum number of dynamic bindings on one preset.
 pub const MAX_BINDINGS: usize = 64;
 /// Maximum number of curve points on one response curve.
@@ -728,8 +730,10 @@ impl BrushPresetV2 {
             return Err(BrushValidationError::UnsupportedFormat(self.format_version));
         }
         let supported_semantics = match (self.format_version, self.engine_semantics.0) {
-            (2, CPU_BRUSH_V2) => self.stroke.stabilizer == PathStabilizer::Legacy,
-            (3, CPU_BRUSH_V3) => self.stroke.stabilizer == PathStabilizer::PulledString,
+            (2, CPU_BRUSH_V2 | CPU_BRUSH_V4) => self.stroke.stabilizer == PathStabilizer::Legacy,
+            (3, CPU_BRUSH_V3 | CPU_BRUSH_V4) => {
+                self.stroke.stabilizer == PathStabilizer::PulledString
+            }
             _ => false,
         };
         if !supported_semantics {
@@ -1258,6 +1262,7 @@ impl CompiledBrush {
             spacing,
             self.limits.max_dabs,
             PathConditioning {
+                smooth_sensors: self.semantics == EngineSemantics(CPU_BRUSH_V4),
                 smoothing_amount: (self.stroke.smoothing.max(self.stroke.streamline) * 0.92)
                     .clamp(0.0, 0.95),
                 stabilizer: self.stroke.stabilizer,
@@ -1672,6 +1677,7 @@ struct PathPoint {
 
 #[derive(Clone, Copy)]
 struct PathConditioning {
+    smooth_sensors: bool,
     smoothing_amount: f32,
     stabilizer: PathStabilizer,
     distance_px: f32,
@@ -1734,6 +1740,13 @@ impl CompiledBrushState {
                     previous.canvas_y + (sample.canvas_y - previous.canvas_y) * keep;
                 filtered.tilt_x = previous.tilt_x + (sample.tilt_x - previous.tilt_x) * keep;
                 filtered.tilt_y = previous.tilt_y + (sample.tilt_y - previous.tilt_y) * keep;
+                if conditioning.smooth_sensors {
+                    filtered.pressure = (f32::from(previous.pressure)
+                        + (f32::from(sample.pressure) - f32::from(previous.pressure)) * keep)
+                        .round()
+                        .clamp(0.0, f32::from(u16::MAX))
+                        as u16;
+                }
                 filtered.azimuth = previous.azimuth + (sample.azimuth - previous.azimuth) * keep;
                 filtered.twist = previous.twist + (sample.twist - previous.twist) * keep;
                 filtered
@@ -2476,6 +2489,120 @@ mod tests {
             twist: 0.0,
             timestamp_ns: u64::from(sequence),
             sequence,
+        }
+    }
+
+    #[test]
+    fn smoothing_interpolates_pressure_with_the_lagged_position() {
+        let mut state = CompiledBrushState::default();
+        let mut lifted_sample = sample(10.0, 0, 2);
+        lifted_sample.phase = Phase::Up;
+        lifted_sample.tilt_x = 0.6;
+        lifted_sample.azimuth = 0.4;
+        lifted_sample.twist = 0.8;
+        let emitted = state
+            .append_path(
+                &[sample(0.0, u16::MAX, 1), lifted_sample],
+                1.0,
+                32,
+                PathConditioning {
+                    smooth_sensors: true,
+                    smoothing_amount: 0.5,
+                    stabilizer: PathStabilizer::Legacy,
+                    distance_px: 0.0,
+                    catch_up_on_end: false,
+                },
+            )
+            .expect("condition path");
+        let anchor = state.conditioned_anchor.expect("conditioned anchor");
+        assert!((anchor.canvas_x - 5.0).abs() < 0.001);
+        assert_eq!(anchor.pressure, 32_768);
+        assert!((anchor.tilt_x - 0.3).abs() < 0.001);
+        assert!((anchor.azimuth - 0.2).abs() < 0.001);
+        assert!((anchor.twist - 0.4).abs() < 0.001);
+        assert_eq!(emitted.len(), 6);
+        for (index, point) in emitted[1..].iter().enumerate() {
+            let fraction = (index + 1) as f32 / 5.0;
+            let expected_pressure =
+                1.0 + (f32::from(32_768_u16) / f32::from(u16::MAX) - 1.0) * fraction;
+            assert!((point.pressure - expected_pressure).abs() < 0.001);
+            assert!((point.tilt - 0.3 * fraction).abs() < 0.001);
+            assert!((point.azimuth - 0.2 * fraction).abs() < 0.001);
+            assert!((point.twist - 0.4 * fraction).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn smoothing_tracks_slow_and_stationary_pressure_changes() {
+        let mut state = CompiledBrushState::default();
+        let conditioning = PathConditioning {
+            smooth_sensors: true,
+            smoothing_amount: 0.5,
+            stabilizer: PathStabilizer::Legacy,
+            distance_px: 0.0,
+            catch_up_on_end: false,
+        };
+        state
+            .append_path(&[sample(0.0, 0, 1)], 1.0, 32, conditioning)
+            .expect("initial anchor");
+        let stationary = state
+            .append_path(&[sample(0.0, 30_000, 2)], 1.0, 32, conditioning)
+            .expect("stationary pressure update");
+        assert!(stationary.is_empty());
+
+        let slowly_changing = state
+            .append_path(&[sample(10.0, 40_000, 3)], 1.0, 32, conditioning)
+            .expect("slow pressure update");
+        let expected = f32::from(27_500_u16) / f32::from(u16::MAX);
+        assert!((slowly_changing.last().expect("emitted point").pressure - expected).abs() < 0.001);
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn v4_stabilized_strokes_match_across_packet_chunking() {
+        let mut preset = builtin_library().remove(0);
+        preset.engine_semantics = EngineSemantics(CPU_BRUSH_V4);
+        preset.stroke.smoothing = 0.55;
+        let compiled = preset.compile().expect("V4 brush");
+        let mut samples = Vec::new();
+        for index in 0..24 {
+            let mut point = sample(
+                index as f32 * 2.0,
+                u16::try_from(index * 2_800).expect("pressure in u16 range"),
+                u32::try_from(index).expect("sequence in u32 range"),
+            );
+            if index == 0 {
+                point.phase = Phase::Down;
+            }
+            point.tilt_x = index as f32 / 30.0;
+            point.azimuth = index as f32 / 48.0;
+            point.twist = index as f32 / 32.0;
+            if index == 23 {
+                point.phase = Phase::Up;
+                point.pressure = 0;
+            }
+            samples.push(point);
+        }
+
+        let expected = compiled.render(&samples).expect("whole V4 stroke");
+        for chunk_size in [1, 3, 7] {
+            let mut state = CompiledBrushState::default();
+            let mut actual = Vec::new();
+            for packet in samples.chunks(chunk_size) {
+                actual.extend(
+                    compiled
+                        .render_incremental(packet, &mut state)
+                        .expect("V4 packet renders"),
+                );
+            }
+            actual.extend(
+                compiled
+                    .finish_incremental(&mut state)
+                    .expect("V4 stroke finishes")
+                    .into_iter()
+                    .map(|(dab, _)| dab),
+            );
+            assert_eq!(actual, expected, "chunk size {chunk_size}");
         }
     }
 
