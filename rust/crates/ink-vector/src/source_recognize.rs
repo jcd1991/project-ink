@@ -249,9 +249,18 @@ fn polygon_rotation(corners: &[Point], step: f64) -> f64 {
             })
             .sum::<f64>()
     };
-    [0.0, 90.0, 180.0, 270.0]
+    // Candidates a whole number of periods apart describe the same polygon. Keep only the first
+    // representative so platform-specific `atan2` rounding cannot select an equivalent but
+    // unstable angle (for example 270° instead of 90° for a hexagon).
+    let candidates = [0.0, 90.0, 180.0, 270.0]
         .into_iter()
-        .filter(|r| r % step == 0.0)
+        .filter(|r| r % step == 0.0);
+    let distinct = candidates
+        .clone()
+        .enumerate()
+        .filter(|&(i, r)| !candidates.clone().take(i).any(|q| (r - q) % period == 0.0));
+    distinct
+        .map(|(_, r)| r)
         .min_by(|a, b| error(*a).total_cmp(&error(*b)))
         .unwrap_or(0.0)
 }
@@ -766,6 +775,27 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn equivalent_hexagon_angles_use_a_deterministic_representative() {
+        for direction in [0.0_f64, 90.0] {
+            for tilt in [-9.0_f64, -7.0, -3.0, 3.0, 7.0, 9.0] {
+                for offset in [0.0, 1e-7, 0.1, 1e3, 1e6] {
+                    let corners: Vec<Point> = (0..6)
+                        .map(|i| {
+                            let angle = (direction + tilt - 90.0).to_radians()
+                                + std::f64::consts::TAU * i as f64 / 6.0;
+                            Point::new(offset + 70.0 * angle.cos(), offset + 70.0 * angle.sin())
+                        })
+                        .collect();
+                    assert_eq!(polygon_rotation(&corners, 90.0), direction);
+                    let mut shifted = corners.clone();
+                    shifted.rotate_left(3);
+                    assert_eq!(polygon_rotation(&shifted, 90.0), direction);
+                }
+            }
         }
     }
 

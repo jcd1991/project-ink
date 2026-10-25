@@ -126,9 +126,6 @@ pub fn trace_mask_bounded(mask: &[bool], w: usize, h: usize) -> Option<Vec<Compo
     if sizes.len() > 16_384 {
         return None;
     }
-    let vw = w.checked_add(1)?;
-    let vh = h.checked_add(1)?;
-    let vertices = vw.checked_mul(vh)?;
     let mut boundary_edges = 0usize;
     for y in 0..h {
         for x in 0..w {
@@ -146,121 +143,107 @@ pub fn trace_mask_bounded(mask: &[bool], w: usize, h: usize) -> Option<Vec<Compo
             }
         }
     }
-    let mut dirs = Vec::new();
-    dirs.try_reserve_exact(vertices).ok()?;
-    dirs.resize(vertices, 0u8);
-    let inside = |x: isize, y: isize| {
+    if boundary_edges == 0 {
+        return Some(Vec::new());
+    }
+
+    // The latest upstream walker derives each turn from the pixels ahead. A single bit per source
+    // pixel records whether its top edge has already started a loop, replacing the full corner grid.
+    let inside = |x: i32, y: i32| {
         x >= 0
             && y >= 0
             && (x as usize) < w
             && (y as usize) < h
-            && mask[y as usize * w + x as usize]
+            && mask.get(y as usize * w + x as usize) == Some(&true)
     };
-    for y in 0..h {
-        for x in 0..w {
-            if !mask[y * w + x] {
-                continue;
-            }
-            let (xi, yi) = (x as isize, y as isize);
-            if !inside(xi, yi - 1) {
-                dirs[y * vw + x] |= R;
-            }
-            if !inside(xi + 1, yi) {
-                dirs[y * vw + x + 1] |= D;
-            }
-            if !inside(xi, yi + 1) {
-                dirs[(y + 1) * vw + x + 1] |= L;
-            }
-            if !inside(xi - 1, yi) {
-                dirs[(y + 1) * vw + x] |= U;
-            }
-        }
-    }
+    let ahead = |x: i32, y: i32, d: u8| {
+        let (nw, ne, se, sw) = ((x - 1, y - 1), (x, y - 1), (x, y), (x - 1, y));
+        let (right, left) = match d {
+            R => (se, ne),
+            D => (sw, se),
+            L => (nw, sw),
+            _ => (ne, nw),
+        };
+        (inside(right.0, right.1), inside(left.0, left.1))
+    };
+    let mut walked = Vec::new();
+    walked.try_reserve_exact(pixels).ok()?;
+    walked.resize(pixels, false);
     let mut outers: Vec<Option<Loop>> = Vec::new();
     outers.try_reserve_exact(sizes.len()).ok()?;
     outers.resize_with(sizes.len(), || None);
     let mut holes: Vec<Vec<Loop>> = Vec::new();
     holes.try_reserve_exact(sizes.len()).ok()?;
     holes.resize_with(sizes.len(), Vec::new);
-    for start in 0..dirs.len() {
-        // Every loop has an R edge (the top edge of some inside pixel); start there so the loop
-        // closes exactly (right-turn rule at the start vertex, too).
-        while dirs[start] & R != 0 {
-            let (sx, sy) = ((start % vw) as i32, (start / vw) as i32);
-            let owner = comp[sy as usize * w + sx as usize];
-            dirs[start] &= !R;
-            let mut pts = Vec::new();
-            pts.try_reserve(1).ok()?;
-            pts.push((sx, sy));
-            let (mut x, mut y) = (sx + 1, sy);
-            let mut d = R;
-            let mut area2: i64 = 0;
-            let mut prev = (sx, sy);
-            let mut walked_edges = 0usize;
-            loop {
-                walked_edges = walked_edges.checked_add(1)?;
-                if walked_edges > boundary_edges {
-                    return None;
-                }
-                let contribution = i64::from(prev.0)
-                    .checked_mul(i64::from(y))?
-                    .checked_sub(i64::from(x).checked_mul(i64::from(prev.1))?)?;
-                area2 = area2.checked_add(contribution)?;
-                prev = (x, y);
-                let v = y as usize * vw + x as usize;
-                let at_start = (x, y) == (sx, sy);
-                let mut cand = dirs[v];
-                if at_start {
-                    cand |= R;
-                }
-                let next = if cand.is_power_of_two() {
-                    cand
-                } else if cand & right_of(d) != 0 {
-                    right_of(d)
-                } else if cand & d != 0 {
-                    d
-                } else {
-                    // left turn
-                    right_of(right_of(right_of(d)))
-                };
-                if at_start && next == R {
-                    break;
-                }
-                if next == 0 || dirs[v] & next == 0 {
-                    // Malformed (cannot happen for a valid mask); stop safely.
-                    break;
-                }
-                dirs[v] &= !next;
-                // Keep only turn vertices.
-                if next != d {
-                    pts.try_reserve(1).ok()?;
-                    pts.push((x, y));
-                }
-                let (dx, dy) = step(next);
-                x += dx;
-                y += dy;
-                d = next;
-            }
-            let l = Loop { pts, area2 };
-            if owner == u32::MAX {
-                continue;
-            }
-            if l.area2 > 0 {
-                outers[owner as usize] = Some(l);
+
+    for (s, (&on, &owner)) in mask.iter().zip(&comp).enumerate() {
+        // Start at each unvisited top edge; a top edge uniquely seeds its closed boundary walk.
+        if !on || walked[s] || (s >= w && mask.get(s - w) == Some(&true)) {
+            continue;
+        }
+        let (sx, sy) = ((s % w) as i32, (s / w) as i32);
+        walked[s] = true;
+        let mut pts = Vec::new();
+        pts.try_reserve(1).ok()?;
+        pts.push((sx, sy));
+        let (mut x, mut y) = (sx + 1, sy);
+        let mut d = R;
+        let mut area2 = 0i64;
+        let mut prev = (sx, sy);
+        let mut closed = false;
+        for _ in 0..=boundary_edges {
+            let contribution = i64::from(prev.0)
+                .checked_mul(i64::from(y))?
+                .checked_sub(i64::from(x).checked_mul(i64::from(prev.1))?)?;
+            area2 = area2.checked_add(contribution)?;
+            prev = (x, y);
+            let (right, left) = ahead(x, y, d);
+            let next = if !right {
+                right_of(d)
+            } else if !left {
+                d
             } else {
-                holes[owner as usize].try_reserve(1).ok()?;
-                holes[owner as usize].push(l);
+                right_of(right_of(right_of(d)))
+            };
+            if (x, y) == (sx, sy) && next == R {
+                closed = true;
+                break;
             }
+            if next == R {
+                let pixel = (y as usize).checked_mul(w)?.checked_add(x as usize)?;
+                *walked.get_mut(pixel)? = true;
+            }
+            if next != d {
+                pts.try_reserve(1).ok()?;
+                pts.push((x, y));
+            }
+            let (dx, dy) = step(next);
+            x = x.checked_add(dx)?;
+            y = y.checked_add(dy)?;
+            d = next;
+        }
+        if !closed {
+            return None;
+        }
+        let boundary = Loop { pts, area2 };
+        let owner = usize::try_from(owner).ok()?;
+        if boundary.area2 > 0 {
+            *outers.get_mut(owner)? = Some(boundary);
+        } else {
+            let component_holes = holes.get_mut(owner)?;
+            component_holes.try_reserve(1).ok()?;
+            component_holes.push(boundary);
         }
     }
+
     let mut out = Vec::new();
     out.try_reserve_exact(sizes.len()).ok()?;
-    for (i, o) in outers.into_iter().enumerate() {
-        if let Some(outer) = o {
+    for ((outer, component_holes), &component_pixels) in outers.into_iter().zip(holes).zip(&sizes) {
+        if let Some(outer) = outer {
             out.push(Component {
                 outer,
-                holes: std::mem::take(&mut holes[i]),
-                pixels: sizes[i],
+                holes: component_holes,
+                pixels: component_pixels,
             });
         }
     }
