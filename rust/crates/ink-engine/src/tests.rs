@@ -1044,7 +1044,26 @@ fn assert_adjustment_exports_match_composite(
             .expect("decode adjustment PSD");
     assert_eq!((png_width, png_height), (64, 64));
     assert_eq!((psd_width, psd_height), (64, 64));
-    assert_eq!(png_pixels, psd_pixels, "PNG and PSD exports diverged");
+    for (pixel_index, (png, psd)) in png_pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(psd_pixels.as_chunks::<4>().0)
+        .enumerate()
+    {
+        // PSD composites use a white matte. Low-alpha RGB cannot be recovered exactly from
+        // that 8-bit representation, so compare the visible result over white instead.
+        let alpha = u32::from(png[3]);
+        for channel in 0..3 {
+            let png_matted = (u32::from(png[channel]) * alpha + 127) / 255 + 255 - alpha;
+            let psd_matted = (u32::from(psd[channel]) * alpha + 127) / 255 + 255 - alpha;
+            assert!(
+                png_matted.abs_diff(psd_matted) <= 1,
+                "PNG and PSD exports diverged at pixel {pixel_index}, channel {channel}: {png_matted} vs {psd_matted}"
+            );
+        }
+        assert_eq!(png[3], psd[3], "alpha differs at pixel {pixel_index}");
+    }
 
     let composite = document
         .read_composite_tile(TileCoord { x: 0, y: 0 })
@@ -9621,17 +9640,28 @@ fn editable_psd_export_round_trips_raster_and_merged_pixels() {
         expected.iter().any(|byte| *byte != 0),
         "document composite is empty"
     );
-    let first_mismatch = merged
+    for (pixel_index, (actual, expected)) in merged
+        .as_chunks::<4>()
+        .0
         .iter()
-        .zip(&expected)
-        .position(|(actual, expected)| actual != expected);
-    assert!(
-        first_mismatch.is_none(),
-        "PSD composite mismatch at {:?}: actual {:?}, expected {:?}",
-        first_mismatch,
-        first_mismatch.map(|index| &merged[index..index + 4]),
-        first_mismatch.map(|index| &expected[index..index + 4]),
-    );
+        .zip(expected.as_chunks::<4>().0)
+        .enumerate()
+    {
+        // PhotoCraft writes transparent RGB against white in the PSD composite. Recovering
+        // straight alpha is necessarily quantized by that 8-bit matte/unmatte round trip.
+        for channel in 0..3 {
+            assert!(
+                actual[channel].abs_diff(expected[channel]) <= 1,
+                "PSD composite RGB mismatch at pixel {pixel_index}, channel {channel}: actual {}, expected {}",
+                actual[channel],
+                expected[channel],
+            );
+        }
+        assert_eq!(
+            actual[3], expected[3],
+            "PSD composite alpha mismatch at pixel {pixel_index}"
+        );
+    }
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 

@@ -37,25 +37,25 @@
 //! # Ok::<(), photocraft_psd::PsdError>(())
 //! ```
 #![forbid(unsafe_code)]
-// This is pinned third-party parser code. Keep upstream source readable and
-// diffable instead of rewriting hundreds of unrelated lint findings; Ink's
-// adapter crate is linted independently.
-#![allow(clippy::all, clippy::pedantic)]
 #![warn(missing_docs)]
-#![deny(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unimplemented,
-    clippy::todo,
-    clippy::unreachable
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unimplemented,
+        clippy::todo,
+        clippy::unreachable
+    )
 )]
-// Upstream unit fixtures intentionally use unwraps and assertions to keep the
-// parser examples concise. Production parser code remains subject to the
-// strict deny list above.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod abr;
+pub mod aco;
+pub mod act;
+pub mod ase;
+pub mod asl;
+pub mod atn;
 pub mod blend;
 pub mod builder;
 pub mod compression;
@@ -63,6 +63,8 @@ pub mod descriptor;
 pub mod error;
 pub mod file;
 pub mod filter_effects;
+#[cfg(any(test, feature = "testgen"))]
+pub mod fixtures;
 pub mod grd;
 pub mod hdr;
 pub mod header;
@@ -74,6 +76,7 @@ pub mod path;
 pub mod patterns;
 pub mod pixels;
 pub mod resources;
+pub mod shc;
 pub mod slices;
 pub mod tagged;
 #[cfg(any(test, feature = "testgen"))]

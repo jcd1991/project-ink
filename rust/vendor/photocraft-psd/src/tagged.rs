@@ -39,7 +39,8 @@ pub struct TaggedBlock {
     /// Block data exactly as covered by the length field.
     pub data: Vec<u8>,
     /// Bytes that followed the data before the next block. `None` means
-    /// "default": zero-pad to an even length. Parsing yields `None` whenever
+    /// "default": zero-pad to a multiple of four for global blocks, two for
+    /// layer blocks. Parsing yields `None` whenever
     /// the stored padding equals the default, so the model stays canonical.
     pub padding: Option<Vec<u8>>,
 }
@@ -116,8 +117,14 @@ pub enum BlockData<'a> {
     BlendClippedAsGroup(bool),
     /// `infx`
     BlendInteriorElements(bool),
-    /// `knko`
+    /// `knko`: 0 none, 1 shallow, 2 deep.
     Knockout(u8),
+    /// `tsly`: Transparency Shapes Layer.
+    TransparencyShapes(bool),
+    /// `lmgm`: Layer Mask Hides Effects ("layer mask as global mask").
+    LayerMaskHidesEffects(bool),
+    /// `vmgm`: Vector Mask Hides Effects.
+    VectorMaskHidesEffects(bool),
     /// `lspf`: bit 0 transparency, bit 1 composite, bit 2 position locked.
     Protection(u32),
     /// `lclr`: sheet color index (0 none, 1 red, 2 orange, 3 yellow, 4 green,
@@ -140,13 +147,27 @@ impl TaggedBlock {
         }
     }
 
+    /// `true` for `MIB8` / `46B8`: the signatures [`crate::tiff`] gives a block whose data was
+    /// kept verbatim from a little-endian TIFF because its layout is unknown. Such a block is
+    /// written back exactly into a little-endian TIFF, and cannot go into a big-endian file
+    /// (a PSD) without being dropped: see [`Self::is_foreign_order`].
+    pub fn is_foreign_order_signature(b: &[u8]) -> bool {
+        b.starts_with(b"MIB8") || b.starts_with(b"46B8")
+    }
+
+    /// Whether this block's data is in little-endian layout (see
+    /// [`Self::is_foreign_order_signature`]).
+    pub fn is_foreign_order(&self) -> bool {
+        Self::is_foreign_order_signature(&self.signature)
+    }
+
     /// Key as a string (lossy).
     pub fn key_str(&self) -> String {
         String::from_utf8_lossy(&self.key).into_owned()
     }
 
-    fn default_padding(len: usize) -> usize {
-        len % 2
+    fn default_padding(len: usize, alignment: usize) -> usize {
+        (alignment - len % alignment) % alignment
     }
 
     /// Typed view for known keys. `None` for keys without a typed parser,
@@ -164,6 +185,9 @@ impl TaggedBlock {
             b"clbl" => r.u8().map(|v| BlockData::BlendClippedAsGroup(v != 0)),
             b"infx" => r.u8().map(|v| BlockData::BlendInteriorElements(v != 0)),
             b"knko" => r.u8().map(BlockData::Knockout),
+            b"tsly" => r.u8().map(|v| BlockData::TransparencyShapes(v != 0)),
+            b"lmgm" => r.u8().map(|v| BlockData::LayerMaskHidesEffects(v != 0)),
+            b"vmgm" => r.u8().map(|v| BlockData::VectorMaskHidesEffects(v != 0)),
             b"lspf" => r.u32().map(BlockData::Protection),
             b"lclr" => r.u16().map(BlockData::SheetColor),
             b"iOpa" => r.u8().map(BlockData::FillOpacity),
@@ -222,6 +246,18 @@ impl TaggedBlock {
     /// `knko` block.
     pub fn knockout(v: u8) -> Self {
         Self::flag(*b"knko", v)
+    }
+    /// `tsly` block.
+    pub fn transparency_shapes(v: bool) -> Self {
+        Self::flag(*b"tsly", u8::from(v))
+    }
+    /// `lmgm` block.
+    pub fn layer_mask_hides_effects(v: bool) -> Self {
+        Self::flag(*b"lmgm", u8::from(v))
+    }
+    /// `vmgm` block.
+    pub fn vector_mask_hides_effects(v: bool) -> Self {
+        Self::flag(*b"vmgm", u8::from(v))
     }
     /// `lspf` block.
     pub fn protection(flags: u32) -> Self {
@@ -311,22 +347,49 @@ impl TaggedBlock {
         Ok(())
     }
 
-    pub(crate) fn write(&self, out: &mut Vec<u8>, version: Version) -> Result<()> {
-        out.put(&self.signature);
-        out.put(&self.key);
-        out.put_len(self.data.len() as u64, uses_long_length(version, &self.key))?;
-        out.put(&self.data);
-        match &self.padding {
+    pub(crate) fn write(
+        &self,
+        out: &mut Vec<u8>,
+        version: Version,
+        alignment: usize,
+    ) -> Result<()> {
+        Self::write_parts(
+            out,
+            self.signature,
+            self.key,
+            &self.data,
+            self.padding.as_deref(),
+            version,
+            alignment,
+        )
+    }
+
+    /// Writes a block from its parts (no owned [`TaggedBlock`] needed). `padding: None` writes
+    /// zeros up to `alignment`.
+    pub(crate) fn write_parts(
+        out: &mut Vec<u8>,
+        signature: [u8; 4],
+        key: [u8; 4],
+        data: &[u8],
+        padding: Option<&[u8]>,
+        version: Version,
+        alignment: usize,
+    ) -> Result<()> {
+        out.put(&signature);
+        out.put(&key);
+        out.put_len(data.len() as u64, uses_long_length(version, &key))?;
+        out.put(data);
+        match padding {
             Some(p) => out.put(p),
             None => out.extend(std::iter::repeat_n(
                 0u8,
-                Self::default_padding(self.data.len()),
+                Self::default_padding(data.len(), alignment),
             )),
         }
         Ok(())
     }
 
-    /// Serialized size in bytes.
+    /// Serialized size in bytes as a layer block (two-byte alignment).
     pub fn encoded_len(&self, version: Version) -> usize {
         let l = if uses_long_length(version, &self.key) {
             8
@@ -336,7 +399,7 @@ impl TaggedBlock {
         let p = self
             .padding
             .as_ref()
-            .map_or(Self::default_padding(self.data.len()), Vec::len);
+            .map_or(Self::default_padding(self.data.len(), 2), Vec::len);
         8 + l + self.data.len() + p
     }
 }
@@ -440,8 +503,10 @@ fn parse_section(d: &[u8]) -> Result<SectionDivider> {
     })
 }
 
+/// `8BIM` / `8B64`, or the markers `MIB8` / `46B8` that [`crate::tiff`] gives a block kept
+/// verbatim from a little-endian TIFF when its layout is unknown (its data is in that order).
 fn is_sig(b: &[u8]) -> bool {
-    b.starts_with(b"8BIM") || b.starts_with(b"8B64")
+    b.starts_with(b"8BIM") || b.starts_with(b"8B64") || TaggedBlock::is_foreign_order_signature(b)
 }
 
 /// Reads tagged blocks until the reader is exhausted. Bytes that do not form
@@ -451,8 +516,18 @@ pub(crate) fn read_blocks(
     r: &mut Reader<'_>,
     version: Version,
 ) -> Result<(Vec<TaggedBlock>, Vec<u8>)> {
-    const MAX_BLOCKS_PER_SECTION: usize = 32;
+    read_blocks_with(r, version, 2, |_, _, _, _, _| false)
+}
+
+/// The callback consumes selected payloads before they are copied into owned blocks.
+pub(crate) fn read_blocks_with(
+    r: &mut Reader<'_>,
+    version: Version,
+    alignment: usize,
+    mut consume: impl FnMut(usize, [u8; 4], [u8; 4], &[u8], &Option<Vec<u8>>) -> bool,
+) -> Result<(Vec<TaggedBlock>, Vec<u8>)> {
     let mut blocks = Vec::new();
+    let mut seen_blocks = 0usize;
     loop {
         let rest = r.peek_rest();
         if rest.len() < 12 || !is_sig(rest) {
@@ -460,15 +535,16 @@ pub(crate) fn read_blocks(
             r.skip(rest.len())?;
             return Ok((blocks, trailing));
         }
-        if blocks.len() >= MAX_BLOCKS_PER_SECTION {
+        if seen_blocks >= 32 {
             return Err(PsdError::LimitExceeded(
                 "more than 32 tagged blocks in a section",
             ));
         }
+        seen_blocks += 1;
         let signature = r.array::<4>()?;
         let key = r.array::<4>()?;
         let len = r.len_field(uses_long_length(version, &key))?;
-        let data = r.bytes_u64(len)?.to_vec();
+        let data = r.bytes_u64(len)?;
         // Detect padding: the smallest k in 0..=3 such that the next block
         // signature (or the end of the region) follows k bytes later.
         let rest = r.peek_rest();
@@ -479,21 +555,37 @@ pub(crate) fn read_blocks(
                 break;
             }
         }
-        let pad = pad.unwrap_or(0);
+        // Opaque trailing bytes can follow canonical zero padding without another signature.
+        let default = TaggedBlock::default_padding(data.len(), alignment);
+        let pad = pad.unwrap_or_else(|| {
+            if rest
+                .get(..default)
+                .is_some_and(|p| p.iter().all(|&b| b == 0))
+            {
+                default
+            } else {
+                0
+            }
+        });
         let pad_bytes = r.bytes(pad)?.to_vec();
-        let padding = if pad_bytes.len() == TaggedBlock::default_padding(data.len())
+        let padding = if pad_bytes.len() == TaggedBlock::default_padding(data.len(), alignment)
             && pad_bytes.iter().all(|&b| b == 0)
         {
             None
         } else {
             Some(pad_bytes)
         };
-        blocks.push(TaggedBlock {
-            signature,
-            key,
-            data,
-            padding,
-        });
+        if !consume(blocks.len(), signature, key, data, &padding) {
+            blocks
+                .try_reserve(1)
+                .map_err(|_| PsdError::LimitExceeded("tagged block allocation failed"))?;
+            blocks.push(TaggedBlock {
+                signature,
+                key,
+                data: data.to_vec(),
+                padding,
+            });
+        }
     }
 }
 
@@ -501,9 +593,10 @@ pub(crate) fn write_blocks(
     out: &mut Vec<u8>,
     blocks: &[TaggedBlock],
     version: Version,
+    alignment: usize,
 ) -> Result<()> {
     for b in blocks {
-        b.write(out, version)?;
+        b.write(out, version, alignment)?;
     }
     Ok(())
 }
@@ -514,11 +607,25 @@ mod tests {
 
     fn rt(blocks: &[TaggedBlock], version: Version) -> Vec<u8> {
         let mut out = Vec::new();
-        write_blocks(&mut out, blocks, version).unwrap();
+        write_blocks(&mut out, blocks, version, 2).unwrap();
         let (back, trailing) = read_blocks(&mut Reader::new(&out), version).unwrap();
         assert_eq!(back, blocks);
         assert!(trailing.is_empty());
         out
+    }
+
+    #[test]
+    fn tagged_block_count_limit_is_enforced() {
+        let mut bytes = Vec::new();
+        for _ in 0..33 {
+            bytes.extend_from_slice(b"8BIMkey1\0\0\0\0");
+        }
+        assert!(matches!(
+            read_blocks(&mut Reader::new(&bytes), Version::Psd),
+            Err(PsdError::LimitExceeded(
+                "more than 32 tagged blocks in a section"
+            ))
+        ));
     }
 
     #[test]
@@ -604,6 +711,26 @@ mod tests {
             Some(Ok(BlockData::Knockout(2)))
         );
         assert_eq!(
+            TaggedBlock::transparency_shapes(false).parsed(),
+            Some(Ok(BlockData::TransparencyShapes(false)))
+        );
+        assert_eq!(
+            TaggedBlock::layer_mask_hides_effects(true).parsed(),
+            Some(Ok(BlockData::LayerMaskHidesEffects(true)))
+        );
+        assert_eq!(
+            TaggedBlock::vector_mask_hides_effects(true).parsed(),
+            Some(Ok(BlockData::VectorMaskHidesEffects(true)))
+        );
+        assert_eq!(
+            TaggedBlock::vector_mask_hides_effects(true).data,
+            vec![1, 0, 0, 0]
+        );
+        assert!(
+            matches!(TaggedBlock::new(*b"tsly", vec![]).parsed(), Some(Err(_))),
+            "truncated flag is an error, not a panic"
+        );
+        assert_eq!(
             TaggedBlock::protection(0x8000_0000).parsed(),
             Some(Ok(BlockData::Protection(0x8000_0000)))
         );
@@ -670,7 +797,7 @@ mod tests {
     #[test]
     fn trailing_bytes_kept() {
         let mut out = Vec::new();
-        write_blocks(&mut out, &[TaggedBlock::layer_id(1)], Version::Psd).unwrap();
+        write_blocks(&mut out, &[TaggedBlock::layer_id(1)], Version::Psd, 2).unwrap();
         out.extend_from_slice(&[0; 8]);
         let (blocks, trailing) = read_blocks(&mut Reader::new(&out), Version::Psd).unwrap();
         assert_eq!(blocks.len(), 1);
@@ -682,7 +809,7 @@ mod tests {
     #[test]
     fn short_trailing_pad_attributed_to_block() {
         let mut out = Vec::new();
-        write_blocks(&mut out, &[TaggedBlock::layer_id(1)], Version::Psd).unwrap();
+        write_blocks(&mut out, &[TaggedBlock::layer_id(1)], Version::Psd, 2).unwrap();
         out.extend_from_slice(&[0; 2]);
         let (blocks, trailing) = read_blocks(&mut Reader::new(&out), Version::Psd).unwrap();
         assert_eq!(blocks[0].padding, Some(vec![0, 0]));

@@ -886,9 +886,11 @@ impl fmt::Display for ExportError {
 }
 
 /// Decode a flattened version-1, RGB, 8-bit PSD composite with three or four
-/// channels. Raw and `PackBits` row-compressed composites are supported; ZIP
-/// compression and higher depths remain unsupported. Layer records are
-/// ignored only because this API explicitly returns the merged composite.
+/// channels into straight-alpha RGBA. Photoshop stores transparent RGB
+/// composites matted against white, which is removed on read. Raw and
+/// `PackBits` row-compressed composites are supported; ZIP compression and
+/// higher depths remain unsupported. Layer records are ignored only because
+/// this API explicitly returns the merged composite.
 pub fn decode_psd(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), ExportError> {
     const HEADER: usize = 26;
     if bytes.len() < HEADER || &bytes[..4] != b"8BPS" {
@@ -950,7 +952,10 @@ pub fn decode_psd(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), ExportError> {
         .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
         .ok_or(ExportError::InvalidPixelLength)?;
     if compression == 1 {
-        let rgba = decode_psd_rle_rgba(bytes, cursor, width, height, channels, pixel_count)?;
+        let mut rgba = decode_psd_rle_rgba(bytes, cursor, width, height, channels, pixel_count)?;
+        if channels == 4 {
+            unmatte_psd_rgb(&mut rgba);
+        }
         return Ok((width, height, rgba));
     }
     let planar = decode_psd_planar(bytes, cursor, width, height, channels, compression)?;
@@ -970,7 +975,25 @@ pub fn decode_psd(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), ExportError> {
             u8::MAX
         };
     }
+    if channels == 4 {
+        unmatte_psd_rgb(&mut rgba);
+    }
     Ok((width, height, rgba))
+}
+
+/// Convert Photoshop's white-matted RGB composite samples back to straight alpha.
+fn unmatte_psd_rgb(rgba: &mut [u8]) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 {
+            continue;
+        }
+        for channel in pixel.iter_mut().take(3) {
+            let value = u32::from(*channel);
+            let straight = ((value + alpha).saturating_sub(255) * 255 + alpha / 2) / alpha;
+            *channel = straight.min(255) as u8;
+        }
+    }
 }
 
 fn decode_psd_planar(
@@ -1303,7 +1326,9 @@ pub fn encode_svg(width: u32, height: u32, pixels_rgba: &[u8]) -> Result<Vec<u8>
 }
 
 /// Encode a flattened, uncompressed RGB+alpha PSD compatible with common
-/// illustration applications. Layer structure remains intentionally limited.
+/// illustration applications. Transparent RGB is matted against white in the
+/// merged composite, as required by Photoshop's composite convention. Layer
+/// structure remains intentionally limited.
 pub fn encode_psd(width: u32, height: u32, pixels_rgba: &[u8]) -> Result<Vec<u8>, ExportError> {
     if pixels_rgba.len() != expected_len(width, height)? {
         return Err(ExportError::InvalidPixelLength);
@@ -1327,10 +1352,27 @@ pub fn encode_psd(width: u32, height: u32, pixels_rgba: &[u8]) -> Result<Vec<u8>
         .ok_or(ExportError::InvalidPixelLength)?;
     let pixels = pixels_rgba.as_chunks::<4>().0;
     for channel in 0..4 {
-        bytes.extend(pixels.iter().map(|pixel| pixel[channel]));
+        bytes.extend(pixels.iter().map(|pixel| {
+            if channel < 3 {
+                matte_psd_rgb(pixel[channel], pixel[3])
+            } else {
+                pixel[channel]
+            }
+        }));
     }
     debug_assert_eq!(bytes.len(), 40 + pixel_count * 4);
     Ok(bytes)
+}
+
+/// Store the flattened PSD RGB composite against white while keeping its alpha plane.
+fn matte_psd_rgb(color: u8, alpha: u8) -> u8 {
+    if alpha == 0 {
+        color
+    } else {
+        let color = u32::from(color);
+        let alpha = u32::from(alpha);
+        u8::try_from((color * alpha + 127) / 255 + 255 - alpha).unwrap_or(u8::MAX)
+    }
 }
 
 /// Encode a supported editable layer tree and its actual merged composite.
@@ -2211,7 +2253,21 @@ mod tests {
             rle.extend_from_slice(&[0xff, raw[40 + channel * 2], 0x80]);
         }
         let (_, _, decoded) = decode_psd(&rle).expect("decode PackBits repeat PSD");
-        assert_eq!(decoded, pixels);
+        for (actual, expected) in decoded
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(pixels.as_chunks::<4>().0)
+        {
+            for channel in 0..3 {
+                assert_eq!(
+                    matte_psd_rgb(actual[channel], actual[3]),
+                    matte_psd_rgb(expected[channel], expected[3]),
+                    "white-matted composite differs"
+                );
+            }
+            assert_eq!(actual[3], expected[3]);
+        }
     }
 
     #[test]

@@ -1,9 +1,10 @@
 [package]
 name = "photocraft-psd"
-version = "0.1.0"
+version = "0.15.1"
 edition = "2024"
-license = "MIT"
-description = "Pinned PhotoCraft PSD/ABR parsing components vendored for Project Ink"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "PhotoCraft PSD/PSB parsing components vendored and bounded for Project Ink"
 
 [lib]
 name = "photocraft_psd"
@@ -21,6 +22,15 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
+photocraft-psd = { path = ".", features = ["testgen"] }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+# This upstream crate brings its own extensive parser-focused checks at crate
+# level. Keep those hard denials while avoiding Project Ink's broad
+# all/pedantic style set imposing hundreds of unrelated edits on vendored code.
+[lints.clippy]
+all = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }

@@ -1,13 +1,15 @@
 # Vendored parser provenance
 
 Source: `storytold/photocraft`, commit
-`5ecc860ac1abf8fa7e3f218c0474cdcce49fa6c7`, crate `crates/psd`.
+`b4a297fe99a0fbc8603788b4b636be1c949e17d0`, crate `crates/psd` (upstream
+package version `0.15.1`, Rust `1.95`).
 
-The parser source is distributed under MIT; the upstream `LICENSE-MIT` is
+The parser is dual-licensed MIT OR Apache-2.0; both upstream license texts are
 retained here. Project Ink uses the pinned PSD/ABR format parser and keeps its
 own document model, resource budgets, import report, and transaction boundary.
-Local changes should be limited to the Cargo manifest and narrow compatibility
-fixes required by Project Ink. The parser has Project Ink limits of 1,024
-layers, 4,096 image resources, and 32 tagged blocks per section; these checks
-run before the corresponding vectors grow. Record any further source changes
-in this file.
+Project Ink limits parsing to 1,024 layers, 4,096 image resources, and 32
+tagged blocks per section; these checks run before the corresponding vectors
+grow. Allocation reservations for the resource and tagged-block lists are
+fallible. The Ink builder retains group protection flags from the previous
+vendored API and writes them as Photoshop protection blocks for PSD export.
+Further source changes must be recorded here.
