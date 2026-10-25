@@ -16,15 +16,46 @@ void main() {
         events: events,
         layers: const [paintLayer],
         primaryLayerId: 7,
+        waitForActiveAutosave: () async => events.add('wait_for_autosave'),
         pendingEdit: pendingEdit.future,
       );
 
       final begin = coordinator.begin();
       await Future<void>.delayed(Duration.zero);
-      expect(events, ['hold_begin', 'persist_size', 'wait_for_brush_edit']);
+      expect(events, [
+        'hold_begin',
+        'wait_for_autosave',
+        'persist_size',
+        'wait_for_brush_edit',
+      ]);
 
       pendingEdit.complete();
       expect(await begin, isTrue);
+      expect(events.last, 'begin:12:7');
+    },
+  );
+
+  test(
+    'waits for an in-flight autosave before beginning the Rust stroke',
+    () async {
+      final events = <String>[];
+      final save = Completer<void>();
+      final coordinator = _coordinator(
+        events: events,
+        layers: const [paintLayer],
+        primaryLayerId: 7,
+        waitForActiveAutosave: () {
+          events.add('wait_for_autosave');
+          return save.future;
+        },
+      );
+
+      final start = coordinator.begin();
+      await Future<void>.delayed(Duration.zero);
+      expect(events, ['hold_begin', 'wait_for_autosave']);
+
+      save.complete();
+      expect(await start, isTrue);
       expect(events.last, 'begin:12:7');
     },
   );
@@ -57,6 +88,7 @@ void main() {
       expect(reportedLock, isFalse);
       expect(events, [
         'hold_begin',
+        'wait_for_autosave',
         'persist_size',
         'hold_finish:invalid_layer_target',
         'reject:null',
@@ -203,6 +235,7 @@ CanvasStrokeStartCoordinator _coordinator({
   required int? primaryLayerId,
   bool visible = true,
   Future<void>? pendingEdit,
+  Future<void> Function()? waitForActiveAutosave,
   void Function(
     LayerView? layer, {
     required bool effectivelyVisible,
@@ -213,6 +246,8 @@ CanvasStrokeStartCoordinator _coordinator({
 }) => CanvasStrokeStartCoordinator(
   CanvasStrokeStartHost(
     beginAutosaveHold: () => events.add('hold_begin'),
+    waitForActiveAutosave:
+        waitForActiveAutosave ?? () async => events.add('wait_for_autosave'),
     finishAutosaveHold:
         ({required reason}) => events.add('hold_finish:$reason'),
     persistPendingQuickSize: () => events.add('persist_size'),

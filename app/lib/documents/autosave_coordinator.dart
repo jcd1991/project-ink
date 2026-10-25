@@ -103,6 +103,22 @@ class AutosaveCoordinator {
     _notify();
   }
 
+  /// Wait for a checkpoint that had already started before an edit began.
+  ///
+  /// Beginning a continuous edit cancels pending timers, but cannot interrupt
+  /// `saveAs` once it has entered Rust. A new stroke must wait for that save to
+  /// release the document bridge lock before sending its first packet. Save
+  /// failures remain dirty and retryable; they must not prevent drawing.
+  Future<void> waitForActiveSave() async {
+    final active = _activeSave;
+    if (active == null) return;
+    try {
+      await active;
+    } catch (_) {
+      // The failed checkpoint remains dirty and retryable. Drawing can proceed.
+    }
+  }
+
   /// Save immediately, waiting for any save already in flight first.
   Future<void> flush() async {
     if (_disposed) return;

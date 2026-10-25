@@ -5,6 +5,7 @@ import '../tools/brush_library.dart';
 class CanvasStrokeStartHost {
   const CanvasStrokeStartHost({
     required this.beginAutosaveHold,
+    required this.waitForActiveAutosave,
     required this.finishAutosaveHold,
     required this.persistPendingQuickSize,
     required this.activeBrushId,
@@ -20,6 +21,7 @@ class CanvasStrokeStartHost {
   });
 
   final void Function() beginAutosaveHold;
+  final Future<void> Function() waitForActiveAutosave;
   final void Function({required String reason}) finishAutosaveHold;
   final void Function() persistPendingQuickSize;
   final int Function() activeBrushId;
@@ -49,6 +51,7 @@ class CanvasStrokeStartCoordinator {
 
   Future<bool> begin() async {
     host.beginAutosaveHold();
+    await host.waitForActiveAutosave();
     host.persistPendingQuickSize();
     final brushId = host.activeBrushId();
     final pendingBrushEdit = host.pendingBrushEditForBrush(brushId);

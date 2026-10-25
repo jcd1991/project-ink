@@ -184,6 +184,35 @@ void main() {
   });
 
   test(
+    'stroke gate waits for an in-flight save without propagating failure',
+    () async {
+      final engine = _DelayedEngine();
+      final autosave = AutosaveCoordinator(
+        engine: engine,
+        path: '/tmp/stroke-gate.inkproj',
+        debounce: Duration.zero,
+      );
+
+      autosave.markDirty();
+      await Future<void>.delayed(Duration.zero);
+      expect(autosave.isSaving, isTrue);
+      autosave.beginContinuousEdit();
+
+      var resumed = false;
+      final wait = autosave.waitForActiveSave().then((_) => resumed = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(resumed, isFalse);
+
+      engine.completeSave();
+      await wait;
+      expect(resumed, isTrue);
+      expect(autosave.autosaveDeferred, isTrue);
+      autosave.endContinuousEdit();
+      await autosave.dispose(flush: false);
+    },
+  );
+
+  test(
     'discard waits for an in-flight recovery write before returning',
     () async {
       final engine = _DelayedEngine();

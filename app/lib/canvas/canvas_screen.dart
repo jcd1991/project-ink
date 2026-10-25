@@ -1069,6 +1069,9 @@ class _CanvasScreenState extends State<CanvasScreen>
   _strokeStartCoordinator = CanvasStrokeStartCoordinator(
     CanvasStrokeStartHost(
       beginAutosaveHold: _beginStrokeAutosaveHold,
+      waitForActiveAutosave: () async {
+        await widget.autosave?.waitForActiveSave();
+      },
       finishAutosaveHold: _finishStrokeAutosaveHold,
       persistPendingQuickSize: _brushActions.persistPendingQuickSize,
       activeBrushId: () => _activeBrushId,
