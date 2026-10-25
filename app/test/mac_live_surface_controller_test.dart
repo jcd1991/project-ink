@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
@@ -156,6 +157,37 @@ void main() {
     expect(rendered.getUint32(4, Endian.little), 2);
     await controller.dispose();
   });
+
+  test('coalesces pump requests while a native drain is in flight', () async {
+    final drainStarted = Completer<void>();
+    final blockedDrain = Completer<Uint8List>();
+    engine.drainStarted = drainStarted;
+    engine.blockedDrain = blockedDrain;
+    final controller = MacLiveSurfaceController(engine: engine);
+    controller.synchronizeViewport(
+      viewportSize: const Size(100, 100),
+      devicePixelRatio: 1,
+      pan: Offset.zero,
+      scale: 1,
+      rotation: 0,
+      mirrored: false,
+      documentWidth: 100,
+      documentHeight: 100,
+    );
+    await controller.pendingWork;
+
+    controller.pump();
+    await drainStarted.future;
+    for (var index = 0; index < 8; index++) {
+      controller.pump();
+    }
+    expect(engine.drainCalls, 1);
+
+    blockedDrain.complete(_emptyDabPacket());
+    await controller.pendingWork;
+    expect(engine.drainCalls, 2);
+    await controller.dispose();
+  });
 }
 
 Uint8List _oneDabPacket({required BigInt strokeId, required int sequence}) {
@@ -204,6 +236,9 @@ class _FakeLiveEngine implements LiveRenderEngineApi {
   final List<Uint8List> renderedPackets = <Uint8List>[];
   final List<(BigInt, int)> acknowledgements = <(BigInt, int)>[];
   int disposedSurfaces = 0;
+  Completer<void>? drainStarted;
+  Completer<Uint8List>? blockedDrain;
+  int drainCalls = 0;
 
   @override
   Future<rust.LiveSurfaceHandle> createLiveSurface({
@@ -239,7 +274,15 @@ class _FakeLiveEngine implements LiveRenderEngineApi {
   }
 
   @override
-  Future<Uint8List> drainLiveDabs({int limit = 2048}) async => dabPacket;
+  Future<Uint8List> drainLiveDabs({int limit = 2048}) async {
+    drainCalls++;
+    final pending = blockedDrain;
+    if (drainCalls == 1 && pending != null) {
+      drainStarted?.complete();
+      return pending.future;
+    }
+    return dabPacket;
+  }
 
   @override
   Future<int> drainLiveDabOverflowCount() async => 0;
@@ -275,6 +318,9 @@ class _FakeLiveEngine implements LiveRenderEngineApi {
     disposedSurfaces++;
   }
 }
+
+Uint8List _emptyDabPacket() =>
+    Uint8List.fromList(<int>[3, 0, 0, 0, 0, 0, 0, 0]);
 
 class _FakeSurface implements rust.LiveSurfaceHandle {
   @override

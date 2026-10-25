@@ -130,6 +130,19 @@ of a raster callback; `requiresUnregisterCallback` is false on macOS.
 Once the published CPU frame covers all retained macOS dabs, the texture is
 hidden immediately, before the coalesced GPU acknowledgement completes. An
 empty cleanup frame must not mark that texture visible again.
+The macOS dab pump is single-flight: timer ticks during a drain set one
+pending-pump bit and cannot enqueue more drain tasks behind the active render.
+CPU tile bytes are already premultiplied BGRA, so Flutter decodes them directly
+without a per-pixel Dart unpremultiplication pass.
+Composite tiles in one immutable snapshot are recomposed concurrently with a
+bounded worker pool, leaving one available core where possible and preserving
+the requested tile order.
+When a macOS Metal surface is available, the Flutter path preview is hidden
+and its rendered stroke is the sole live line. If Metal is unavailable, the
+Flutter preview remains the fallback. Periodic CPU tile reads are skipped
+while a stroke is active, then the committed Rust composite replaces the Metal
+line through the immediate handoff after completion. This avoids duplicate
+lines and repeated full-tile recomposition while pointer input is arriving.
 
 Flutter mouse/touch/stylus capture ends at the visible viewport boundary when
 the document extends beyond the window. The last accepted input is committed

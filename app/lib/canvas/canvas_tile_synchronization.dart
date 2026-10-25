@@ -83,6 +83,7 @@ class CanvasTileSynchronization {
     required this.previewSynchronization,
     required this.strokePreviewActions,
     required this.effects,
+    this.shouldSkipActiveStrokePolling = _neverSkipActiveStrokePolling,
     CanvasCompositeTileSnapshotReader snapshotReader =
         const CanvasCompositeTileSnapshotReader(),
   }) : _snapshotReader = snapshotReader;
@@ -92,6 +93,7 @@ class CanvasTileSynchronization {
   final CanvasPreviewSynchronization previewSynchronization;
   final CanvasTilePreviewActions strokePreviewActions;
   final CanvasTileSynchronizationEffects effects;
+  final bool Function() shouldSkipActiveStrokePolling;
   final CanvasCompositeTileSnapshotReader _snapshotReader;
   final TileCache tileBytes = TileCache();
   TileImageCache tileImages = TileImageCache();
@@ -117,7 +119,10 @@ class CanvasTileSynchronization {
   /// polling only catches renderer work that completes asynchronously.
   void startPolling({required Duration interval}) {
     if (host.disposed || _pollTimer != null) return;
-    _pollTimer = Timer.periodic(interval, (_) => unawaited(refreshTiles()));
+    _pollTimer = Timer.periodic(interval, (_) {
+      if (host.strokeActive && shouldSkipActiveStrokePolling()) return;
+      unawaited(refreshTiles());
+    });
   }
 
   /// Stops refresh polling when the canvas route releases this owner.
@@ -716,3 +721,5 @@ class CanvasTileSynchronization {
     });
   }
 }
+
+bool _neverSkipActiveStrokePolling() => false;

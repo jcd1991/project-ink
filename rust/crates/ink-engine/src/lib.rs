@@ -1806,19 +1806,52 @@ impl CompositeTileReadSnapshot {
     /// Composite the requested tiles from the captured revision.
     pub fn read_tiles(&self, coordinates: &[TileCoord]) -> Result<Vec<Vec<u8>>, EngineError> {
         let plan = Document::prepare_composite_layer_plan(&self.layers)?;
-        coordinates
-            .iter()
-            .copied()
-            .map(|coordinate| {
-                Document::composite_tile_from_layers(
-                    self.width_px,
-                    self.height_px,
-                    self.background,
-                    &plan,
-                    coordinate,
-                )
-            })
-            .collect()
+        let compose = |coordinate| {
+            Document::composite_tile_from_layers(
+                self.width_px,
+                self.height_px,
+                self.background,
+                &plan,
+                coordinate,
+            )
+        };
+        let available_workers =
+            thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let worker_count = available_workers
+            .saturating_sub(1)
+            .clamp(1, 4)
+            .min(coordinates.len());
+        if worker_count < 2 {
+            return coordinates.iter().copied().map(compose).collect();
+        }
+
+        // Tile composition is CPU-heavy and each tile is independent once the
+        // immutable layer plan has been prepared. Bound the worker count so a
+        // large viewport handoff cannot occupy every core while input resumes.
+        let chunk_size = coordinates.len().div_ceil(worker_count);
+        thread::scope(|scope| {
+            let handles = coordinates
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    let compose = &compose;
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .copied()
+                            .map(compose)
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut tiles = Vec::with_capacity(coordinates.len());
+            for handle in handles {
+                let mut chunk = handle.join().map_err(|_| {
+                    EngineError::WorkerUnavailable("composite tile reader worker panicked".into())
+                })??;
+                tiles.append(&mut chunk);
+            }
+            Ok(tiles)
+        })
     }
 }
 

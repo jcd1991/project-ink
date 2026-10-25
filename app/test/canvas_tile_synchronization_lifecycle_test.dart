@@ -10,6 +10,8 @@ import 'package:project_ink/canvas/canvas_tile_synchronization.dart';
 import 'package:project_ink/canvas/live_stroke_coordinator.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('tile synchronization snapshots copy visible layer state', () {
     final visibleLayerIds = <int>[3, 8];
     final snapshot = CanvasTileSynchronizationSnapshot(
@@ -46,6 +48,24 @@ void main() {
     final readsAfterDispose = host.disposedReads;
     await Future<void>.delayed(const Duration(milliseconds: 8));
     expect(host.disposedReads, readsAfterDispose);
+    synchronization.previewSynchronization.dispose();
+  });
+
+  test('active strokes can defer CPU tile polling until completion', () async {
+    final host = _SessionHost(InMemoryEngineApi())..isStrokeActive = true;
+    final synchronization = _createSynchronization(
+      host,
+      shouldSkipActiveStrokePolling: () => true,
+    );
+
+    synchronization.startPolling(interval: const Duration(milliseconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(host.captureSessionCount, 0);
+
+    host.isStrokeActive = false;
+    await Future<void>.delayed(const Duration(milliseconds: 8));
+    expect(host.captureSessionCount, greaterThan(0));
+    synchronization.dispose();
     synchronization.previewSynchronization.dispose();
   });
 
@@ -95,13 +115,15 @@ void main() {
 }
 
 CanvasTileSynchronization _createSynchronization(
-  CanvasTileSynchronizationHost host,
-) {
+  CanvasTileSynchronizationHost host, {
+  bool Function() shouldSkipActiveStrokePolling = _neverSkipActiveStrokePolling,
+}) {
   return CanvasTileSynchronization(
     host,
     diagnostics: CanvasDiagnosticRecorder.instance,
     previewSynchronization: CanvasPreviewSynchronization(),
     strokePreviewActions: _TilePreviewActions(),
+    shouldSkipActiveStrokePolling: shouldSkipActiveStrokePolling,
     effects: CanvasTileSynchronizationEffects(
       publishCanvasState: () {},
       markVisibleUpdate:
@@ -115,6 +137,8 @@ CanvasTileSynchronization _createSynchronization(
     ),
   );
 }
+
+bool _neverSkipActiveStrokePolling() => false;
 
 class _TilePreviewActions implements CanvasTilePreviewActions {
   @override
@@ -136,6 +160,12 @@ class _TilePreviewActions implements CanvasTilePreviewActions {
 class _TileHost implements CanvasTileSynchronizationHost {
   bool isDisposed = false;
   int disposedReads = 0;
+
+  @override
+  bool get strokeActive => false;
+
+  @override
+  bool get isMounted => true;
 
   @override
   bool get disposed {
@@ -171,11 +201,19 @@ class _SessionHost extends _TileHost {
   _SessionHost(this.engine);
   final EngineApi engine;
   int generation = 0;
+  int captureSessionCount = 0;
+  bool isStrokeActive = false;
   @override
-  bool get strokeActive => false;
+  bool get strokeActive => isStrokeActive;
   @override
-  CanvasTileSynchronizationSession captureSession() =>
-      CanvasTileSynchronizationSession(engine: engine, generation: generation);
+  CanvasTileSynchronizationSession captureSession() {
+    captureSessionCount++;
+    return CanvasTileSynchronizationSession(
+      engine: engine,
+      generation: generation,
+    );
+  }
+
   @override
   bool isSessionCurrent(CanvasTileSynchronizationSession session) =>
       !isDisposed &&

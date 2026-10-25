@@ -462,57 +462,67 @@ class MacLiveSurfaceController implements LivePreviewController {
   }
 
   Future<void> _drainAndRender() async {
-    _pumpQueued = false;
     final surface = _surface;
-    if (surface == null) return;
+    if (surface == null) {
+      _pumpQueued = false;
+      return;
+    }
     var remainingFullBatches = 4;
     var renderedAny = false;
-    do {
-      _pumpRequested = false;
-      final packet = await _engine.drainLiveDabs(limit: _maxRecordsPerPacket);
-      final records = _validateAndReadDabs(packet);
-      if (records.isNotEmpty) {
-        if (_pendingDabs.length + records.length > _maxPendingDabs) {
-          throw StateError('Live preview dab retention reached its bound.');
+    try {
+      do {
+        _pumpRequested = false;
+        final packet = await _engine.drainLiveDabs(limit: _maxRecordsPerPacket);
+        final records = _validateAndReadDabs(packet);
+        if (records.isNotEmpty) {
+          if (_pendingDabs.length + records.length > _maxPendingDabs) {
+            throw StateError('Live preview dab retention reached its bound.');
+          }
+          await _engine.renderLiveDabPacket(surface, packet);
+          onDiagnosticEvent?.call('canvas.gpu_dab_batch', {
+            'dabCount': records.length,
+            'packetBytes': packet.length,
+            'strokeIds':
+                records
+                    .map((record) => record.key.strokeId.toString())
+                    .toSet()
+                    .length,
+            'packetBase64': base64Encode(packet),
+          });
+          for (final record in records) {
+            _pendingDabs[record.key] = record.bytes;
+          }
+          renderedAny = true;
         }
-        await _engine.renderLiveDabPacket(surface, packet);
-        onDiagnosticEvent?.call('canvas.gpu_dab_batch', {
-          'dabCount': records.length,
-          'packetBytes': packet.length,
-          'strokeIds':
-              records
-                  .map((record) => record.key.strokeId.toString())
-                  .toSet()
-                  .length,
-          'packetBase64': base64Encode(packet),
-        });
-        for (final record in records) {
-          _pendingDabs[record.key] = record.bytes;
+        final overflow = await _engine.drainLiveDabOverflowCount();
+        if (overflow != 0) {
+          // The CPU document has already accepted these confirmed samples, but
+          // the GPU overlay is now incomplete. Stop showing that partial overlay
+          // and let committed CPU tiles plus the Flutter tail preview carry the
+          // rest of the stroke. Keeping a stale texture visible here can make a
+          // correct CPU stroke appear to break or change shape.
+          debugPrint(
+            'Project Ink GPU preview fell behind by $overflow dabs; '
+            'CPU commit remains authoritative.',
+          );
+          onDiagnosticEvent?.call('gpu.dab_overflow', {'dabs': overflow});
+          await _fallbackToCpuPreview(overflow);
+          return;
         }
-        renderedAny = true;
-      }
-      final overflow = await _engine.drainLiveDabOverflowCount();
-      if (overflow != 0) {
-        // The CPU document has already accepted these confirmed samples, but
-        // the GPU overlay is now incomplete. Stop showing that partial overlay
-        // and let committed CPU tiles plus the Flutter tail preview carry the
-        // rest of the stroke. Keeping a stale texture visible here can make a
-        // correct CPU stroke appear to break or change shape.
-        debugPrint(
-          'Project Ink GPU preview fell behind by $overflow dabs; '
-          'CPU commit remains authoritative.',
-        );
-        onDiagnosticEvent?.call('gpu.dab_overflow', {'dabs': overflow});
-        await _fallbackToCpuPreview(overflow);
-        return;
-      }
-      if (records.length == _maxRecordsPerPacket) {
-        remainingFullBatches--;
-        _pumpRequested = remainingFullBatches > 0;
-      }
-    } while (_pumpRequested && !_disposed && !_failed);
-    if (renderedAny) await _publishFrame(measureInputLatency: true);
-    if (_pumpRequested && !_disposed && !_failed) pump();
+        if (records.length == _maxRecordsPerPacket) {
+          remainingFullBatches--;
+          _pumpRequested = remainingFullBatches > 0;
+        }
+      } while (_pumpRequested && !_disposed && !_failed);
+      if (renderedAny) await _publishFrame(measureInputLatency: true);
+    } finally {
+      // Keep _pumpQueued true for the entire drain/render operation. Clearing
+      // it at entry let each 16 ms timer tick enqueue another full task while
+      // Rust was still processing the current one, building a stale work queue
+      // and delaying both texture frames and acknowledgements.
+      _pumpQueued = false;
+      if (_pumpRequested && !_disposed && !_failed) pump();
+    }
   }
 
   Future<void> _replayPendingDabs() async {

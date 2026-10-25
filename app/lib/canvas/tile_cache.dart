@@ -176,7 +176,11 @@ Future<ui.Image> _decodeBgraTile(Uint8List bytes) {
   }
   final completer = Completer<ui.Image>();
   ui.decodeImageFromPixels(
-    _unpremultiplyBgra(bytes),
+    // Rust's composite-tile contract is already premultiplied BGRA, which is
+    // exactly the input expected by PixelFormat.bgra8888. Converting each
+    // channel back to straight alpha adds a full Dart pixel loop and then asks
+    // Flutter to interpret those straight channels as premultiplied.
+    bytes,
     256,
     256,
     ui.PixelFormat.bgra8888,
@@ -184,18 +188,4 @@ Future<ui.Image> _decodeBgraTile(Uint8List bytes) {
     rowBytes: 256 * 4,
   );
   return completer.future;
-}
-
-Uint8List _unpremultiplyBgra(Uint8List bytes) {
-  final result = Uint8List.fromList(bytes);
-  for (var offset = 0; offset + 3 < result.length; offset += 4) {
-    final alpha = result[offset + 3];
-    if (alpha == 0 || alpha == 255) continue;
-    for (var channel = 0; channel < 3; channel++) {
-      result[offset + channel] = ((result[offset + channel] * 255) / alpha)
-          .round()
-          .clamp(0, 255);
-    }
-  }
-  return result;
 }

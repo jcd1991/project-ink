@@ -356,6 +356,10 @@ class _CanvasScreenState extends State<CanvasScreen>
         diagnostics: _canvasDiagnostics,
         previewSynchronization: _previewSynchronization,
         strokePreviewActions: _strokePreviewActions,
+        shouldSkipActiveStrokePolling: () {
+          final platform = widget.targetPlatform ?? defaultTargetPlatform;
+          return platform == TargetPlatform.macOS;
+        },
         effects: CanvasTileSynchronizationEffects(
           publishCanvasState: () => setState(() {}),
           markVisibleUpdate: _markVisibleTileUpdate,
@@ -2601,6 +2605,11 @@ class _CanvasScreenState extends State<CanvasScreen>
       preferences.customWorkspaces,
     );
     final platform = widget.targetPlatform ?? defaultTargetPlatform;
+    final livePreviewSurface = _livePreviewSurface;
+    final nativeMacPreviewAvailable =
+        platform == TargetPlatform.macOS &&
+        livePreviewSurface is MacLiveSurfaceController &&
+        livePreviewSurface.isAvailable;
     final workspaceFrame = resolveCanvasWorkspaceFrame(
       platform: platform,
       viewportWidth: MediaQuery.sizeOf(context).width,
@@ -2683,7 +2692,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                   hoverPosition: _pencilHoverPosition,
                   livePreviewSurface:
                       _activePaintTargetIsMask ? null : _livePreviewSurface,
-                  showStrokePreview: !_activePaintTargetIsMask,
+                  showStrokePreview:
+                      !_activePaintTargetIsMask && !nativeMacPreviewAvailable,
                   isIpad: platform == TargetPlatform.iOS,
                   onPointerEvent: _handlePointer,
                   onScaleStart: (details) {
