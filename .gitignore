@@ -2,6 +2,11 @@
 /target/
 
 # Local build products and diagnostic captures
+.env
+.env.*
+!.env.example
+*.inkproj/
+*.inkproj.bak/
 /build/
 /app/macos/build/
 /app/ios/build/

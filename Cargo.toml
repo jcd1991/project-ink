@@ -24,7 +24,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
-repository = "https://github.com/project-ink/project-ink"
+repository = "https://github.com/jcd1991/project-ink"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
