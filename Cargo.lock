@@ -1747,7 +1747,6 @@ name = "photocraft-psd"
 version = "0.15.1"
 dependencies = [
  "flate2",
- "photocraft-psd",
  "proptest",
  "serde",
  "thiserror 2.0.21",

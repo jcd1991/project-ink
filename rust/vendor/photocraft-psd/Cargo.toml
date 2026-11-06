@@ -22,7 +22,11 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
-photocraft-psd = { path = ".", features = ["testgen"] }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["testgen"]
 
 [lints.rust]
 unsafe_code = "forbid"

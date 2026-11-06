@@ -12,4 +12,8 @@ tagged blocks per section; these checks run before the corresponding vectors
 grow. Allocation reservations for the resource and tagged-block lists are
 fallible. The Ink builder retains group protection flags from the previous
 vendored API and writes them as Photoshop protection blocks for PSD export.
+The integration target requires `testgen` explicitly instead of upstream's
+self dev-dependency, preserving the standalone-parser architecture boundary.
+Upstream style lints are scoped to the vendored package; production code keeps
+its explicit panic/unwrap denials, while test assertions may unwrap fixtures.
 Further source changes must be recorded here.

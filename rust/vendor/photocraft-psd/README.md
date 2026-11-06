@@ -133,7 +133,7 @@ allocations for padded channels return an error on failure.
 
 ## Testing
 
-`cargo test -p photocraft-psd` runs the unit tests, integration tests and proptests:
+`cargo test -p photocraft-psd --all-features` runs the unit tests, integration tests and proptests:
 
 * Byte stability and model round-trips for every generated case: all depths, color modes and compressions, PSD and PSB.
 * PackBits edge cases.
@@ -147,7 +147,9 @@ allocations for padded channels return an error on failure.
 
 Project Ink-specific parse caps are covered by unit tests: at most 1,024 layers, 4,096 image resources, and 32 tagged blocks per section.
 
-A `cargo-fuzz` skeleton lives in `fuzz/`. It is its own workspace and is excluded from photocraft's. Run it with `cargo +nightly fuzz run parse` (or `descriptor`) from `crates/psd`.
+Upstream's external corpus and `cargo-fuzz` harness are not included in this
+vendored copy. The integration suite uses generated fixtures and the explicit
+`testgen` feature, keeping the parser free of a dependency on itself.
 
 ## Spec ambiguities and decisions
 
